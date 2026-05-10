@@ -18,6 +18,7 @@ final class VimSession {
 
     private var mode: Mode? = nil
     private var paletteBuffer: String? = nil   // nil = palette closed
+    private var sticky: Bool = false           // toggled by trigger key in TAP
 
     var isActive: Bool { mode != nil }
 
@@ -33,6 +34,7 @@ final class VimSession {
         }
         mode = .tap(h)
         paletteBuffer = nil
+        sticky = false
         renderModeHUD()
         print("[mouseless] enter TAP mode")
     }
@@ -43,6 +45,7 @@ final class VimSession {
         }
         mode = nil
         paletteBuffer = nil
+        sticky = false
         HUD.shared.hide()
         print("[mouseless] exit")
     }
@@ -84,11 +87,46 @@ final class VimSession {
     // MARK: - TAP mode
 
     private func handleTap(hint: HintMode, keyCode: Int, flags: CGEventFlags) -> Bool {
+        // Bare backtick (no modifiers) toggles sticky. While sticky is on,
+        // each click re-scans hints instead of exiting.
+        let modMask: CGEventFlags = [.maskShift, .maskControl,
+                                     .maskCommand, .maskAlternate]
+        if keyCode == KeyCode.grave && flags.intersection(modMask).isEmpty {
+            sticky.toggle()
+            renderModeHUD()
+            return true
+        }
+
         guard let ch = Self.hintChar(for: keyCode) else { return true }
-        switch hint.handle(char: ch) {
+
+        // Modifier on the final hint letter chooses the click action.
+        let action: ClickAction
+        if flags.contains(.maskShift) {
+            action = .right
+        } else if flags.contains(.maskAlternate) {
+            action = .double
+        } else {
+            action = .left
+        }
+
+        switch hint.handle(char: ch, action: action) {
         case .pending:
             break
-        case .committed, .cancelled:
+        case .committed:
+            if sticky {
+                // Re-scan and stay in TAP for the next click.
+                hint.deactivate()
+                let nextHint = HintMode()
+                if nextHint.activate() {
+                    mode = .tap(nextHint)
+                    renderModeHUD()
+                } else {
+                    exit()
+                }
+            } else {
+                exit()
+            }
+        case .cancelled:
             exit()
         }
         return true
@@ -156,7 +194,7 @@ final class VimSession {
         guard let m = mode else { return }
         let label: String
         switch m {
-        case .tap: label = "TAP"
+        case .tap: label = sticky ? "TAP · sticky" : "TAP"
         }
         HUD.shared.show(label + suffix)
     }

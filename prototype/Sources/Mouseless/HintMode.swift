@@ -13,6 +13,12 @@ enum HintResult {
     case cancelled
 }
 
+enum ClickAction {
+    case left      // bare hint letter
+    case right     // Shift + hint letter
+    case double    // Option + hint letter
+}
+
 @MainActor
 final class HintMode {
     private var targets: [HintTarget] = []
@@ -86,7 +92,7 @@ final class HintMode {
         HintOverlay.shared.hide()
     }
 
-    func handle(char: Character) -> HintResult {
+    func handle(char: Character, action: ClickAction = .left) -> HintResult {
         let next = typed + String(char)
         let matches = targets.filter { $0.label.hasPrefix(next) }
         if matches.isEmpty {
@@ -94,7 +100,7 @@ final class HintMode {
             return .cancelled
         }
         if matches.count == 1 && matches[0].label == next {
-            commit(target: matches[0])
+            commit(target: matches[0], action: action)
             deactivate()
             return .committed
         }
@@ -103,12 +109,26 @@ final class HintMode {
         return .pending
     }
 
-    private func commit(target: HintTarget) {
-        let result = AXUIElementPerformAction(target.element, "AXPress" as CFString)
-        if result != .success {
-            print("[mouseless] hint: AXPress failed (\(result.rawValue)) — falling back to synthetic click")
-            let center = CGPoint(x: target.rect.midX, y: target.rect.midY)
-            Self.synthesizeClick(at: center)
+    private func commit(target: HintTarget, action: ClickAction) {
+        let center = CGPoint(x: target.rect.midX, y: target.rect.midY)
+        switch action {
+        case .left:
+            // Prefer AXPress (semantic click) — works even if the element
+            // is occluded or off-screen. Fall back to a synthetic click.
+            let result = AXUIElementPerformAction(target.element, "AXPress" as CFString)
+            if result != .success {
+                Self.synthesizeClick(at: center, button: .left, count: 1)
+            }
+        case .right:
+            // AXShowMenu opens the right-click menu. Some apps don't expose
+            // it on every element, so fall back to a synthetic right click.
+            let result = AXUIElementPerformAction(target.element, "AXShowMenu" as CFString)
+            if result != .success {
+                Self.synthesizeClick(at: center, button: .right, count: 1)
+            }
+        case .double:
+            // No standard AX action for double-click, always synthesize.
+            Self.synthesizeClick(at: center, button: .left, count: 2)
         }
     }
 
@@ -356,17 +376,28 @@ final class HintMode {
 
     // MARK: - Click fallback
 
-    private static func synthesizeClick(at point: CGPoint) {
+    /// Synthesize one or more mouse clicks at `point`. `count` lets us send
+    /// double-clicks (the OS recognizes the click via the click-state field
+    /// being 1, then 2 for the second pair).
+    private static func synthesizeClick(at point: CGPoint,
+                                        button: CGMouseButton,
+                                        count: Int) {
         let src = CGEventSource(stateID: .privateState)
-        guard
-            let down = CGEvent(mouseEventSource: src, mouseType: .leftMouseDown,
-                               mouseCursorPosition: point, mouseButton: .left),
-            let up = CGEvent(mouseEventSource: src, mouseType: .leftMouseUp,
-                             mouseCursorPosition: point, mouseButton: .left)
-        else { return }
-        for ev in [down, up] {
-            ev.setIntegerValueField(.eventSourceUserData, value: HotkeyTap.syntheticMarker)
-            ev.post(tap: .cghidEventTap)
+        let downType: CGEventType = (button == .left) ? .leftMouseDown : .rightMouseDown
+        let upType: CGEventType = (button == .left) ? .leftMouseUp : .rightMouseUp
+
+        for clickIdx in 1...count {
+            guard
+                let down = CGEvent(mouseEventSource: src, mouseType: downType,
+                                   mouseCursorPosition: point, mouseButton: button),
+                let up = CGEvent(mouseEventSource: src, mouseType: upType,
+                                 mouseCursorPosition: point, mouseButton: button)
+            else { return }
+            for ev in [down, up] {
+                ev.setIntegerValueField(.mouseEventClickState, value: Int64(clickIdx))
+                ev.setIntegerValueField(.eventSourceUserData, value: HotkeyTap.syntheticMarker)
+                ev.post(tap: .cghidEventTap)
+            }
         }
     }
 }
