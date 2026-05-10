@@ -376,7 +376,28 @@ final class HintMode {
         return out
     }
 
-    // MARK: - Click fallback
+    // MARK: - Synthesized events
+
+    /// Synthesize an Esc keystroke. Used to dismiss any open menu / popover
+    /// without affecting Mouseless's own state — the syntheticMarker on
+    /// the event causes our tap (HotkeyTap.swift:60) to pass it through
+    /// to the OS instead of treating it as a user keypress.
+    static func synthesizeEscape() {
+        let src = CGEventSource(stateID: .privateState)
+        guard
+            let down = CGEvent(keyboardEventSource: src,
+                               virtualKey: CGKeyCode(KeyCode.escape),
+                               keyDown: true),
+            let up = CGEvent(keyboardEventSource: src,
+                             virtualKey: CGKeyCode(KeyCode.escape),
+                             keyDown: false)
+        else { return }
+        for ev in [down, up] {
+            ev.setIntegerValueField(.eventSourceUserData,
+                                    value: HotkeyTap.syntheticMarker)
+            ev.post(tap: .cghidEventTap)
+        }
+    }
 
     /// Synthesize one or more mouse clicks at `point`. `count` lets us send
     /// double-clicks (the OS recognizes the click via the click-state field

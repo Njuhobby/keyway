@@ -97,6 +97,28 @@ final class VimSession {
             return true
         }
 
+        // Bare `x` — dismiss any open menu/popover by synth-Escing, then
+        // re-scan hints. Always re-scans (regardless of sticky) because
+        // `x` is a "redo / clear" gesture: user opened something they
+        // didn't want, wants to keep going. The 60ms delay lets the OS
+        // process the Esc and the AX tree settle before we collect again.
+        if keyCode == KeyCode.x && flags.intersection(modMask).isEmpty {
+            HintMode.synthesizeEscape()
+            hint.deactivate()
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(60))
+                guard self.isActive else { return }
+                let next = HintMode()
+                if next.activate() {
+                    self.mode = .tap(next)
+                    self.renderModeHUD()
+                } else {
+                    self.exit()
+                }
+            }
+            return true
+        }
+
         guard let ch = Self.hintChar(for: keyCode) else { return true }
 
         // Modifier on the final hint letter chooses the click action.
