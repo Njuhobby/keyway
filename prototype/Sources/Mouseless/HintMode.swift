@@ -74,7 +74,7 @@ final class HintMode {
         typed = ""
         isActiveFlag = true
         HintOverlay.shared.show(targets: targets, typed: "")
-        HUD.shared.show("VIM · HINT")
+        // HUD is owned by VimSession; we no longer touch it from here.
         print("[mouseless] hint: \(targets.count) targets (focused: \(collected.focused.count), dock: \(collected.dock.count), extras: \(collected.menuBarExtras.count))")
         return true
     }
