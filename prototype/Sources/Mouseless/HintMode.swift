@@ -5,6 +5,7 @@ struct HintTarget {
     let label: String
     let element: AXUIElement
     let rect: CGRect       // AX screen-space (top-left origin)
+    let role: String       // AXButton / AXMenuItem / AXDockItem / ...
 }
 
 enum HintResult {
@@ -66,14 +67,14 @@ final class HintMode {
         // Dock gets numeric labels (0, 1, 2, ...).
         let dockLabels = Self.generateNumericLabels(count: collected.dock.count)
         let dockTargets = zip(dockLabels, collected.dock).map { (label, c) in
-            HintTarget(label: label, element: c.element, rect: c.rect)
+            HintTarget(label: label, element: c.element, rect: c.rect, role: c.role)
         }
 
         // Focused app + menu bar extras share the alphabetic label space.
         let nonDockCandidates = collected.focused + collected.menuBarExtras
         let letterLabels = Self.generateLabels(count: nonDockCandidates.count)
         let nonDockTargets = zip(letterLabels, nonDockCandidates).map { (label, c) in
-            HintTarget(label: label, element: c.element, rect: c.rect)
+            HintTarget(label: label, element: c.element, rect: c.rect, role: c.role)
         }
 
         targets = dockTargets + nonDockTargets
@@ -137,6 +138,7 @@ final class HintMode {
     private struct ElementCandidate {
         let element: AXUIElement
         let rect: CGRect
+        let role: String
     }
 
     /// Result of one collection pass — split by source so we can label them
@@ -235,7 +237,7 @@ final class HintMode {
            rect.width >= 8, rect.height >= 8,   // skip invisible micro-elements
            hasMeaningfulLabel(element, role: role),
            onScreen(rect, screenSpan: screenSpan) {
-            out.append(ElementCandidate(element: element, rect: rect))
+            out.append(ElementCandidate(element: element, rect: rect, role: role))
         }
 
         var childrenRef: CFTypeRef?

@@ -33,7 +33,11 @@ final class HintOverlay {
                 backing: .buffered,
                 defer: false
             )
-            w.level = NSWindow.Level(rawValue: Int(CGShieldingWindowLevel()))
+            // .statusBar (25) sits above the main menu bar (24) and normal
+            // app windows (0), but BELOW dropdown / popup menus (.popUpMenu
+            // = 101). When a dropdown opens, it covers the hints just like
+            // it covers the app underneath — preserving natural z-order.
+            w.level = .statusBar
             w.isOpaque = false
             w.backgroundColor = .clear
             w.hasShadow = false
@@ -148,6 +152,53 @@ final class HintOverlayView: NSView {
 
                 fillRect = badgeRect
                 tail = p
+            } else if target.role == "AXMenuItem" {
+                // Dropdown menu items are tall narrow strips stacked
+                // vertically — a bubble below would collide with the next
+                // item. Place to the LEFT of the item with a right-pointing
+                // tail; fall back to RIGHT if left would clip the screen.
+                let tailH: CGFloat = 4
+                let tailW: CGFloat = 8
+                let leftRect = NSRect(
+                    x: viewX - tailH - labelW,
+                    y: viewY + r.size.height / 2 - labelH / 2,
+                    width: labelW,
+                    height: labelH
+                )
+                let rightRect = NSRect(
+                    x: viewX + r.size.width + tailH,
+                    y: viewY + r.size.height / 2 - labelH / 2,
+                    width: labelW,
+                    height: labelH
+                )
+
+                // Use `contains` (not `intersects`) so we only "place left"
+                // when the WHOLE badge fits on-screen. Partial overlap would
+                // clip the badge unreadably.
+                let viewBounds = self.bounds
+                let placeLeft = viewBounds.contains(leftRect)
+                let placeRight = !placeLeft && viewBounds.contains(rightRect)
+
+                let p = NSBezierPath()
+                if placeLeft {
+                    fillRect = leftRect
+                    // Tail extends RIGHT from badge's right edge.
+                    let baseX = fillRect.maxX
+                    p.move(to: NSPoint(x: baseX, y: fillRect.midY + tailW / 2))
+                    p.line(to: NSPoint(x: baseX + tailH, y: fillRect.midY))
+                    p.line(to: NSPoint(x: baseX, y: fillRect.midY - tailW / 2))
+                } else if placeRight {
+                    fillRect = rightRect
+                    // Tail extends LEFT from badge's left edge.
+                    let baseX = fillRect.minX
+                    p.move(to: NSPoint(x: baseX, y: fillRect.midY - tailW / 2))
+                    p.line(to: NSPoint(x: baseX - tailH, y: fillRect.midY))
+                    p.line(to: NSPoint(x: baseX, y: fillRect.midY + tailW / 2))
+                } else {
+                    continue
+                }
+                p.close()
+                tail = p
             } else {
                 // Non-Dock: speech-bubble below element, fall back to above
                 // if below would land off any screen.
@@ -166,10 +217,10 @@ final class HintOverlayView: NSView {
                     height: labelH
                 )
 
-                // "On screen" = on this view's bounds (this single screen).
+                // "Fits on screen" = badge is fully contained in this view.
                 let viewBounds = self.bounds
-                let belowOnScreen = viewBounds.intersects(belowRect)
-                let aboveOnScreen = viewBounds.intersects(aboveRect)
+                let belowOnScreen = viewBounds.contains(belowRect)
+                let aboveOnScreen = viewBounds.contains(aboveRect)
 
                 let tailPointsUp: Bool
                 if belowOnScreen {
