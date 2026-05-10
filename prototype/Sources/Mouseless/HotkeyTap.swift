@@ -67,8 +67,13 @@ final class HotkeyTap {
         let flags = event.flags
 
         if !session.isActive {
-            // Activation: Ctrl+;  (semicolon is keycode 41 on US ANSI)
-            if keyCode == KeyCode.semicolon && flags.contains(.maskControl) {
+            // Activation: bare ` (backtick) — no modifiers. Shift+` produces
+            // ~ and is allowed through. Cmd/Ctrl/Option+` also pass through
+            // so we don't break things like Cmd+` (window cycling). Will be
+            // remapped to Caps Lock once the user has that key available.
+            let modifierMask: CGEventFlags = [.maskShift, .maskControl,
+                                              .maskCommand, .maskAlternate]
+            if keyCode == KeyCode.grave && flags.intersection(modifierMask).isEmpty {
                 session.enter()
                 return nil
             }

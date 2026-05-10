@@ -25,7 +25,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.title = "M"
 
         let menu = NSMenu()
-        let header = NSMenuItem(title: "Mouseless prototype · ⌃; to enter vim", action: nil, keyEquivalent: "")
+        let header = NSMenuItem(title: "Mouseless prototype · ` to enter vim", action: nil, keyEquivalent: "")
         header.isEnabled = false
         menu.addItem(header)
         menu.addItem(.separator())
@@ -54,7 +54,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if newTap.start() {
             tap = newTap
             statusItem.button?.title = "M●"
-            print("[mouseless] running. Press ⌃; to enter vim mode.")
+            print("[mouseless] running. Press ` to enter vim mode.")
         } else {
             statusItem.button?.title = "M⚠"
         }

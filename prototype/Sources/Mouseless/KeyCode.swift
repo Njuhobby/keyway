@@ -40,6 +40,7 @@ enum KeyCode {
     static let tab = 48
     static let space = 49
     static let delete = 51
+    static let grave = 50         // ` (backtick) / ~ (with shift)
 
     static let arrowLeft = 123
     static let arrowRight = 124
