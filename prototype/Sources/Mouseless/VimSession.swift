@@ -56,6 +56,15 @@ final class VimSession {
     func handle(keyCode: Int, flags: CGEventFlags) -> Bool {
         guard let m = mode else { return false }
 
+        // Cmd / Ctrl held → system shortcut. Pass through so things like
+        // Cmd+Shift+4 (screenshot), Cmd+Space (Spotlight), Cmd+Tab, and
+        // Ctrl+Up (Mission Control) still work while Mouseless is active.
+        // Shift / Option are reserved for hint click-action modifiers
+        // (Shift = right-click, Option = double-click), so they stay.
+        if !flags.intersection([.maskCommand, .maskControl]).isEmpty {
+            return false
+        }
+
         // Palette open? It intercepts everything until closed.
         if let buffer = paletteBuffer {
             return handlePalette(buffer: buffer, keyCode: keyCode, flags: flags)
