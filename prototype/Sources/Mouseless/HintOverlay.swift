@@ -155,8 +155,16 @@ final class HintOverlayView: NSView {
             } else if target.role == "AXMenuItem" {
                 // Dropdown menu items are tall narrow strips stacked
                 // vertically — a bubble below would collide with the next
-                // item. Place to the LEFT of the item with a right-pointing
-                // tail; fall back to RIGHT if left would clip the screen.
+                // item. Default: place to the LEFT with a right-pointing
+                // tail; fall back to RIGHT if left clips off-screen.
+                //
+                // BUT in a cascade (parent menu open + submenu open), the
+                // LEFT side of a submenu item is the parent menu's window —
+                // which sits at `.popUpMenu` (101), above our `.statusBar`
+                // (25) overlay, and so visually occludes any label drawn
+                // there. Detect a sibling column of menu items strictly
+                // to our left / right (= a parent or child menu in a
+                // cascade) and place the label on the OPEN side instead.
                 let tailH: CGFloat = 4
                 let tailW: CGFloat = 8
                 let leftRect = NSRect(
@@ -172,12 +180,38 @@ final class HintOverlayView: NSView {
                     height: labelH
                 )
 
+                var hasLeftSiblingMenu = false
+                var hasRightSiblingMenu = false
+                for other in targets where other.role == "AXMenuItem" {
+                    if other.rect == r { continue }
+                    if other.rect.maxX <= r.origin.x { hasLeftSiblingMenu = true }
+                    if other.rect.minX >= r.origin.x + r.size.width { hasRightSiblingMenu = true }
+                }
+
                 // Use `contains` (not `intersects`) so we only "place left"
                 // when the WHOLE badge fits on-screen. Partial overlap would
                 // clip the badge unreadably.
                 let viewBounds = self.bounds
-                let placeLeft = viewBounds.contains(leftRect)
-                let placeRight = !placeLeft && viewBounds.contains(rightRect)
+                let leftFits = viewBounds.contains(leftRect)
+                let rightFits = viewBounds.contains(rightRect)
+
+                let placeLeft: Bool
+                let placeRight: Bool
+                if hasLeftSiblingMenu && !hasRightSiblingMenu {
+                    // Parent menu on the left → label goes RIGHT.
+                    placeRight = rightFits
+                    placeLeft = !placeRight && leftFits
+                } else if hasRightSiblingMenu && !hasLeftSiblingMenu {
+                    // Parent menu on the right (right-anchored status menus
+                    // cascade leftward) → label goes LEFT.
+                    placeLeft = leftFits
+                    placeRight = !placeLeft && rightFits
+                } else {
+                    // Standalone menu (or sandwiched between two siblings —
+                    // rare). Default: prefer LEFT, fall back to RIGHT.
+                    placeLeft = leftFits
+                    placeRight = !placeLeft && rightFits
+                }
 
                 let p = NSBezierPath()
                 if placeLeft {
