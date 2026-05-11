@@ -106,16 +106,26 @@ final class VimSession {
             return true
         }
 
-        // Bare `x` — dismiss any open menu/popover by synth-Escing, then
-        // re-scan hints. Always re-scans (regardless of sticky) because
-        // `x` is a "redo / clear" gesture: user opened something they
-        // didn't want, wants to keep going. The 60ms delay lets the OS
-        // process the Esc and the AX tree settle before we collect again.
+        // Bare `x` — "click on empty space" gesture. Activating Finder
+        // reproduces what physically clicking the desktop wallpaper does:
+        // the previously focused app loses focus, any open menu/popover
+        // closes, Finder becomes frontmost. No fake keystrokes, so we
+        // dodge Esc's app-specific side effects (vim normal mode, dialog
+        // cancel, terminal escape sequences, etc.). After the focus
+        // switch we rescan so hints reflect Finder's UI.
         if keyCode == KeyCode.x && flags.intersection(modMask).isEmpty {
-            HintMode.synthesizeEscape()
             hint.deactivate()
+            if let finder = NSRunningApplication.runningApplications(
+                    withBundleIdentifier: "com.apple.finder").first {
+                finder.activate(options: [])
+            }
+            // Activation is asynchronous — AX `AXFocusedApplication`
+            // still points at the previous app for a tick or two. Wait
+            // briefly so the rescan walks Finder, not what we just left.
+            // The Task also keeps the AX walk off the event-tap callback
+            // so CGEventTap doesn't trip its user-input timeout.
             Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(60))
+                try? await Task.sleep(for: .milliseconds(80))
                 guard self.isActive else { return }
                 let next = HintMode()
                 if next.activate() {
