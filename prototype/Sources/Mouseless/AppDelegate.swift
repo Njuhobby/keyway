@@ -11,6 +11,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if ensureAccessibility() {
             startTap()
+            // Warm the menu-extras PID cache in the background. The
+            // scan takes ~500ms; doing it now (well before the user's
+            // first trigger key press) keeps every subsequent TAP
+            // collect pass essentially free.
+            MenuExtraCache.shared.warmUp()
         } else {
             statusItem.button?.title = "M⚠"
             print("[mouseless] Accessibility not granted.")

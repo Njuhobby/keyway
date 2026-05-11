@@ -135,7 +135,11 @@ final class HintMode {
 
     // MARK: - AX collection
 
-    private struct ElementCandidate {
+    // `@unchecked Sendable` because `AXUIElement` is a CF type (thread-
+    // safe, refcounted), but Swift can't see that automatically. We
+    // need to pass collected candidates across the concurrent extras
+    // pass.
+    private struct ElementCandidate: @unchecked Sendable {
         let element: AXUIElement
         let rect: CGRect
         let role: String
@@ -155,9 +159,7 @@ final class HintMode {
         // 1. Focused app (the existing behavior).
         let t0 = Date()
         var focusedOut: [ElementCandidate] = []
-        var focusedPID: pid_t = 0
-        if let (focusedApp, pid) = focusedApplication() {
-            focusedPID = pid
+        if let (focusedApp, _) = focusedApplication() {
             walk(element: focusedApp, depth: 0, into: &focusedOut, screenSpan: screenSpan)
         }
         let t1 = Date()
@@ -169,13 +171,26 @@ final class HintMode {
         }
         let t2 = Date()
 
-        // 3. Menu bar extras — temporarily disabled to measure cost.
-        let extrasOut: [ElementCandidate] = []
+        // 3. Menu bar extras. The hard work — figuring out *which*
+        // PIDs actually own menu extras — is done out-of-band by
+        // `MenuExtraCache`: it scans every running app once at launch
+        // (in the background) and stays current via NSWorkspace
+        // launch/terminate notifications. Here we just iterate the
+        // ~5-10 PIDs the cache hands us and pull their current extras.
+        // No CGWindowList, no per-trigger app enumeration.
+        var extrasOut: [ElementCandidate] = []
+        for pid in MenuExtraCache.shared.currentPIDs() {
+            let appElement = AXUIElementCreateApplication(pid)
+            collectDirectMenuExtras(from: appElement,
+                                    into: &extrasOut,
+                                    screenSpan: screenSpan)
+        }
+        let t3 = Date()
 
-        print(String(format: "[mouseless] collect timings: focused=%.0fms dock=%.0fms",
+        print(String(format: "[mouseless] collect timings: focused=%.0fms dock=%.0fms extras=%.0fms",
                      t1.timeIntervalSince(t0) * 1000,
-                     t2.timeIntervalSince(t1) * 1000))
-        _ = focusedPID
+                     t2.timeIntervalSince(t1) * 1000,
+                     t3.timeIntervalSince(t2) * 1000))
 
         return CollectedElements(focused: focusedOut, dock: dockOut, menuBarExtras: extrasOut)
     }
@@ -195,6 +210,63 @@ final class HintMode {
         guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first
         else { return nil }
         return AXUIElementCreateApplication(app.processIdentifier)
+    }
+
+    /// Shallow walk for menu bar extras. Modern macOS exposes them via
+    /// the standard `AXExtrasMenuBar` attribute on the owning app (the
+    /// children carry role `AXMenuBarItem` for ControlCenter, or
+    /// `AXMenuExtra` for older / non-standard agents — accept both).
+    /// Legacy fallback: some apps just put `AXMenuExtra` as a direct
+    /// child of the app root.
+    ///
+    /// `nonisolated` so we can fan this out across a concurrent queue —
+    /// it only does AX IPC and touches no main-actor state.
+    nonisolated private static func collectDirectMenuExtras(
+        from app: AXUIElement,
+        into out: inout [ElementCandidate],
+        screenSpan: CGRect?
+    ) {
+        var extrasRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(app, "AXExtrasMenuBar" as CFString, &extrasRef) == .success,
+           let extras = extrasRef {
+            let bar = extras as! AXUIElement
+            var grandRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(bar, "AXChildren" as CFString, &grandRef) == .success,
+               let grandchildren = grandRef as? [AXUIElement] {
+                for grand in grandchildren {
+                    guard let role = roleOf(grand),
+                          role == "AXMenuBarItem" || role == "AXMenuExtra"
+                    else { continue }
+                    appendIfValid(grand, role: role, into: &out, screenSpan: screenSpan)
+                }
+            }
+            // Done — `AXExtrasMenuBar` is the authoritative source.
+            return
+        }
+
+        // No `AXExtrasMenuBar`. Look for `AXMenuExtra` as a direct child
+        // of the root (some agents register their status item that way).
+        var childrenRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(app, "AXChildren" as CFString, &childrenRef) == .success,
+              let children = childrenRef as? [AXUIElement]
+        else { return }
+        for child in children where roleOf(child) == "AXMenuExtra" {
+            appendIfValid(child, role: "AXMenuExtra", into: &out, screenSpan: screenSpan)
+        }
+    }
+
+    nonisolated private static func appendIfValid(
+        _ element: AXUIElement,
+        role: String,
+        into out: inout [ElementCandidate],
+        screenSpan: CGRect?
+    ) {
+        guard enabled(element),
+              let rect = boundsOf(element),
+              rect.width >= 8, rect.height >= 8,
+              onScreen(rect, screenSpan: screenSpan)
+        else { return }
+        out.append(ElementCandidate(element: element, rect: rect, role: role))
     }
 
     /// Debug helper: print AX tree role + bounds + actions, up to maxDepth levels.
@@ -279,7 +351,7 @@ final class HintMode {
         return false
     }
 
-    private static func enabled(_ element: AXUIElement) -> Bool {
+    nonisolated private static func enabled(_ element: AXUIElement) -> Bool {
         var ref: CFTypeRef?
         if AXUIElementCopyAttributeValue(element, "AXEnabled" as CFString, &ref) == .success,
            let n = ref as? Bool {
@@ -288,14 +360,14 @@ final class HintMode {
         return true
     }
 
-    private static func roleOf(_ element: AXUIElement) -> String? {
+    nonisolated private static func roleOf(_ element: AXUIElement) -> String? {
         var ref: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, "AXRole" as CFString, &ref) == .success
         else { return nil }
         return ref as? String
     }
 
-    private static func boundsOf(_ element: AXUIElement) -> CGRect? {
+    nonisolated private static func boundsOf(_ element: AXUIElement) -> CGRect? {
         var posRef: CFTypeRef?
         var sizeRef: CFTypeRef?
         guard
@@ -331,7 +403,7 @@ final class HintMode {
         return union.isNull ? nil : union
     }
 
-    private static func onScreen(_ rect: CGRect, screenSpan: CGRect?) -> Bool {
+    nonisolated private static func onScreen(_ rect: CGRect, screenSpan: CGRect?) -> Bool {
         guard let span = screenSpan else { return true }
         return rect.intersects(span)
     }
