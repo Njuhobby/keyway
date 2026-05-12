@@ -162,7 +162,25 @@ for ev in [down, up] {
 
 双击的关键：`.mouseEventClickState` 字段，第一对设 1，第二对设 2。系统据此识别双击。
 
-`KeyPoster` 目前未在主路径用到，留给未来 select-text mode（合成方向键）。
+`KeyPoster` 目前没有在主路径使用。API 留给未来 select-text mode（合成方向键）。
+
+## 7. 异步事件等待（`AXWait`）
+
+`x` 路径里需要等 `finder.activate()` 真正落地（焦点切到 Finder）—— 不用固定 sleep，走 `AXWait.appActivated`：
+
+```swift
+AXWait.appActivated(bundleID:timeoutMs:) async -> Bool       // NSWorkspace 通知
+```
+
+底层用 `withCheckedContinuation` 桥接 `NSWorkspace.didActivateApplicationNotification` 到 async/await。返回 `true` = 通知触发，`false` = 超时兜底。如果 app 已经是 frontmost，立即返回 true，不挂起。
+
+实现细节（`AXWait.swift`）：
+- `OneShot` —— 防 callback 和 timeout 同时 resume 导致 continuation 双 resume crash
+- `Box<T>` —— `@unchecked Sendable` 引用胞，让 `@Sendable` callback 和 `@MainActor` timeout Task 共享 observer 引用（两者都跑在 main thread，但 Swift 类型系统看不出来）
+
+兜底 timeout 是**防 silent failure** 的安全带，不是路径主线 —— OS 在极端情况下偶尔不发通知（已知 macOS 老毛病），timeout 让 Task 不至于永远挂起。详见 `modes.md` §4.3。
+
+> 历史：早期版本还有 `AXWait.axNotification(_:on:pid:)` 用来等 Dock 菜单的 `kAXUIElementDestroyedNotification`。后来发现 Dock 在"焦点切换关菜单"路径下根本不发这个通知（element 被留着），改用 `AXUIElementPerformAction(menu, kAXCancelAction)` 直接同步触发 Dock 的完整清理路径，这个 helper 就用不上了，已删。
 
 ---
 

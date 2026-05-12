@@ -106,27 +106,69 @@ final class VimSession {
             return true
         }
 
-        // Bare `x` — "click on empty space" gesture. Activating Finder
-        // reproduces what physically clicking the desktop wallpaper does:
-        // the previously focused app loses focus, any open menu/popover
-        // closes, Finder becomes frontmost. No fake keystrokes, so we
-        // dodge Esc's app-specific side effects (vim normal mode, dialog
-        // cancel, terminal escape sequences, etc.). After the focus
-        // switch we rescan so hints reflect Finder's UI.
+        // Bare `x` — "click on empty space" gesture. Two stages, both
+        // event-driven (no fixed sleeps):
+        //
+        // 1. Activate Finder. App menu dropdowns / popovers / status
+        //    menus all auto-dismiss when their owning app loses focus.
+        //    Wait for `NSWorkspace.didActivateApplicationNotification`
+        //    before proceeding so the next Esc lands on Finder, not on
+        //    the previously focused app (vim/terminal/dialog).
+        //
+        // 2. Synth Esc. Dock right-click menus run in a modal tracking
+        //    loop inside the Dock process and ignore focus changes —
+        //    only a real outside-click or Esc dismisses them. If a
+        //    Dock menu was open before we started, wait for the AX
+        //    `kAXMenuClosedNotification` on that menu before rescanning,
+        //    otherwise the AX tree still reports the menu items at
+        //    stale positions (visual close and AX-tree update aren't
+        //    synchronized).
+        //
+        // Both waits have a 300ms timeout fallback so silent AX/NSWS
+        // failures don't deadlock the mode — that's defensive only,
+        // should never trigger in normal operation.
         if keyCode == KeyCode.x && flags.intersection(modMask).isEmpty {
             hint.deactivate()
-            if let finder = NSRunningApplication.runningApplications(
-                    withBundleIdentifier: "com.apple.finder").first {
-                finder.activate(options: [])
-            }
-            // Activation is asynchronous — AX `AXFocusedApplication`
-            // still points at the previous app for a tick or two. Wait
-            // briefly so the rescan walks Finder, not what we just left.
-            // The Task also keeps the AX walk off the event-tap callback
-            // so CGEventTap doesn't trip its user-input timeout.
+
+            // Capture the Dock context menu BEFORE dismissal — once
+            // it's cancelled the AX element is gone from the tree.
+            let dockPID = NSRunningApplication.runningApplications(
+                withBundleIdentifier: "com.apple.dock").first?.processIdentifier
+            let openDockMenu = dockPID.flatMap { Self.findOpenDockMenu(pid: $0) }
+            let finder = NSRunningApplication.runningApplications(
+                withBundleIdentifier: "com.apple.finder").first
+
             Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(80))
+                // Stage 1a: dismiss the Dock context menu via the
+                // AX-native cancel action. Empirically the only way
+                // that actually works — synthetic Esc (any routing,
+                // including CGEventPostToPid) only closes the menu
+                // *visually* and leaves the AXMenu in Dock's tree,
+                // so the re-scan picks up "ghost" menu items at the
+                // old screen positions. `AXCancel` hits the same
+                // cleanup path that a real mouse click outside the
+                // menu does — Dock destroys the AXMenu element,
+                // re-scan sees a clean tree.
+                if let menu = openDockMenu {
+                    AXUIElementPerformAction(menu, kAXCancelAction as CFString)
+                }
+
+                // Stage 1b: focus switch — dismisses everything else
+                // (app menu dropdowns, popovers, status menus all
+                // auto-close when their owning app loses focus).
+                if let finder = finder, !finder.isActive {
+                    finder.activate(options: [])
+                    _ = await AXWait.appActivated(
+                        bundleID: "com.apple.finder", timeoutMs: 300
+                    )
+                }
                 guard self.isActive else { return }
+
+                // Stage 2: re-scan. No explicit AX-cleanup wait —
+                // AXCancel is synchronous enough that the tree is
+                // already clean by the time Finder activation
+                // returns. If that ever stops being true, ghosts
+                // would reappear and we'd add a wait back.
                 let next = HintMode()
                 if next.activate() {
                     self.mode = .tap(next)
@@ -238,6 +280,57 @@ final class VimSession {
         case .tap: label = sticky ? "TAP · sticky" : "TAP"
         }
         HUD.shared.show(label + suffix)
+    }
+
+    // MARK: - Dock menu discovery
+
+    /// If the Dock currently has an open context menu (right-click on
+    /// an icon), return its `AXMenu` element. Used by the `x` handler
+    /// to know whether to wait for `kAXMenuClosedNotification` after
+    /// sending Esc — without the handle there's nothing to observe.
+    /// Returns nil when no menu is open.
+    ///
+    /// Dock's AX tree puts context menus **under the specific
+    /// `AXDockItem` that was right-clicked**, not at the app root:
+    ///
+    ///     AXApplication (Dock)
+    ///       AXList
+    ///         AXDockItem ...
+    ///         AXDockItem (right-clicked)
+    ///           AXMenu        ← here
+    ///             AXMenuItem
+    ///             ...
+    ///
+    /// So we walk app → AXList → AXDockItem and check each item's
+    /// children for an AXMenu. Only one item has one at any time.
+    private static func findOpenDockMenu(pid: pid_t) -> AXUIElement? {
+        let app = AXUIElementCreateApplication(pid)
+        guard let lists = childrenOf(app) else { return nil }
+        for list in lists {
+            guard roleOf(list) == "AXList",
+                  let items = childrenOf(list) else { continue }
+            for item in items {
+                guard let candidates = childrenOf(item) else { continue }
+                if let menu = candidates.first(where: { roleOf($0) == "AXMenu" }) {
+                    return menu
+                }
+            }
+        }
+        return nil
+    }
+
+    private static func childrenOf(_ el: AXUIElement) -> [AXUIElement]? {
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(el, "AXChildren" as CFString, &ref) == .success,
+              let arr = ref as? [AXUIElement] else { return nil }
+        return arr
+    }
+
+    private static func roleOf(_ el: AXUIElement) -> String? {
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(el, "AXRole" as CFString, &ref) == .success
+        else { return nil }
+        return ref as? String
     }
 
     // MARK: - Key code → character

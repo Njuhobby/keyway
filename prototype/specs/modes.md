@@ -97,28 +97,85 @@ var sticky: Bool = false           // TAP mode 内有效
 
 ### 4.3 `x` —— 点空白处
 
+语义：**dismiss + rescan**。两阶段，没有固定 sleep，没有可猜的 timing。
+
 ```swift
 if keyCode == KeyCode.x && flags.intersection(modMask).isEmpty {
     hint.deactivate()
-    NSRunningApplication.runningApplications(
-        withBundleIdentifier: "com.apple.finder").first?.activate(options: [])
+    let dockPID = ...com.apple.dock....processIdentifier
+    let openDockMenu = dockPID.flatMap { findOpenDockMenu(pid: $0) }
+    let finder = ...com.apple.finder....first
+
     Task { @MainActor in
-        try? await Task.sleep(for: .milliseconds(80))
-        // re-scan ...
+        // Stage 1a: AX-cancel the Dock context menu (if open)
+        if let menu = openDockMenu {
+            AXUIElementPerformAction(menu, kAXCancelAction as CFString)
+        }
+        // Stage 1b: focus switch + wait for confirmation
+        if let finder, !finder.isActive {
+            finder.activate(options: [])
+            _ = await AXWait.appActivated(bundleID: "com.apple.finder", timeoutMs: 300)
+        }
+        // Stage 2: re-scan
+        let next = HintMode()
+        if next.activate() { ... }
     }
 }
 ```
 
-为什么不直接合成 Esc？很多 app 把 Esc 绑了别的语义：
-- vim normal mode 已经在 normal mode 时 Esc 是 no-op，但 insert mode 时是切 mode
-- 对话框 cancel
-- terminal escape sequence
-- 全屏视频退出
+#### Stage 1a：AX-cancel Dock 上下文菜单
 
-激活 Finder = 物理上点击桌面壁纸的效果：前一个 app 失焦、菜单/popover 关闭、Finder 成 frontmost，**没有合成键盘事件**，所以没有上述副作用。
+Dock 的右键菜单在视觉关闭和 AX 树清理是**两条独立路径**：
 
-80ms 延迟是因为 `activate` 是异步的 —— `AXFocusedApplication` 不会立刻指向 Finder，立刻 re-scan 会拿到旧 app 的元素。
-`Task` 包起来还有个作用：把扫描挪出 event tap callback，避免 callback 超时（见 `event-pipeline.md`）。
+- 真鼠标点击菜单外 → 两路都走完 → 菜单消失 + AX 树清 ✓
+- 焦点切换（app 激活） → 只走视觉路 → 菜单消失 + **AX 树留着 AXMenu 元素**（ghost）
+- 合成 Esc（不管投到哪） → 同上，只视觉关
+
+ghost AXMenu 是个真问题：下一次 hint walk 仍能从 `AXDockItem → AXChildren → AXMenu → AXChildren → AXMenuItem` 拿到菜单项，position 还是旧坐标，AXEnabled 还是 true，filter 全都过 —— 屏幕中间就会出现悬空 hint。
+
+**`AXUIElementPerformAction(menu, kAXCancelAction)`** 是 AX 层暴露的"取消这个元素"信号，Dock 的 AXMenu 实现了它（实测 actions 里有 `AXCancel`）。调用后 Dock 走和"真鼠标点击空白处"等效的清理路径：menu 视觉关 + AXMenu 从 AX 树里销毁。Re-scan 拿到干净的树。
+
+AXCancel 是同步的 —— 函数返回时 element 已经被销毁。所以不需要 observer + wait。
+
+发现菜单元素的代码：`VimSession.findOpenDockMenu(pid:)`，结构是：
+
+```
+AXApplication (Dock)
+└── AXList
+    ├── AXDockItem ...
+    ├── AXDockItem (right-clicked)
+    │   └── AXMenu             ← 这里
+    │       └── AXMenuItem ...
+    └── AXDockItem ...
+```
+
+必须在 `kAXCancelAction` 之前拿到 handle —— AXCancel 之后元素就没了，没法再 query。
+
+#### Stage 1b：焦点切换 + 等激活通知
+
+激活 Finder 处理"焦点切换就能关掉"的浮层：app 菜单栏下拉、popover、status menu 都会随 owning app 失焦自动消失。
+
+`AXWait.appActivated` 订阅 `NSWorkspace.didActivateApplicationNotification`，Finder 真正成 frontmost 时 OS 发通知，挂起的 Task 才被唤醒。Finder 已经是 frontmost 时立即返回不挂起。300ms timeout 兜底，正常路径下不会触发。
+
+#### Stage 2：re-scan
+
+AXCancel + Finder 激活完成 → AX 树清 + 焦点稳 → 新建 `HintMode` 扫一遍。
+
+#### 为什么这样 vs 历史方案
+
+写这条路径之前迭代过的失败方案：
+
+| 尝试 | 为什么不行 |
+| --- | --- |
+| 合成 Esc（默认 `cghidEventTap`） | Esc 路由到 frontmost app（Finder 已激活了），Dock 收不到。菜单不关。 |
+| `CGEventPostToPid(dockPID, esc)` 直接投 Dock | Dock 视觉关菜单了，但走的不是"完整 cancel"路径，AXMenu 留着。ghost 仍在。 |
+| 订阅 `kAXMenuClosedNotification` / `kAXUIElementDestroyedNotification` | 因为 Dock 没走完整 cancel 路径，根本不发这些通知。永远 timeout。 |
+| 固定 sleep N ms | 猜时间。快机器浪费，慢机器漏。不论多长都不能让 Dock 主动清理 AX 树。 |
+| Walk 时跳过 `AXMenu` 下钻 | 直接砍掉"用户右键 Dock → 按 ` → 选菜单项"功能。 |
+
+`AXCancel` 是唯一一个**对 AX 树实际有效**的清理手段。
+
+`Task` 包起来还有一个独立作用：把整个序列挪出 event tap callback，否则同步等待会让 CGEventTap 触发 user-input timeout 自动 disable（见 `event-pipeline.md`）。
 
 ---
 

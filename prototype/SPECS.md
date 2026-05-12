@@ -86,7 +86,8 @@ NSApplication
 | `HintOverlay.swift` | 每屏一个无边框透明窗口，绘制 hint 标签 |
 | `HUD.swift` | 右下角 mode 提示 |
 | `KeyCode.swift` | `kVK_ANSI_*` 物理键码常量（ANSI 布局，非 QWERTY 会出错） |
-| `KeyPoster.swift` | 合成键盘事件的辅助函数（目前未在主路径用到，留给未来 select-text mode） |
+| `KeyPoster.swift` | 合成键盘事件的辅助函数（当前主路径未使用；留给未来 select-text mode） |
+| `AXWait.swift` | 把 NSWorkspace / AX observer 通知桥接成 `async/await`，带超时兜底。`x` 路径用它替代固定 sleep |
 
 ---
 
@@ -111,7 +112,8 @@ NSApplication
 | 点击实现 | AX 动作优先，合成事件回退 | AX 不依赖鼠标位置和遮挡 |
 | Overlay 数量 | 每屏一个窗口 | 单窗口跨屏 macOS 渲染不可靠 |
 | Overlay 层级 | `.statusBar` (25) | 高于菜单栏，低于下拉菜单（保持自然 z-order） |
-| 退出"空白处"（`x`） | 激活 Finder | 比合成 Esc 副作用更可控（vim / dialog / terminal 不被误触发） |
+| 退出"空白处"（`x`） | 激活 Finder + AX-cancel Dock 菜单 | Finder 激活关掉 app 菜单/popover/status menu；`AXUIElementPerformAction(menu, kAXCancelAction)` 是唯一能让 Dock 真正销毁 AXMenu 元素的方式（合成 Esc 只让菜单视觉关，留下 ghost 让 re-scan 画悬空 hint） |
+| 异步操作的"等" | AX / NSWorkspace observer + async/await + timeout 兜底 | 不用固定 sleep 猜时间。OS 通知比经验值早就发了就早走；慢路径一直等到 AX 同步完。silent failure 时超时兜底防 Task 卡死 |
 | Cmd/Ctrl 透传 | 不消费 | 保 Spotlight、Mission Control、screenshot 等系统功能 |
 | Shift/Option | 消费 | 给 hint click action 用（右键 / 双击） |
 | 标签字符集 | home row 9 字母 + 10 数字 | 数字独立给 Dock，字母组留给其他来源 |

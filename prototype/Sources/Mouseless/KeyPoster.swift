@@ -22,6 +22,10 @@ enum KeyPoster {
         post(keyCode: CGKeyCode(KeyCode.c), flags: .maskCommand)
     }
 
+    static func escape() {
+        post(keyCode: CGKeyCode(KeyCode.escape), flags: [])
+    }
+
     private static func post(keyCode: CGKeyCode, flags: CGEventFlags) {
         let src = CGEventSource(stateID: .privateState)
         guard
