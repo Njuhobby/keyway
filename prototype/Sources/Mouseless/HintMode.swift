@@ -44,8 +44,11 @@ final class HintMode {
         "AXMenuExtra",      // 菜单栏右侧 status item
     ]
 
-    /// Subtrees we don't bother recursing into — they rarely contain interactive
-    /// children and would explode the walk on apps like Slack or web browsers.
+    /// Roles whose **subtrees** we don't recurse into — they rarely
+    /// contain interactive children and would explode the walk on apps
+    /// like Slack or web browsers. We still consider the element ITSELF
+    /// as a candidate first (e.g. Finder desktop icons are `AXImage`
+    /// with `AXTitle` = filename and are clickable via `AXPress`).
     private static let skipRoles: Set<String> = [
         "AXStaticText",
         "AXImage",
@@ -302,14 +305,32 @@ final class HintMode {
         guard out.count < maxTargets else { return }
 
         let role = roleOf(element) ?? ""
-        if skipRoles.contains(role) { return }
 
+        // Consider the element ITSELF before deciding whether to
+        // recurse into its children. `skipRoles` (below) blocks
+        // recursion, not candidacy — Finder desktop icons are
+        // `AXImage` and would never be hinted if we returned here.
         if isClickable(element, role: role), enabled(element),
            let rect = boundsOf(element),
-           rect.width >= 8, rect.height >= 8,   // skip invisible micro-elements
+           rect.width >= 8, rect.height >= 8,
            hasMeaningfulLabel(element, role: role),
            onScreen(rect, screenSpan: screenSpan) {
             out.append(ElementCandidate(element: element, rect: rect, role: role))
+        }
+
+        if skipRoles.contains(role) { return }
+
+        // Closed menubar dropdowns: AppKit leaves the AXMenu and its
+        // AXMenuItem children in the AX tree even when not visible,
+        // and some descendants (e.g. AXButton inside an AXMenuItem)
+        // report stale positions that pass our size/onScreen filters
+        // → ghost hints at the menu's last-open coords. Only walk an
+        // AXMenu when its parent AXMenuBarItem reports AXSelected=true
+        // (menu is currently shown). Dock context menus are handled
+        // separately by `x` via AXCancel; their parent is AXDockItem,
+        // not AXMenuBarItem, so this check doesn't affect them.
+        if role == "AXMenu", !axMenuIsOpen(element) {
+            return
         }
 
         var childrenRef: CFTypeRef?
@@ -321,14 +342,34 @@ final class HintMode {
         }
     }
 
+    /// Returns true if this AXMenu's parent is an AXMenuBarItem that
+    /// is currently selected (i.e. the user has clicked the menubar
+    /// item and the dropdown is visible). For any other parent shape
+    /// (Dock items, system menus, etc.) returns true unconditionally —
+    /// we only have evidence of the ghost-menu problem under
+    /// AXMenuBarItem so far, and don't want to over-filter.
+    private static func axMenuIsOpen(_ menu: AXUIElement) -> Bool {
+        var parentRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(menu, "AXParent" as CFString, &parentRef) == .success,
+              let raw = parentRef else { return true }
+        let parent = raw as! AXUIElement
+        guard roleOf(parent) == "AXMenuBarItem" else { return true }
+        var selectedRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(parent, "AXSelected" as CFString, &selectedRef) == .success,
+              let isSelected = selectedRef as? Bool else { return false }
+        return isSelected
+    }
+
     private static func isClickable(_ element: AXUIElement, role: String) -> Bool {
         if clickableRoles.contains(role) { return true }
         var actions: CFArray?
-        if AXUIElementCopyActionNames(element, &actions) == .success,
-           let names = actions as? [String], names.contains("AXPress") {
-            return true
-        }
-        return false
+        guard AXUIElementCopyActionNames(element, &actions) == .success,
+              let names = actions as? [String] else { return false }
+        // `AXOpen` is what Finder desktop icons (`AXImage`) advertise
+        // in place of `AXPress` — accepting it makes them hintable
+        // while still keeping decorative images (no actions, or no
+        // meaningful label) out.
+        return names.contains("AXPress") || names.contains("AXOpen")
     }
 
     /// Skip clickable elements that have NO identifying info — empty title,

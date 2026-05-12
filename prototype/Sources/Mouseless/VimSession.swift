@@ -333,6 +333,8 @@ final class VimSession {
         return ref as? String
     }
 
+
+
     // MARK: - Key code → character
 
     /// Used while a mode is active (no palette). Accepts homerow letters and
