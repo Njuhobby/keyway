@@ -82,6 +82,7 @@ NSApplication
 | `HotkeyTap.swift` | CGEventTap 注册 + 反馈环避免 + 触发键 → `session.enter()` |
 | `VimSession.swift` | Mode 状态机、命令面板缓冲、按键到 hint char 的映射 |
 | `HintMode.swift` | AX 扫描三个来源 → 生成标签 → 处理 typing → 提交点击 |
+| `HintWindowCache.swift` | 焦点 app 的 per-`AXWindow` 缓存。sticky rescan 时复用没动过的 window 子树，关弹框这种"只销毁一个窗"的常见 case 不重扫 |
 | `MenuExtraCache.swift` | 后台维护"哪些 PID 有 menu extras"的 PID 集合 |
 | `HintOverlay.swift` | 每屏一个无边框透明窗口，绘制 hint 标签 |
 | `HUD.swift` | 右下角 mode 提示 |
@@ -108,6 +109,9 @@ NSApplication
 
 | 权衡 | 选择 | 理由 |
 | --- | --- | --- |
+| 单元素 AX 属性获取 | `AXUIElementCopyMultipleAttributeValues` 一次拿 10 个属性 | per-element IPC 从 9+ 砍到 1，焦点 app 扫描从 ~840ms 降到 ~200ms |
+| Sticky rescan 复用 | per-`AXWindow` cache + `AXWindows` diff + commit-driven dirty | 关弹框这种"只销毁一窗、其他没动"的常见操作不重扫 |
+| Menu bar fast path | AXMenuBar 上读一次 `AXSelectedChildren`；空则不下钻 | 99% 时刻菜单栏没展开，跳过 N×4 个 axMenuIsOpen 探针 |
 | Menu extras 发现 | 后台 PID cache + NSWorkspace 增量 | 触发期 < 30ms；预热成本对用户透明 |
 | 点击实现 | AX 动作优先，合成事件回退 | AX 不依赖鼠标位置和遮挡 |
 | Overlay 数量 | 每屏一个窗口 | 单窗口跨屏 macOS 渲染不可靠 |
@@ -128,10 +132,20 @@ NSApplication
 1. **键盘布局** —— `KeyCode.swift` 是 ANSI 物理位。非 QWERTY 字母 hint 全错。
    迁移路径：用 `UCKeyTranslate` / `CGEventKeyboardGetUnicodeString` 把 keyCode + flags 映射到字符再匹配。
 2. **Electron / 复杂 web 内容** —— `walk()` 对 web view 的 AX 树兼容性还没系统测过。
-   这是 vs Homerow 的 wedge，必须做对。
-3. **新 modes** —— `Mode` enum 已经留好扩展点：select-text、drag、right-click 命令模式。接入路径见 `specs/modes.md` §8。
-4. **触发键可配置** —— 当前硬编码 `KeyCode.grave`。最终要切到 Caps Lock。
+   这是 vs Homerow 的 wedge，必须做对。Chromium 的 NSAccessibility 桥规则统一，但
+   暴露什么完全取决于 app 的 ARIA/HTML 卫生：好的（VS Code、Slack、Discord）AXButton +
+   AXPress 一应俱全，差的（WeChat、各类国产 SaaS）一片 AXGroup 无 action 无 title。
+   长远方向是引入 **OmniParser / 视觉 ML** 路径做兜底——脱离 AX server，用截图喂
+   模型识别可点元素。详见 `specs/hint-discovery.md` §5。
+3. **App AX cleanup 期的扫描尖峰** —— 关弹框 / 关 sheet 后 sticky rescan 落进目标 app
+   的 ~500ms cleanup 窗口里，per-IPC 延迟从 ~0.2ms 涨到 ~40ms。IPC 数已经压到下限
+   13（cache + walkMenuBar 双管），优化空间在这条路径上耗尽。事件驱动等 AX 稳定再
+   扫的方案没尝试过——通知发出时机不可控，理论 wall-clock 时间可能不降。引入
+   OmniParser 后这个尖峰自动消失（扫描跟 AX server 状态解耦）。详见
+   `specs/hint-discovery.md` §5。
+4. **新 modes** —— `Mode` enum 已经留好扩展点：select-text、drag、right-click 命令模式。接入路径见 `specs/modes.md` §8。
+5. **触发键可配置** —— 当前硬编码 `KeyCode.grave`。最终要切到 Caps Lock。
    依赖 hidutil remap（用户侧操作）或 IOKit HID。
-5. **多 hint 来源的标签空间冲突** —— 焦点 app 元素很多时会吃光字母组，menu extras 排到 `lj/lk/ll`。
+6. **多 hint 来源的标签空间冲突** —— 焦点 app 元素很多时会吃光字母组，menu extras 排到 `lj/lk/ll`。
    方案候选：menu extras 走单独的前缀（如 `;a`, `;s` …）或单独字母池。
-6. **Dock 分隔符 / Recents 占位过滤** —— 当前 Dock 把所有 `AXDockItem` 都收，包括分隔符。低价值的 hint 浪费标签。
+7. **Dock 分隔符 / Recents 占位过滤** —— 当前 Dock 把所有 `AXDockItem` 都收，包括分隔符。低价值的 hint 浪费标签。

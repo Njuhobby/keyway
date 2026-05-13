@@ -6,6 +6,11 @@ struct HintTarget {
     let element: AXUIElement
     let rect: CGRect       // AX screen-space (top-left origin)
     let role: String       // AXButton / AXMenuItem / AXDockItem / ...
+    /// The `AXWindow` this target was collected from, if any. Used by
+    /// `HintMode.commit` to tell `HintWindowCache` which window's cache to
+    /// mark dirty. nil for dock items, menu extras, and menu bar items —
+    /// those are app-level, not window-scoped.
+    let sourceWindow: AXUIElement?
 }
 
 enum HintResult {
@@ -58,6 +63,25 @@ final class HintMode {
     private static let maxDepth = 12
     private static let maxTargets = 200
 
+    /// Attributes we read for every walked element. We fetch them in ONE
+    /// `AXUIElementCopyMultipleAttributeValues` call per element instead of
+    /// 9 separate `AXUIElementCopyAttributeValue` calls — for an AX tree
+    /// with hundreds of nodes (e.g. WeChat, Slack) that's the difference
+    /// between hundreds and thousands of cross-process IPC round-trips.
+    nonisolated private static let batchAttrNames: [String] = [
+        "AXRole",         // 0
+        "AXEnabled",      // 1
+        "AXPosition",     // 2
+        "AXSize",         // 3
+        "AXTitle",        // 4
+        "AXDescription",  // 5
+        "AXHelp",         // 6
+        "AXValue",        // 7
+        "AXSubrole",      // 8
+        "AXChildren",     // 9
+    ]
+    nonisolated(unsafe) private static let batchAttrsCF: CFArray = batchAttrNames as CFArray
+
     var isActive: Bool { isActiveFlag }
 
     @discardableResult
@@ -70,14 +94,16 @@ final class HintMode {
         // Dock gets numeric labels (0, 1, 2, ...).
         let dockLabels = Self.generateNumericLabels(count: collected.dock.count)
         let dockTargets = zip(dockLabels, collected.dock).map { (label, c) in
-            HintTarget(label: label, element: c.element, rect: c.rect, role: c.role)
+            HintTarget(label: label, element: c.element, rect: c.rect, role: c.role,
+                       sourceWindow: c.sourceWindow)
         }
 
         // Focused app + menu bar extras share the alphabetic label space.
         let nonDockCandidates = collected.focused + collected.menuBarExtras
         let letterLabels = Self.generateLabels(count: nonDockCandidates.count)
         let nonDockTargets = zip(letterLabels, nonDockCandidates).map { (label, c) in
-            HintTarget(label: label, element: c.element, rect: c.rect, role: c.role)
+            HintTarget(label: label, element: c.element, rect: c.rect, role: c.role,
+                       sourceWindow: c.sourceWindow)
         }
 
         targets = dockTargets + nonDockTargets
@@ -134,6 +160,15 @@ final class HintMode {
             // No standard AX action for double-click, always synthesize.
             Self.synthesizeClick(at: center, button: .left, count: 2)
         }
+
+        // The click may have changed the source window's contents (list
+        // selection, disclosure, pane reload, ...). Mark it dirty so the
+        // next sticky rescan walks this window fresh while reusing the
+        // cache for untouched sibling windows. nil for dock/menu-extra/
+        // menu-bar items — they don't belong to any AXWindow.
+        if let window = target.sourceWindow {
+            HintWindowCache.shared.markDirty(window: window)
+        }
     }
 
     // MARK: - AX collection
@@ -146,6 +181,7 @@ final class HintMode {
         let element: AXUIElement
         let rect: CGRect
         let role: String
+        let sourceWindow: AXUIElement?   // nil for dock / menu extras / menu bar
     }
 
     /// Result of one collection pass — split by source so we can label them
@@ -156,21 +192,99 @@ final class HintMode {
         let menuBarExtras: [ElementCandidate]
     }
 
+    /// One element's attributes, fetched in a single batched IPC call.
+    /// `@unchecked Sendable` because the CF types inside are thread-safe
+    /// but Swift can't see that.
+    private struct BatchedAttrs: @unchecked Sendable {
+        let role: String?
+        let enabled: Bool
+        let rect: CGRect?
+        let title: String?
+        let description: String?
+        let help: String?
+        let value: String?
+        let subrole: String?
+        let children: [AXUIElement]
+    }
+
     private static func collectAll() -> CollectedElements {
         let screenSpan = Self.totalScreenSpan()
 
-        // 1. Focused app (the existing behavior).
+        // 1. Focused app: AXWindows go through the per-window cache (so a
+        // sticky rescan after closing a popup reuses the surviving
+        // windows without re-walking them). AXMenuBar is walked fresh —
+        // it's small (closed dropdowns short-circuit) and not worth
+        // caching.
         let t0 = Date()
         var focusedOut: [ElementCandidate] = []
-        if let (focusedApp, _) = focusedApplication() {
-            walk(element: focusedApp, depth: 0, into: &focusedOut, screenSpan: screenSpan)
+        var focusedIPC = 0
+        var cacheHits = 0
+        if let (focusedApp, focusedPID) = focusedApplication() {
+            focusedIPC += 1   // AXFocusedApplication on system-wide
+
+            HintWindowCache.shared.syncFocusedApp(pid: focusedPID)
+
+            // AXWindows attribute on the app (1 IPC). This is the diff input.
+            focusedIPC += 1
+            var windowsRef: CFTypeRef?
+            let windows: [AXUIElement] = {
+                if AXUIElementCopyAttributeValue(focusedApp, "AXWindows" as CFString,
+                                                 &windowsRef) == .success,
+                   let arr = windowsRef as? [AXUIElement] {
+                    return arr
+                }
+                return []
+            }()
+            HintWindowCache.shared.pruneTo(currentWindows: windows)
+
+            for window in windows {
+                if let reused = HintWindowCache.shared.reuse(window: window,
+                                                             ipcCount: &focusedIPC) {
+                    cacheHits += 1
+                    for r in reused {
+                        focusedOut.append(ElementCandidate(
+                            element: r.element, rect: r.rect, role: r.role,
+                            sourceWindow: window))
+                    }
+                } else {
+                    var fresh: [ElementCandidate] = []
+                    walk(element: window, depth: 0, into: &fresh,
+                         screenSpan: screenSpan, ipcCount: &focusedIPC,
+                         sourceWindow: window)
+                    let stored = fresh.map {
+                        HintWindowCache.StoredTarget(element: $0.element,
+                                                     rect: $0.rect, role: $0.role)
+                    }
+                    HintWindowCache.shared.store(window: window, targets: stored,
+                                                 ipcCount: &focusedIPC)
+                    focusedOut.append(contentsOf: fresh)
+                }
+            }
+
+            // App-level menu bar (not cached). Uses a specialized walk
+            // that short-circuits the (overwhelmingly common) "no menu
+            // dropdown open" case — saves ~40 IPCs per scan on a typical
+            // ~10-item menu bar.
+            focusedIPC += 1
+            var menubarRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(focusedApp, "AXMenuBar" as CFString,
+                                             &menubarRef) == .success,
+               let menubarRaw = menubarRef {
+                let menubar = menubarRaw as! AXUIElement
+                walkMenuBar(menubar, into: &focusedOut,
+                            screenSpan: screenSpan, ipcCount: &focusedIPC)
+            }
         }
         let t1 = Date()
 
-        // 2. Dock — always scan, regardless of focus.
+        // 2. Dock — always scan, regardless of focus. Not window-cached
+        // (dock changes are rare and the walk is already ~5ms).
         var dockOut: [ElementCandidate] = []
+        var dockIPC = 0
         if let dock = applicationElement(forBundleID: "com.apple.dock") {
-            walk(element: dock, depth: 0, into: &dockOut, screenSpan: screenSpan)
+            walk(element: dock, depth: 0, into: &dockOut,
+                 screenSpan: screenSpan, ipcCount: &dockIPC,
+                 sourceWindow: nil)
         }
         let t2 = Date()
 
@@ -190,9 +304,9 @@ final class HintMode {
         }
         let t3 = Date()
 
-        print(String(format: "[mouseless] collect timings: focused=%.0fms dock=%.0fms extras=%.0fms",
-                     t1.timeIntervalSince(t0) * 1000,
-                     t2.timeIntervalSince(t1) * 1000,
+        print(String(format: "[mouseless] collect timings: focused=%.0fms (%d IPC, %d window cache hit) dock=%.0fms (%d IPC) extras=%.0fms",
+                     t1.timeIntervalSince(t0) * 1000, focusedIPC, cacheHits,
+                     t2.timeIntervalSince(t1) * 1000, dockIPC,
                      t3.timeIntervalSince(t2) * 1000))
 
         return CollectedElements(focused: focusedOut, dock: dockOut, menuBarExtras: extrasOut)
@@ -269,7 +383,8 @@ final class HintMode {
               rect.width >= 8, rect.height >= 8,
               onScreen(rect, screenSpan: screenSpan)
         else { return }
-        out.append(ElementCandidate(element: element, rect: rect, role: role))
+        out.append(ElementCandidate(element: element, rect: rect, role: role,
+                                    sourceWindow: nil))
     }
 
     /// Debug helper: print AX tree role + bounds + actions, up to maxDepth levels.
@@ -295,27 +410,94 @@ final class HintMode {
         }
     }
 
+    /// Specialized walk for the focused app's `AXMenuBar`. The vast
+    /// majority of the time, no dropdown is open: the menu bar items are
+    /// just sitting there waiting to be clicked, and the `AXMenu` under
+    /// each is closed (but still present in the AX tree, hence the
+    /// `axMenuIsOpen` probe in the generic walk). Walking the menubar
+    /// via `walk()` would `batchFetch` the AXMenu under every item and
+    /// do a 3-IPC `axMenuIsOpen` probe each time — ~5 IPCs/item, ~50
+    /// for a typical 10-item menu bar. **All of that is wasted in the
+    /// closed-menu case.**
+    ///
+    /// Fast path: one `AXSelectedChildren` read on the AXMenuBar tells
+    /// us whether any menu is open. Empty → just `batchFetch` the
+    /// items themselves, no descent. ~12 IPCs for the same 10 items.
+    ///
+    /// Slow path (a menu IS open) falls back to `walk()` so the open
+    /// dropdown's `AXMenuItem`s still get hinted.
+    private static func walkMenuBar(
+        _ menubar: AXUIElement,
+        into out: inout [ElementCandidate],
+        screenSpan: CGRect?,
+        ipcCount: inout Int
+    ) {
+        ipcCount += 1
+        var selectedRef: CFTypeRef?
+        let menuIsOpen: Bool = {
+            guard AXUIElementCopyAttributeValue(
+                    menubar, "AXSelectedChildren" as CFString, &selectedRef
+                  ) == .success,
+                  let arr = selectedRef as? [AXUIElement], !arr.isEmpty
+            else { return false }
+            return true
+        }()
+
+        if menuIsOpen {
+            walk(element: menubar, depth: 0, into: &out,
+                 screenSpan: screenSpan, ipcCount: &ipcCount,
+                 sourceWindow: nil)
+            return
+        }
+
+        // No menu open. Emit each AXMenuBarItem without descending —
+        // the closed AXMenu under each has nothing visible to hint.
+        guard let attrs = batchFetch(menubar, ipcCount: &ipcCount) else { return }
+        for item in attrs.children {
+            guard out.count < maxTargets else { return }
+            guard let itemAttrs = batchFetch(item, ipcCount: &ipcCount) else { continue }
+            let role = itemAttrs.role ?? ""
+
+            guard itemAttrs.enabled,
+                  let rect = itemAttrs.rect,
+                  rect.width >= 8, rect.height >= 8,
+                  onScreen(rect, screenSpan: screenSpan),
+                  hasMeaningfulLabel(role: role, attrs: itemAttrs),
+                  isClickable(item, role: role, ipcCount: &ipcCount)
+            else { continue }
+
+            out.append(ElementCandidate(element: item, rect: rect, role: role,
+                                        sourceWindow: nil))
+        }
+    }
+
     private static func walk(
         element: AXUIElement,
         depth: Int,
         into out: inout [ElementCandidate],
-        screenSpan: CGRect?
+        screenSpan: CGRect?,
+        ipcCount: inout Int,
+        sourceWindow: AXUIElement?
     ) {
         guard depth < maxDepth else { return }
         guard out.count < maxTargets else { return }
 
-        let role = roleOf(element) ?? ""
+        guard let attrs = batchFetch(element, ipcCount: &ipcCount) else { return }
+        let role = attrs.role ?? ""
 
-        // Consider the element ITSELF before deciding whether to
-        // recurse into its children. `skipRoles` (below) blocks
-        // recursion, not candidacy — Finder desktop icons are
-        // `AXImage` and would never be hinted if we returned here.
-        if isClickable(element, role: role), enabled(element),
-           let rect = boundsOf(element),
+        // Candidacy: cheap filters first (everything below comes from the
+        // batched attrs, no extra IPC). `isClickable` for unknown roles
+        // requires an extra `AXUIElementCopyActionNames` round-trip, so
+        // it goes LAST — by then everything else has already filtered out
+        // the bulk of non-candidates.
+        if attrs.enabled,
+           let rect = attrs.rect,
            rect.width >= 8, rect.height >= 8,
-           hasMeaningfulLabel(element, role: role),
-           onScreen(rect, screenSpan: screenSpan) {
-            out.append(ElementCandidate(element: element, rect: rect, role: role))
+           onScreen(rect, screenSpan: screenSpan),
+           hasMeaningfulLabel(role: role, attrs: attrs),
+           isClickable(element, role: role, ipcCount: &ipcCount) {
+            out.append(ElementCandidate(element: element, rect: rect, role: role,
+                                        sourceWindow: sourceWindow))
         }
 
         if skipRoles.contains(role) { return }
@@ -329,16 +511,26 @@ final class HintMode {
         // (menu is currently shown). Dock context menus are handled
         // separately by `x` via AXCancel; their parent is AXDockItem,
         // not AXMenuBarItem, so this check doesn't affect them.
-        if role == "AXMenu", !axMenuIsOpen(element) {
+        if role == "AXMenu", !axMenuIsOpen(element, ipcCount: &ipcCount) {
             return
         }
 
-        var childrenRef: CFTypeRef?
-        if AXUIElementCopyAttributeValue(element, "AXChildren" as CFString, &childrenRef) == .success,
-           let children = childrenRef as? [AXUIElement] {
-            for child in children {
-                walk(element: child, depth: depth + 1, into: &out, screenSpan: screenSpan)
-            }
+        // Subtree culling: if this container's bounds are reported,
+        // non-empty, and don't intersect any screen, nothing inside can
+        // possibly be on-screen either — skip the whole subtree. We
+        // require non-empty bounds because nil/zero is the "unknown"
+        // sentinel from buggy AX implementations (some SwiftUI / web
+        // view / Electron containers); culling on those would risk
+        // dropping real children.
+        if let rect = attrs.rect, !rect.isEmpty, let span = screenSpan,
+           !rect.intersects(span) {
+            return
+        }
+
+        for child in attrs.children {
+            walk(element: child, depth: depth + 1, into: &out,
+                 screenSpan: screenSpan, ipcCount: &ipcCount,
+                 sourceWindow: sourceWindow)
         }
     }
 
@@ -348,20 +540,26 @@ final class HintMode {
     /// (Dock items, system menus, etc.) returns true unconditionally —
     /// we only have evidence of the ghost-menu problem under
     /// AXMenuBarItem so far, and don't want to over-filter.
-    private static func axMenuIsOpen(_ menu: AXUIElement) -> Bool {
+    private static func axMenuIsOpen(_ menu: AXUIElement,
+                                     ipcCount: inout Int) -> Bool {
+        ipcCount += 1
         var parentRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(menu, "AXParent" as CFString, &parentRef) == .success,
               let raw = parentRef else { return true }
         let parent = raw as! AXUIElement
+        ipcCount += 1   // roleOf
         guard roleOf(parent) == "AXMenuBarItem" else { return true }
+        ipcCount += 1   // AXSelected
         var selectedRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(parent, "AXSelected" as CFString, &selectedRef) == .success,
               let isSelected = selectedRef as? Bool else { return false }
         return isSelected
     }
 
-    private static func isClickable(_ element: AXUIElement, role: String) -> Bool {
+    private static func isClickable(_ element: AXUIElement, role: String,
+                                    ipcCount: inout Int) -> Bool {
         if clickableRoles.contains(role) { return true }
+        ipcCount += 1
         var actions: CFArray?
         guard AXUIElementCopyActionNames(element, &actions) == .success,
               let names = actions as? [String] else { return false }
@@ -378,18 +576,80 @@ final class HintMode {
     /// produce hints in empty parts of the screen.
     /// Dock items are exempted because the Dock divider / recents indicator
     /// can have empty titles but still be valid.
-    private static func hasMeaningfulLabel(_ element: AXUIElement, role: String) -> Bool {
+    private static func hasMeaningfulLabel(role: String,
+                                           attrs: BatchedAttrs) -> Bool {
         if role == "AXDockItem" || role == "AXMenuBarItem" || role == "AXMenuExtra" {
             return true   // these are inherently identifiable by position/role
         }
-        for attr in ["AXTitle", "AXDescription", "AXHelp", "AXValue", "AXSubrole"] {
-            var ref: CFTypeRef?
-            if AXUIElementCopyAttributeValue(element, attr as CFString, &ref) == .success,
-               let s = ref as? String, !s.isEmpty {
-                return true
+        if let s = attrs.title, !s.isEmpty { return true }
+        if let s = attrs.description, !s.isEmpty { return true }
+        if let s = attrs.help, !s.isEmpty { return true }
+        if let s = attrs.value, !s.isEmpty { return true }
+        if let s = attrs.subrole, !s.isEmpty { return true }
+        return false
+    }
+
+    /// Fetch every attribute we care about in ONE IPC round-trip.
+    /// Missing/inapplicable attributes come back as `AXValue` of type
+    /// `.axError` — we filter those out per slot. Returns `nil` only if
+    /// the whole call failed (dead PID, invalid element).
+    nonisolated private static func batchFetch(_ element: AXUIElement,
+                                               ipcCount: inout Int) -> BatchedAttrs? {
+        ipcCount += 1
+        var valuesRef: CFArray?
+        let result = AXUIElementCopyMultipleAttributeValues(
+            element, batchAttrsCF,
+            AXCopyMultipleAttributeOptions(rawValue: 0),
+            &valuesRef
+        )
+        guard result == .success,
+              let arr = valuesRef as? [AnyObject],
+              arr.count == batchAttrNames.count
+        else { return nil }
+
+        // Per-slot getter that strips AXError sentinels.
+        func slot(_ i: Int) -> AnyObject? {
+            let v = arr[i]
+            if CFGetTypeID(v) == AXValueGetTypeID() {
+                // It's an AXValue — could be a real value (Position/Size)
+                // or an error sentinel. Caller will type-check before use.
+                let axv = v as! AXValue
+                if AXValueGetType(axv) == .axError { return nil }
+            }
+            return v
+        }
+
+        let role = slot(0) as? String
+        let enabled = (slot(1) as? Bool) ?? true
+
+        var rect: CGRect? = nil
+        if let posObj = slot(2), let sizeObj = slot(3),
+           CFGetTypeID(posObj) == AXValueGetTypeID(),
+           CFGetTypeID(sizeObj) == AXValueGetTypeID() {
+            let posV = posObj as! AXValue
+            let sizeV = sizeObj as! AXValue
+            if AXValueGetType(posV) == .cgPoint && AXValueGetType(sizeV) == .cgSize {
+                var origin = CGPoint.zero
+                var size = CGSize.zero
+                if AXValueGetValue(posV, .cgPoint, &origin),
+                   AXValueGetValue(sizeV, .cgSize, &size) {
+                    rect = CGRect(origin: origin, size: size)
+                }
             }
         }
-        return false
+
+        let title = slot(4) as? String
+        let description = slot(5) as? String
+        let help = slot(6) as? String
+        let value = slot(7) as? String
+        let subrole = slot(8) as? String
+        let children = (slot(9) as? [AXUIElement]) ?? []
+
+        return BatchedAttrs(
+            role: role, enabled: enabled, rect: rect,
+            title: title, description: description, help: help,
+            value: value, subrole: subrole, children: children
+        )
     }
 
     nonisolated private static func enabled(_ element: AXUIElement) -> Bool {

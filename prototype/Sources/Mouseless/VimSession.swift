@@ -27,6 +27,12 @@ final class VimSession {
     /// Trigger key pressed → enter TAP mode (hints visible).
     func enter() {
         guard mode == nil else { return }
+        // The cache survives in memory across Mouseless on/off cycles, but
+        // it has no visibility into what the user did with the mouse while
+        // Mouseless was off (clicks, scrolls, tab switches). Start every
+        // session with an empty cache — first activate scans fresh, then
+        // sticky rescans within the session can reuse.
+        HintWindowCache.shared.clear()
         let h = HintMode()
         guard h.activate() else {
             HUD.shared.show("no hints here")
