@@ -140,24 +140,32 @@ final class HintMode {
     }
 
     private func commit(target: HintTarget, action: ClickAction) {
+        // We deliberately bypass AXPress / AXShowMenu / AXOpen and always
+        // synthesize a mouse event at the element's rect center. AX
+        // **metadata** (the element exists, here's its rect, role, label)
+        // is reliable — that's how we found the target and put a hint on
+        // it. AX **actions** are not: many controls (NSBrowser cells,
+        // NSTableRowView, custom views, Electron's bridge layer) expose
+        // AXPress in their action list but the handler is a no-op or has
+        // unexpected semantics, leading to "hint appeared, user pressed,
+        // nothing happened." Empirically synth click is the more
+        // predictable primitive — it behaves exactly like a real mouse
+        // click, which is the user's mental model anyway.
+        //
+        // Trade-offs we accept:
+        //   - The mouse cursor visibly moves to the click point. Matches
+        //     "this hint = clicking that pixel" — predictable.
+        //   - Occluded elements can't be clicked. Practically a non-issue:
+        //     our onScreen filter already excluded them.
+        //   - Same coordinates for AX-derived and (future) OmniParser-
+        //     derived hints — single commit code path.
         let center = CGPoint(x: target.rect.midX, y: target.rect.midY)
         switch action {
         case .left:
-            // Prefer AXPress (semantic click) — works even if the element
-            // is occluded or off-screen. Fall back to a synthetic click.
-            let result = AXUIElementPerformAction(target.element, "AXPress" as CFString)
-            if result != .success {
-                Self.synthesizeClick(at: center, button: .left, count: 1)
-            }
+            Self.synthesizeClick(at: center, button: .left, count: 1)
         case .right:
-            // AXShowMenu opens the right-click menu. Some apps don't expose
-            // it on every element, so fall back to a synthetic right click.
-            let result = AXUIElementPerformAction(target.element, "AXShowMenu" as CFString)
-            if result != .success {
-                Self.synthesizeClick(at: center, button: .right, count: 1)
-            }
+            Self.synthesizeClick(at: center, button: .right, count: 1)
         case .double:
-            // No standard AX action for double-click, always synthesize.
             Self.synthesizeClick(at: center, button: .left, count: 2)
         }
 

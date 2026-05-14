@@ -58,39 +58,48 @@ return .pending
 
 ---
 
-## 3. Commit：AX 动作 vs 合成点击
+## 3. Commit：纯合成 mouse event
 
 ```swift
 private func commit(target: HintTarget, action: ClickAction) {
     let center = CGPoint(x: target.rect.midX, y: target.rect.midY)
     switch action {
     case .left:
-        if AXUIElementPerformAction(target.element, "AXPress" as CFString) != .success {
-            synthesizeClick(at: center, button: .left, count: 1)
-        }
+        synthesizeClick(at: center, button: .left,  count: 1)
     case .right:
-        if AXUIElementPerformAction(target.element, "AXShowMenu" as CFString) != .success {
-            synthesizeClick(at: center, button: .right, count: 1)
-        }
+        synthesizeClick(at: center, button: .right, count: 1)
     case .double:
-        synthesizeClick(at: center, button: .left, count: 2)  // 没有 AX 等价物
+        synthesizeClick(at: center, button: .left,  count: 2)
     }
 }
 ```
 
-**为什么优先用 AX 动作？** AX 是**语义化**的：
-- 不依赖元素当前是否被遮挡
-- 不依赖元素是否在屏幕可见区域
-- 不需要先移动鼠标（鼠标可以留在原地）
-- 不需要焦点切换
+**唯一通用 commit 机制 = 合成 mouse event 到 rect 中心**。简单、可预测、跟用户的心智模型 ("按 hint = 鼠标点这里") 一致。
 
-合成 mouse event 必须把鼠标移到元素中心 —— 期间被任何浮层遮挡都会点错对象。所以 AX 动作能成功就用 AX。
+### 3.1 为什么不用 AX 动作
 
-回退路径（合成）必须存在的原因：
-- 有些 app 的 AX 元素**不实现 AXPress** —— 比如 Electron 默认 AX 实现就是稀薄的。
-- 有些 AXButton 报 success 但实际没反应（buggy AX 实现）—— 这个目前没法事前检测，只能 fallback 不可达。
+早期实现是"AXPress 优先 / 合成兜底"。**已弃**——AX 动作不可靠到不值得放在主路径：
 
-`.double` 没有 AX 等价物。`AXIncrement / AXDecrement / AXShowAlternateUI` 都不是双击语义。所以双击永远走合成路径。
+- **AX metadata 可靠**（元素存在、rect、role、label 这些是怎么找到 hint target 的根基）。
+- **AX actions 不可靠**：很多 control 把 `AXPress` 暴露在 actions list 里但 handler 是 no-op 或语义不符——NSBrowser cell、NSTableRowView、自定义 NSView、Electron 的 AX bridge 都属于这一类。**实测足够多次"hint 出来按了没反应"的 case 才决定砍掉**。
+- `AXShowMenu` 同样问题——某些元素暴露但调用不弹菜单。
+- `AXOpen`（Finder desktop icon 用）同样问题——合成单击 + Finder 双击习惯就够了，不需要它。
+
+### 3.2 砍掉 AX action 的 trade-offs
+
+| 维度 | 老 AX-first 路径 | 新 synth-only 路径 |
+| --- | --- | --- |
+| 标准 control（Button / Link） | AXPress 命中 | synth 单击命中（鼠标实际点确实生效） |
+| 自定义 / 复杂 control | AXPress 静默失败 → 不可预测的 fallback | synth 单击，跟真鼠标点同样的效果 |
+| 被遮挡 / off-screen 的元素 | AX 能点 | 点不到 |
+| 鼠标光标 | AX 路径不动；synth 路径会动 | **总是动到 click 点** |
+| 失败模式 | 两种（AX 命中无效果 / synth 命中无效果），不好排查 | 一种（synth 命中无效果，element 本身的 hit-test 问题） |
+
+被遮挡的元素丢了——但我们 `onScreen` 过滤本来就已经只保留可见元素。这个理论收益用不上。
+
+光标会动——是个**好事**而不是坏事，符合"按 hint = 把鼠标放到那里点一下"的用户心智。
+
+`.double` 跟之前一样——AX 就没有双击动作，永远走合成路径。
 
 ---
 
