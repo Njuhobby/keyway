@@ -10,6 +10,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setupMenuBar()
 
         if ensureAccessibility() {
+            // Caps Lock → F19 remap. The OS doesn't surface Caps Lock as
+            // a normal keyDown (it's a modifier), so we rewrite it to F19
+            // at the HID layer via hidutil. See TriggerRemap.swift.
+            TriggerRemap.applyAtLaunch()
             startTap()
             // Warm the menu-extras PID cache in the background. The
             // scan takes ~500ms; doing it now (well before the user's
@@ -25,12 +29,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        // Restore normal Caps Lock behavior on graceful quit. Force-quit
+        // and crashes leave the remap in place until next reboot or next
+        // Mouseless launch (which reapplies — idempotent).
+        TriggerRemap.revertAtQuit()
+    }
+
     private func setupMenuBar() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.title = "M"
 
         let menu = NSMenu()
-        let header = NSMenuItem(title: "Mouseless prototype · ` to enter vim", action: nil, keyEquivalent: "")
+        let header = NSMenuItem(title: "Mouseless prototype · Caps Lock to enter vim", action: nil, keyEquivalent: "")
         header.isEnabled = false
         menu.addItem(header)
         menu.addItem(.separator())
@@ -59,7 +70,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if newTap.start() {
             tap = newTap
             statusItem.button?.title = "M●"
-            print("[mouseless] running. Press ` to enter vim mode.")
+            print("[mouseless] running. Press Caps Lock to enter vim mode.")
         } else {
             statusItem.button?.title = "M⚠"
         }

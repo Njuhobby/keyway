@@ -25,8 +25,10 @@ cd prototype
 3. `pkill -f Mouseless` —— 旧实例必须杀掉再起新的，否则旧 event tap 还在拦截事件。
 
 启动后菜单栏出现 `M` 图标：
-- `M●` = 已就绪，按 `` ` `` 进入 vim mode
+- `M●` = 已就绪，按 **Caps Lock** 进入 vim mode
 - `M⚠` = Accessibility 未授权
+
+启动时 app 自动跑 hidutil 把 Caps Lock 重映射成 F19（见 §2.1），用户**零设置**。app 退出时自动还原 Caps Lock 原始行为。
 
 `main.swift` 用 `setActivationPolicy(.accessory)` —— 没有 Dock 图标，也不抢焦点。
 
@@ -43,6 +45,43 @@ cd prototype
 
 历史决策：曾尝试过 `CGWindowList` + Screen Recording 列举 menu extras。Sonoma+ 菜单栏渲染
 集中到 Control Center 进程，第三方 status item 看不到，即使授权也没用。已移除。详见 `specs/hint-discovery.md`。
+
+### 2.1 触发键（Caps Lock → F19）
+
+触发键是 **F19**——一个标准键盘上没有的"Hyper 键"。物理 Caps Lock 经 `hidutil` 重映射成 F19 后被 CGEventTap 接管。
+
+**App 自动管理这个映射**，见 `TriggerRemap.swift`：
+
+- `applicationDidFinishLaunching` (AX 授权通过后) → `TriggerRemap.applyAtLaunch()` 调一次 `/usr/bin/hidutil property --set ...`
+- `applicationWillTerminate` → `TriggerRemap.revertAtQuit()` 调 `hidutil property --set '{"UserKeyMapping":[]}'`
+
+用户视角：装上、授权、按 Caps Lock 就用上；quit Mouseless 后 Caps Lock 又是普通 toggle，零残留。
+
+底层就一行 `hidutil property --set ...` 把 HID usage `0x39` (Caps Lock) → `0x6E` (F19)。
+**不需要 root，不需要 kext**。Caps Lock 的 LED 不再随按键亮 —— 这是对的，键的身份已经不是 Caps Lock。
+
+**为什么走 F19 而不直接抓 Caps Lock**：macOS 对 Caps Lock 做特殊处理——只发 `flagsChanged` 事件改 `.maskAlphaShift` flag，**不发 keyDown**，CGEventTap 接不到一个可匹配的事件。重映射后系统在 HID 层就把这个键当 F19 处理，走普通 keyboard 事件流，event tap 拿得到，且没有 toggle 状态。
+
+**生命周期不完美的地方**：`applicationWillTerminate` 在 force-quit / 崩溃 / 系统关机时**不一定 fire**。这几种情况下 remap 残留到下次 reboot 或下次 Mouseless 启动（启动时 applyAtLaunch 是幂等的，重新应用一次没副作用）。用户感知到时可以手动 `hidutil property --set '{"UserKeyMapping":[]}'` 清掉。
+
+### 2.2 setup-trigger.sh — 仅给高级用户
+
+正常使用根本不用碰这个脚本，app 自己搞定。它存在的两个场景：
+
+```sh
+./setup-trigger.sh             # 不启动 app、只手动应用 remap（测试 / 调试用）
+./setup-trigger.sh --persist   # 装一个 LaunchAgent，让 remap 在 Mouseless 不运行时也生效
+```
+
+`--persist` 模式的使用场景：用户依赖 F19 给**其他**工具用（比如自己绑了 F19→某 Alfred workflow），希望 Caps Lock = F19 **永远生效**，不止 Mouseless 运行时。
+
+### 2.3 卸载
+
+```sh
+hidutil property --set '{"UserKeyMapping":[]}'                            # 当前 session 恢复
+launchctl unload ~/Library/LaunchAgents/com.mouseless.trigger-remap.plist  # 卸 LaunchAgent（如装过）
+rm ~/Library/LaunchAgents/com.mouseless.trigger-remap.plist
+```
 
 ---
 
@@ -64,7 +103,7 @@ NSApplication
 
 1. **HotkeyTap** 是唯一事件入口。注册 `CGEvent.tapCreate` 监听 `keyDown` + `flagsChanged`。
    每个事件先检查 `eventSourceUserData == "MOUS"` —— 我们自己合成的直接放行（避免反馈环）。
-2. **未激活**时只看 bare `` ` `` —— 命中调 `session.enter()` 吞掉该事件，其余全放行。
+2. **未激活**时只看 bare F19（= 重映射后的 Caps Lock） —— 命中调 `session.enter()` 吞掉该事件，其余全放行。
 3. **已激活**时事件交给 `VimSession.handle()`。返回 `true` = 消费，`false` = 放行
    （让 Cmd+Space / Cmd+Tab 等系统快捷键继续工作）。
 4. `VimSession` 按 mode 和 palette 状态分发；mode 内部决定要不要触发 hint、要不要退出。
@@ -89,6 +128,8 @@ NSApplication
 | `KeyCode.swift` | `kVK_ANSI_*` 物理键码常量（ANSI 布局，非 QWERTY 会出错） |
 | `KeyPoster.swift` | 合成键盘事件的辅助函数（当前主路径未使用；留给未来 select-text mode） |
 | `AXWait.swift` | 把 NSWorkspace / AX observer 通知桥接成 `async/await`，带超时兜底。`x` 路径用它替代固定 sleep |
+| `TriggerRemap.swift` | App 启动时 shell-out `/usr/bin/hidutil` 把物理 Caps Lock → F19；退出时还原 |
+| `setup-trigger.sh` | 高级用户用。`--persist` 模式装 LaunchAgent，让 F19 映射独立于 Mouseless 生命周期 |
 
 ---
 
@@ -148,8 +189,6 @@ NSApplication
    AX 仍然能返回候选数（只是慢），fall-through 不会触发视觉路径。详见
    `specs/hint-discovery.md` §5 + [`specs/omniparser-fallback-design.md`](specs/omniparser-fallback-design.md) §4.5。
 4. **新 modes** —— `Mode` enum 已经留好扩展点：select-text、drag、right-click 命令模式。接入路径见 `specs/modes.md` §8。
-5. **触发键可配置** —— 当前硬编码 `KeyCode.grave`。最终要切到 Caps Lock。
-   依赖 hidutil remap（用户侧操作）或 IOKit HID。
-6. **多 hint 来源的标签空间冲突** —— 焦点 app 元素很多时会吃光字母组，menu extras 排到 `lj/lk/ll`。
+5. **多 hint 来源的标签空间冲突** —— 焦点 app 元素很多时会吃光字母组，menu extras 排到 `lj/lk/ll`。
    方案候选：menu extras 走单独的前缀（如 `;a`, `;s` …）或单独字母池。
-7. **Dock 分隔符 / Recents 占位过滤** —— 当前 Dock 把所有 `AXDockItem` 都收，包括分隔符。低价值的 hint 浪费标签。
+6. **Dock 分隔符 / Recents 占位过滤** —— 当前 Dock 把所有 `AXDockItem` 都收，包括分隔符。低价值的 hint 浪费标签。

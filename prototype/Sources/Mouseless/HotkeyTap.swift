@@ -67,13 +67,15 @@ final class HotkeyTap {
         let flags = event.flags
 
         if !session.isActive {
-            // Activation: bare ` (backtick) — no modifiers. Shift+` produces
-            // ~ and is allowed through. Cmd/Ctrl/Option+` also pass through
-            // so we don't break things like Cmd+` (window cycling). Will be
-            // remapped to Caps Lock once the user has that key available.
+            // Activation: bare F19 — no modifiers. The user is expected to
+            // have remapped Caps Lock → F19 via hidutil (see setup-trigger.sh).
+            // F19 is unused by any app, so it's a collision-free "Hyper"
+            // key. We still require no modifiers to keep Shift/Cmd/Ctrl/
+            // Option + F19 free for the user to bind elsewhere if they
+            // ever want to.
             let modifierMask: CGEventFlags = [.maskShift, .maskControl,
                                               .maskCommand, .maskAlternate]
-            if keyCode == KeyCode.grave && flags.intersection(modifierMask).isEmpty {
+            if keyCode == KeyCode.f19 && flags.intersection(modifierMask).isEmpty {
                 session.enter()
                 return nil
             }

@@ -85,7 +85,7 @@ guard type == .keyDown else { return passUnretained(event) }
 if !session.isActive {
     let modifierMask: CGEventFlags = [.maskShift, .maskControl,
                                       .maskCommand, .maskAlternate]
-    if keyCode == KeyCode.grave && flags.intersection(modifierMask).isEmpty {
+    if keyCode == KeyCode.f19 && flags.intersection(modifierMask).isEmpty {
         session.enter()
         return nil                          // 吞掉触发键本身
     }
@@ -93,14 +93,15 @@ if !session.isActive {
 }
 ```
 
-**bare `` ` ``**（无任何修饰键）才触发。原因：
-- `Shift + `` ` `` = `~`，是普通字符
-- `Cmd + `` ` ``` 是 macOS 系统 "下一个窗口" 切换
-- Ctrl/Option + `` ` `` 也可能被其他 app 绑定
+**bare F19**（无任何修饰键）才触发。F19 不是物理键盘上真实存在的键——靠 `hidutil` 把物理 **Caps Lock** 重映射成 F19，**由 app 在启动时自动调用** `TriggerRemap.applyAtLaunch()`（见 `SPECS.md` §2.1）。用户零配置。
 
-触发键命中后**消费**该按键 —— 不下发到下层 app，否则下层会收到一个 `` ` ``。
+为什么不直接监听 Caps Lock：macOS 把 Caps Lock 当**modifier**而不是普通键处理。事件流里 Caps Lock 只发 `flagsChanged` 事件改 `.maskAlphaShift` flag，不发 `keyDown`。CGEventTap 拿到的"按下 Caps Lock"是一个 flag change，**没有 keyCode 可以匹配**，而且 Caps Lock 的 toggle 语义（按一次锁定、再按一次解锁）也不符合"瞬时触发"的需求。
 
-未来计划：迁移到 Caps Lock。物理上需要用户用 hidutil remap 或者 IOKit HID。代码侧只是改 keyCode。
+hidutil 重映射改的是 **HID usage code**（在事件进入 macOS 的 modifier 处理逻辑之前），重映射后系统看到的是普通的 F19 keyDown，走标准 keyboard 事件流，event tap 拿得到，且没有 toggle 状态。
+
+留 modifier mask 检查是给未来用户保留"Shift+F19 / Cmd+F19"绑别的快捷键的空间。F19 本身没有任何 app 用，"Hyper key" 范畴。
+
+触发键命中后**消费**该按键 —— 不下发到下层 app，否则下层会收到一个孤立的 F19 keypress。
 
 ---
 
