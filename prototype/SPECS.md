@@ -102,6 +102,7 @@ NSApplication
 | [`specs/modes.md`](specs/modes.md) | Mode 状态机、palette 正交性、sticky、状态转移图、**所有键位表**、KeyCode 常量、新 mode 接入路径 |
 | [`specs/hint-discovery.md`](specs/hint-discovery.md) | AX 三源（focused / Dock / menu extras）、`walk()` 收录条件、屏幕并集计算、**menu extras 踩坑史 + `MenuExtraCache` 设计**、并发安全 |
 | [`specs/hint-rendering.md`](specs/hint-rendering.md) | 标签生成、typing → commit、AX action vs 合成点击、`HintOverlay` 多屏窗口、坐标系转换、**三种 badge 排版**（Dock / `AXMenuItem` 级联 / 通用）、HUD |
+| [`specs/omniparser-fallback-design.md`](specs/omniparser-fallback-design.md) | **设计草稿，未实现**：视觉 ML 路径作为 AX 兜底（fall-through，不并行）；PoC 数据；captioner 为何搁置；过滤设计的 baseline vs exploratory；集成的开放问题 |
 
 ---
 
@@ -135,14 +136,17 @@ NSApplication
    这是 vs Homerow 的 wedge，必须做对。Chromium 的 NSAccessibility 桥规则统一，但
    暴露什么完全取决于 app 的 ARIA/HTML 卫生：好的（VS Code、Slack、Discord）AXButton +
    AXPress 一应俱全，差的（WeChat、各类国产 SaaS）一片 AXGroup 无 action 无 title。
-   长远方向是引入 **OmniParser / 视觉 ML** 路径做兜底——脱离 AX server，用截图喂
-   模型识别可点元素。详见 `specs/hint-discovery.md` §5。
+   长远方向是引入 **OmniParser 视觉路径** 作为 AX 的 **fall-through 兜底**——AX 主，
+   AX 不够时才启动视觉路径，不并行。PoC 已跑通：3K 全屏 detection p50 ~140ms
+   （spec §5 上限是 300ms），WeChat / Wrike 召回明显高于 AX。详见
+   [`specs/omniparser-fallback-design.md`](specs/omniparser-fallback-design.md)。
 3. **App AX cleanup 期的扫描尖峰** —— 关弹框 / 关 sheet 后 sticky rescan 落进目标 app
    的 ~500ms cleanup 窗口里，per-IPC 延迟从 ~0.2ms 涨到 ~40ms。IPC 数已经压到下限
    13（cache + walkMenuBar 双管），优化空间在这条路径上耗尽。事件驱动等 AX 稳定再
-   扫的方案没尝试过——通知发出时机不可控，理论 wall-clock 时间可能不降。引入
-   OmniParser 后这个尖峰自动消失（扫描跟 AX server 状态解耦）。详见
-   `specs/hint-discovery.md` §5。
+   扫的方案没尝试过——通知发出时机不可控，理论 wall-clock 时间可能不降。
+   **跟 OmniParser fallback 是独立问题**——后者只解决 AX 黑洞场景；cleanup 尖峰下
+   AX 仍然能返回候选数（只是慢），fall-through 不会触发视觉路径。详见
+   `specs/hint-discovery.md` §5 + [`specs/omniparser-fallback-design.md`](specs/omniparser-fallback-design.md) §4.5。
 4. **新 modes** —— `Mode` enum 已经留好扩展点：select-text、drag、right-click 命令模式。接入路径见 `specs/modes.md` §8。
 5. **触发键可配置** —— 当前硬编码 `KeyCode.grave`。最终要切到 Caps Lock。
    依赖 hidutil remap（用户侧操作）或 IOKit HID。

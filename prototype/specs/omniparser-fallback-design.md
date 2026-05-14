@@ -1,0 +1,392 @@
+# OmniParser Fallback — Design Notes
+
+视觉路径接进 Mouseless 的设计草稿。**不是实现计划**，是一份"我们到目前为止知道什么、还要决定什么"的备忘录。
+
+**核心定位**：AX 是主路径。AX 快（稳态 ~50ms）、信息量大（role、enabled、action 都给）。OmniParser **只在 AX 显然不够时兜底**。fall-through，**不并行**。理由见 §4。
+
+PoC 代码在仓库**外**：`~/Desktop/mouseless-omniparser-poc/`（throwaway，不跟踪）。
+
+---
+
+## 1. 起源 / 现状
+
+`hint-discovery.md` §5 留了一个 known gap：destructive click 后 ~500ms 扫描尖峰，根因是目标 app 的 AX server 在 cleanup 期间 per-IPC 延迟暴涨。spec 把"OmniParser 视觉路径"作为长远方向：脱离 AX server，扫描跟它的内部状态解耦，尖峰自然消失。
+
+同样动机的还有：**Electron / 复杂 web app 的 AX 兼容性**（SPECS.md known gap #2）。WeChat 的文件列表 / Wrike 的 SPA 这类 app，AX 大量元素是 `AXGroup` 无 action 无 label，hint 路径直接给不出来。视觉路径绕开。
+
+PoC 目的：先验证 OmniParser 在 Apple Silicon 上的延迟和召回是否足以撑起这条路径，**再决定**要不要正经实现。
+
+---
+
+## 2. PoC 结果
+
+环境：`uv` + Python 3.11 + torch 2.11 (MPS) + ultralytics 8.4 + transformers 4.57，OmniParser-v2.0 detector (`microsoft/OmniParser-v2.0` HF repo, `icon_detect/model.pt`).
+
+三张全屏截图（2992×1934）detection-only 数据：
+
+| 截图 | 内容 | boxes | detect p50 | detect p90 |
+| --- | --- | --- | --- | --- |
+| `fullscreen.png` | Clash Verge 设置 + dock + menu bar 混合 | 143 | 142.3 ms | 144.1 ms |
+| `wechat.png` | WeChat 聊天列表 + 桌面 + status bar | 174 | 141.1 ms | 146.3 ms |
+| `wechat2.png` | Chrome + Wrike SPA（实际是个 web 黑洞） | 177 | 111.1 ms | 118.5 ms |
+
+**关键观察**：
+
+- **延迟稳态 110–145 ms**，远低于 spec §5 设的 300ms 上限。p90 - p50 < 10ms，抖动几乎不存在。
+- **召回明显高于 AX**。Wrike 的 inbox 卡片、task detail 字段、Activity feed 每条事件、Wrike 左侧 ~25 项导航——这些在 AX 树里大概率是一片 `AXGroup`，OmniParser 一次全捞回来。
+- 测的 WeChat 文件列表那张（之前讨论过的 AX = 0 hint 的视图）—— PoC 期间该截图意外丢失，没拿到正式数据，但 wechat.png 同来源 app 的高召回已经印证。
+- **冷启动 detector load ~170s**（首次下权重），后续启动 1s。生产环境模型常驻，冷启动成本一次性。
+
+结论按 spec §5 决策树：**OmniParser 路径技术上 viable，值得做正经集成**——作为 fallback，不是替代。
+
+PoC overlay 图存在 `~/Desktop/mouseless-omniparser-poc/screenshots/*_overlay.png`，是判断召回的视觉证据。
+
+---
+
+## 3. Captioner：尝试过，搁置
+
+`OmniParser-v2.0` 在 detector 之外还配了一个基于 Florence-2 的 **icon captioner**（每个 box 输出一句自然语言描述，如 "Send button" / "User avatar with name"）。**试了，三层版本不兼容连环坑**：
+
+1. `transformers==5.x` 把 `forced_bos_token_id` 从 config 移走 → Florence-2 community modeling 代码访问失败
+2. 降到 4.57，又撞 `_supports_sdpa` 没设（Florence-2 代码 2024-10 写的，早于 SDPA 标准化）
+3. 加 `attn_implementation="eager"` 绕开，又撞 `past_key_values[0][0]` 是 `None`（KV cache 接口在 transformers 4.45+ 改成 `Cache` 对象，老代码仍按 tuple 索引）
+
+**之所以放弃**（而不是继续降 transformers 到 ~4.49 把所有坑填了）：
+
+- **Mouseless 不需要语义 caption**：hint label 是我们**自己分配**的两字母编码（`as`、`af`...），不是自然语言。captioner 输出零用于画 hint 这一步。
+- captioner 唯一能加 value 的场景：根据 box 推断"这是 button / link / 文本框"，从而在 OmniParser 路径下选择对应的合成动作。**但 fall-through 路径下，OmniParser 只在 AX 不够时启用**——AX 够用时 role 信号已经从 AX 拿到；AX 不够（黑洞 app）时统一合成 mouse click 就好，不需要再分类。
+- 推断 caption 延迟：Florence-2 base 在 MPS 上自回归 ~20 token 估每 box 50-200ms。全屏 100+ box 一次 caption 是几秒级，**根本进不了实时路径**。哪怕只 caption 选中那一个（commit 后），那时点击已经发生，太晚。
+
+未来如果真要用 caption（比如做 box "可点性"二次过滤），用 **OCR 文本探针**（easyOCR / 系统 Vision framework）比 VLM caption 快一个数量级。**但是否真有用，目前是臆测**，见 §5.2。
+
+---
+
+## 4. Fall-through：AX 主，OmniParser 兜底
+
+PoC 草稿里曾考虑过"并行 + IoU fusion"——两条路径都跑、按 IoU 合并候选。**否决了**。
+
+### 4.1 为什么不并行 fusion
+
+| Scenario | AX 路径 | 跑 OmniParser 是否值得 |
+| --- | --- | --- |
+| 好 AX（Slack、VS Code、Safari、Finder） | ~50ms，role 全、AXPress 精确，候选量够用 | **不值得**：多花 140ms + GPU + 电池，只为捡可能多出来的几个 box |
+| AX 黑洞（WeChat 文件列表、Wrike SPA） | 0 / 极少候选 | **必须**：没有别的来源 |
+
+并行的代价是 100% 的扫描都背上 OmniParser 的延迟 + 资源开销，**收益却集中在不到 10% 的 app 场景**。明显不合算。
+
+并且并行 fusion 还引入了 IoU 合并逻辑、两路结果协调的复杂度，**没换来对应价值**。
+
+### 4.2 Fall-through 流程
+
+```
+collectAll:
+    ax_targets = AX walk (现有 HintMode.walk / HintWindowCache / walkMenuBar 全套)
+
+    if ax_targets 数量 >= AX_USEFUL_THRESHOLD:
+        return ax_targets         # 主路径，OmniParser 不启动
+
+    # AX 黑洞场景
+    screenshot   = capture focused screen
+    visual_boxes = OmniParser detect(screenshot)
+    visual_boxes = apply_baseline_filters(visual_boxes)   # §5.1
+    return ax_targets ∪ visual_boxes
+```
+
+OmniParser 只在 AX 显然不够时启动。**99% 的 scan 完全感知不到它存在**，电池、GPU、加载成本都省了。
+
+### 4.3 每类目标的 commit 行为
+
+| 来源 | sourceWindow | commit 时怎么点 |
+| --- | --- | --- |
+| AX target | 有 | 现有路径：AXPress → AXOpen → 合成点击 fallback |
+| OmniParser-only target | 无 | 跳过 AX action，直接在 box 中心合成 mouse event |
+
+Sticky rescan / `HintWindowCache` 逻辑保留——AX 是主路径，缓存有价值。OmniParser 这一支每次重新跑 detection（140ms 稳态，不值得缓存复杂度）。
+
+### 4.4 AX_USEFUL_THRESHOLD：怎么定
+
+这是 fall-through 的关键参数。**目前没有数据，需要实测才能定**。
+
+候选策略：
+
+- **N = 0**：只在 AX 一个候选都没返回时才跑 OmniParser。最保守、最省资源，但漏掉"AX 有几个但都不是用户想点的"场景（典型例子：WeChat 文件列表，AX 仍然能给 menu bar / dock / sidebar 几十个候选，但右侧的 PDF 列表 = 0）。
+- **N = 某个固定阈值**（比如 20）：AX 候选数低于 20 就触发 OmniParser。能捞回上面的场景，但对正常使用中"我就是开了个简单 app"这种合法低 count 也会误触发。
+- **N = 关于 frontmost app bundle ID 的 lookup**：维护一个"已知 AX 黑洞 app"列表（WeChat、Wrike、特定 Electron 商业 SaaS……），在这些 app 上无条件跑 OmniParser；其他 app 用 N=0 阈值。
+- **不自动决定**：用户手动通过 palette 触发（`:o`）来调用 OmniParser 补充。**最准但要用户教育**。
+
+**已知 fall-through 的固有限制**：AX 返回很多候选但缺关键目标的"AX rich count, poor recall"场景，**简单 count 阈值漏掉**。比如 WeChat 文件列表那张图，AX 候选数大约 30+（侧栏 + 顶 menu + dock 都来），但用户实际想点的 PDF 行都不在里面。简单 N 阈值绕不开。所以最终落地可能是**bundle ID 黑名单 + 手动 palette 触发**的组合。
+
+### 4.5 跟 AX 卡顿尖峰（hint-discovery.md §5）的关系
+
+destructive click 后的 ~500ms AX cleanup 期：
+
+- 现在：sticky rescan 跑进 cleanup 期，IPC 单价飙到 40ms，扫描 500ms。
+- 接入 OmniParser 后：fall-through 本身没缓解尖峰，**因为 AX 候选数仍然多**（cleanup 期 AX 返回值不一定变少）。需要单独检测"AX is busy" 信号才能切到 OmniParser 兜底。
+- 实际更可能的修法：**等 AX 稳定**（hint-discovery.md §5 提到的事件驱动等通知方案）+ **OmniParser 仍然只用于 AX 黑洞场景**。两者解决不同问题。
+
+OmniParser **不是** AX cleanup 尖峰的银弹。它是 AX 黑洞场景的兜底。SPECS.md 上一版里我说"OmniParser 落地后这个尖峰自然消失"是错的，那个尖峰要单独治。
+
+### 4.6 OmniParser commit 的精度问题
+
+AX 路径 commit 时跟坐标无关——`AXUIElementPerformAction(element, "AXPress")` 按元素引用派发，元素在屏幕上的位置不影响。OmniParser 路径**没有元素**，commit 只能合成 mouse event 到一个 `(x, y)` 坐标，**这个坐标必须落进真实可点区域**。
+
+这给 OP 路径引入了一类 AX 路径下不存在的失败：**hint 出现，用户按下，合成 click 成功，但点的位置没命中实际的 click handler，UI 无变化**。
+
+#### click point 和 hint label 视觉位置是两件事
+
+不能混淆。沿用 AX 路径目前的 label 排版逻辑（badge 在元素旁、不挡内容、密集时级联等等，见 `hint-rendering.md`），但 **commit 时合成 click 的目标坐标不等于 label 视觉位置**：
+
+```swift
+// 错的：
+synthesizeClick(at: target.labelPosition, ...)
+
+// 对的：
+synthesizeClick(at: target.clickPoint, ...)
+// where clickPoint 是 box 内部一个真正可点的像素
+```
+
+`clickPoint` 怎么算见下面。
+
+#### click point 的失败模式
+
+box 中心**不总是**可点像素。典型 4 类：
+
+1. **box 框得偏移**：detector 输出边缘抖动，几何中心落到 padding 或 border 外。
+2. **可点区域 ≠ 视觉区域**：web app 里 click handler 装在外层 `<div>` 上、可视按钮是个 `<span>`，或反之；OmniParser 只看视觉，无法看 hit-test 边界。
+3. **透明 overlay 截获**：modal 上面盖一层吃点击的层，click 落到它身上而不是底下的目标。
+4. **HiDPI 坐标系**：截图是物理像素，合成 event 走 logical points。**转换错就直接点空气**。这是实现侧的死活要保证的。
+
+第 4 类是工程问题（必须正确），1-3 类是 OP 路径的**固有概率性失败**——AX 路径下完全不存在。
+
+#### OCR-based click point refiner
+
+观察：**点文字几乎一定命中 click handler**。原因有二：
+
+- 文字是 UI 元素的"label"，本身在视觉区域中央或紧贴中央；
+- 文字所在的像素一定属于可视区域内部，不会落到 padding / border 外。
+
+所以策略：
+
+```
+commit OP-only target:
+    text_regions = OCR(box.crop)   # 只 OCR 这一个 box，不是全屏
+    if text_regions 非空:
+        clickPoint = 最长文字段的几何中心
+    else:
+        clickPoint = box 几何中心     # icon 类元素，OmniParser 训练目标
+                                     # 是紧贴 icon，中心 ≈ icon 中心
+    synthesizeClick(at: clickPoint)
+```
+
+这条路径处理上面 1、2 两类失败：
+
+- 第 1 类（偏移 box）：文字在视觉区域内偏中央，中心一定还在 box 范围内的真实区域上，避开了边缘 padding。
+- 第 2 类（可点区域 ≠ 视觉）：文字属于视觉元素，视觉元素属于可点区域的子集（少数 web 反模式除外），中心命中率比 box 几何中心高。
+
+第 3 类透明 overlay 拦不住——任何坐标都会被截获。第 4 类是工程问题，跟 OCR 无关。
+
+#### 为什么 OCR 在这里是 grounded 的（vs §5.2 的 OCR-as-filter）
+
+之前 §5.2 草稿里把 OCR 当 filter（"无文字 box → 丢"），那是臆测——纯 icon 按钮没字但确实可点，丢了就漏。
+
+OCR 当 **click-point refiner** 是不同 trade-off：
+
+| 维度 | OCR-as-filter | OCR-as-refiner |
+| --- | --- | --- |
+| 触发时机 | collect 路径（每次扫都跑） | commit 路径（只对用户选定的一个 box 跑） |
+| 全屏代价 | 50-200ms / 全屏 | 几 ms / 单 box |
+| OCR 失败的后果 | 把可点 box 误丢，**用户根本看不到 hint** | 降级 fallback 到 box 中心，**等同于没用 OCR** —— 无损 |
+| OCR 误识别的后果 | 影响过滤决策 | 至多影响"是点文字 A 还是文字 B"，两个都在 box 内部，都比边缘安全 |
+
+refiner 用法**任何情况都不比不用差**。这是它跟 filter 用法的根本区别。
+
+#### 实现细节
+
+- macOS Vision framework: `VNRecognizeTextRequest`，硬件加速，无外部 ML 依赖
+- crop 区域：把 box 从全屏截图上 crop 出来（截图本身在 collect 阶段已经截过，commit 时复用同一张）
+- 单 box OCR wall-clock：几 ms 级，commit 路径上的额外延迟可忽略
+- 如果 box 内多个文本段，取最长那段的中心（一般是 button label，比 hint/tooltip 这种短附属文本更靠近 click handler）
+
+#### 用户体感对比
+
+| 失败模式 | AX 路径 | OP 路径（不带 OCR refiner） | OP 路径（带 OCR refiner） |
+| --- | --- | --- | --- |
+| element 完全无 hint | 用户切回鼠标 | 用户切回鼠标 | 同 |
+| 点了没反应 | 几乎不会 | 偶发（box 偏移 / 可点≠视觉） | 显著降低（点字 ≈ 必然命中可点） |
+
+OCR refiner 把 OP 路径的"hint 出现 ≠ 一定生效" 拉近 AX 路径的"hint 出现 ≈ 一定生效"。
+
+#### 一个 commit 后的可观察 affordance
+
+即使 OCR refiner 加上去，misclick 仍然可能发生。考虑 commit 后短暂高亮 click point —— 让用户至少知道"系统点了这个位置"。如果 UI 没反应，用户知道是 OP 路径的精度问题（vs 怀疑 Mouseless 没收到键），可以切鼠标重试。这是 UX 上的小投入，对调试和信任都有意义。
+
+---
+
+## 5. OmniParser 路径的过滤设计
+
+AX 路径靠 `clickableRoles` + `hasMeaningfulLabel` + `skipRoles` 把 candidate 压到 50-100。OmniParser detector 输出未过滤，wechat.png 上是 174 box，**全做 hint 会出现 label 通胀**（屏幕铺满黄色标签）。
+
+过滤是必须的。但**哪些过滤规则是可靠的、哪些是猜的**，要分清。
+
+### 5.1 Baseline：标准 CV 后处理（验证过、可以放心用）
+
+这一组过滤跟 UI 语义无关，是 object detection 的标准 post-processing，已经被 ML 社区在千万张图上验证过。**这些是上线时必加的**。
+
+四条：
+
+1. **YOLO confidence 阈值**
+2. **Size 最小值**（≥ 8×8）
+3. **Size 最大值**（占屏 < N%）
+4. **NMS dedup**（IoU-based 去重）
+
+下面逐条展开。
+
+#### 5.1.1 YOLO confidence 阈值
+
+每个 box 从 detector 出来时附带一个 `[0, 1]` 的 confidence score，代表模型对"这是一个 interactive UI element"的把握程度。
+
+- 实现：`box.confidence >= threshold`，threshold 一般 0.3-0.5。
+- 作用：砍掉模型自己都不确定的检测，多半是误报。
+- threshold 怎么定：**这个数值需要在 UI 截图上扫一下**——0.3 太松会漏一些低 conf 但实际可点的元素，0.5 太严会丢掉一些半可见的合法目标。**PoC 阶段用 0.05 ~ 0.3 这种宽松值跑过**（看 PoC 数据时有 100-180 box，是宽松阈值的产物），真要上线时按"AX 黑洞 app 的 box 命中率"决定。
+
+#### 5.1.2 Size 最小值
+
+- 实现：`rect.width >= 8 && rect.height >= 8`。
+- 作用：砍掉几像素的检测噪音。
+- 跟 AX 路径同条件（`hint-discovery.md` §2.2 收录条件第 2 条）。
+- 这条几乎不会误杀真实 UI 元素——再小的图标按钮也有十几像素。
+
+#### 5.1.3 Size 最大值
+
+- 实现：`rect.width * rect.height <= MAX_SIZE_FRAC * screen.area`，`MAX_SIZE_FRAC` 取 0.25 ~ 0.5。
+- 作用：砍掉"detector 错把整个 panel / sidebar / 窗口当 interactive element"输出的大框。
+- **为什么需要单独一条**：直觉上"NMS 应该把覆盖了小框的大框去重掉"，**事实是不会**——见 §5.1.4 后面的 NMS 含义解释。
+- 实测看 PoC 的三张图没出现这种大框，但**不能假设永远不会**：训练数据覆盖不到的边缘 UI、模型对某些 web app 的容器层 hallucinate、未来 detector 版本变化，都可能产生。**几何 sanity check，加上去几乎无成本，错过的代价是屏幕上多一个无用的覆盖大区域的 hint label**。
+- 注：这条不区分"占满整屏"和"占了 30% 的 sidebar"——都是几乎不会被用户当 hint target 点击的尺寸级别。如果未来发现某些合法 UI（比如全屏弹框）被它误杀，再调 frac 或加 role-aware 的例外。
+
+#### 5.1.4 NMS dedup（**附 NMS 行为说明**）
+
+- 实现：标准 Non-Maximum Suppression。两两计算 box 之间的 IoU，IoU 大于阈值（典型 0.5）的一对里，留 confidence 高的、抑制 confidence 低的。
+- 作用：detector 有时会对同一 UI 元素出两个紧挨的框（典型例子：图标 + 它紧挨的 label 各画一个，或者一个元素被检测两次重叠输出）。NMS 把这种"几乎重合"的去重，留一个代表。
+
+**这里要讲清楚一个反直觉的事：NMS 不去"包含关系"的重叠**，也就是大框完全套住小框这种场景。原因是 NMS 用 **IoU**（Intersection over Union），而 IoU 是：
+
+```
+IoU = 两框相交面积 / 两框并集面积
+```
+
+考虑大框完全包住小框：
+
+```
+大框：1000×800 = 800,000 px²
+小框：  50×30  =   1,500 px²
+
+Intersection = 1,500 px²        （小框自身的面积，因为它整个在大框里）
+Union        = 800,000 px²      （≈ 大框面积，小框是它的子集）
+IoU          = 1,500 / 800,000 = 0.0019
+```
+
+IoU ≈ 0，远低于 NMS 阈值 0.5，**NMS 不会动这两个框，都保留**。
+
+这就是为什么 §5.1.3 必须存在：**NMS 不防大框污染候选集**。两条规则各管一边：
+
+- NMS 处理"两个差不多大小的框互相重叠 ~50% 以上"（去重）。
+- Size 最大值处理"一个框大到不像 interactive element"（剔除巨型误报）。
+
+这俩不重叠，缺一不可。
+
+#### 这四条加起来能压到多少
+
+实测 PoC 三张图都是 100-180 box 量级的**未过滤**输出。这四条加上去通常能压到 60-100，**且不引入任何 UI 启发式**——纯 ML / 几何后处理。剩下的过滤（如果还需要）只能靠 §5.2 的 exploratory 信号，需要数据支撑。
+
+### 5.2 Exploratory：UI 启发式（需要数据，目前是臆测）
+
+下面这些规则**听起来合理**，但**在真实 UI 上是否真有效，目前未知**。需要把 OmniParser 接进 prototype、跑过若干 AX 黑洞 app、看数据后才能决定：
+
+| 候选规则 | 直觉 | 待验证的问题 |
+| --- | --- | --- |
+| **Size × confidence 组合**：小框只在 conf 高时保留 | 大框 + 低 conf 多半是误报的容器 | 阈值定多少？同一规则在 web app vs native app 是否一致？ |
+| **Aspect ratio 过滤**：极宽 / 极高的框 → 丢 | 装饰横线 / 分隔条 | 跨度大的 toolbar 也是极宽，怎么区分？ |
+
+**结论**：上线时先**只用 §5.1 的 baseline 过滤**。Exploratory 这些，等真有 OmniParser-on-AX-bad-app 的数据再决定要不要加。**别在没数据的情况下提前预设规则**。
+
+> **OCR 不在这一节**——它一开始确实被列在 exploratory filter 里（"box 内无文字 → 丢"），但分析后挪到了 §4.6 commit-time refiner 的位置。区别见 §4.6 的对比表。简单说：filter 用法是臆测，refiner 用法是 grounded。
+
+---
+
+## 6. 集成的开放问题
+
+到正经实现之前要先回答的：
+
+### 6.1 进程边界
+
+OmniParser 是 PyTorch 模型，不可能塞进 Swift 进程里跑。三个候选架构：
+
+| 方案 | 优 | 缺 |
+| --- | --- | --- |
+| **Python helper 进程 + XPC** | OmniParser 原生跑，无需转模型；可以单独升级 | Swift ↔ Python IPC 自己撸；Python 运行时 + venv 跟 .app 一起发；启动慢 |
+| **CoreML 转换 + Swift 推理** | 单 binary，启动快，Apple Neural Engine 加速 | YOLO 转 CoreML 可行（ultralytics 有 export 工具），但 Florence-2 转 CoreML 很难；至少 detector 部分能转 |
+| **subprocess（python script）+ stdio** | 简单粗暴 | 每次 detect 都要 spawn Python？或者长驻 worker + stdio 协议，差不多复杂 |
+
+倾向 #2：detector 是 YOLOv8，CoreML export 是 ultralytics 官方支持的路径。Caption 我们不用（§3），所以 Florence-2 这部分不用转。
+单 binary 部署最干净，符合 menu bar app 的发布形态。
+
+### 6.2 模型常驻 vs 按需加载
+
+模型 weights ~30MB（detector）。常驻 ANE/MPS 内存 ~200-500MB。
+
+- **常驻**：menu bar app 启动时 load，每次 trigger 直接推理。延迟最低。
+- **按需**：首次 trigger 加载，可能 1-2s 卡顿；之后常驻。
+
+**fall-through 改变了这个权衡**：OmniParser 不是每次都用，可能用户大部分时间根本触发不到它。常驻 500MB 内存 99% 时间是浪费。
+
+倾向：**首次需要时加载 + 之后常驻**（懒加载 + 不卸载）。第一次 AX-bad app 上稍微卡一下接受，之后回到稳态延迟。
+
+### 6.3 触发判定
+
+`AX_USEFUL_THRESHOLD` 在 §4.4 已经讨论。这里只是再次强调：**这个决定需要数据**。落地时先用最保守的 `N=0`，运行一段时间看实际"OmniParser 是否经常被触发"，再调。
+
+### 6.4 截屏来源
+
+如果 OmniParser 真要触发，需要快速截屏：
+
+- `CGDisplayCreateImage` —— 单显示器
+- `CGWindowListCreateImage` —— 含权限要求
+- `SCStream` / `SCStreamConfiguration` (ScreenCaptureKit) —— 现代 API，需要 Screen Recording 权限
+
+**Screen Recording 权限是 AX 之外多加的一个授权门槛**。我们一直避开它。一旦走这条路，权限模型从"只要 AX"变成"AX + Screen Recording"。**值得跟用户明确这个 trade-off**——尤其考虑到 OmniParser 是兜底场景，可能不少用户其实不需要这个权限。
+
+可能的兼容模式：
+
+- 启动时**不强求** Screen Recording 权限
+- 用户首次落进 AX 黑洞 app 时，**才**提示授权
+- 没授权就退化：报"hint not available"，跟现在 `enter()` 没候选时的行为一致
+
+### 6.5 多显示器
+
+每块屏单独截 → 单独推理？还是拼成大图一次推理？拼图触碰模型的训练分辨率上限。倾向单屏单推理，多屏并行。fall-through 模式下，通常只用扫焦点屏（用户在哪屏上操作）。
+
+---
+
+## 7. 下一步
+
+按"风险递增"排：
+
+1. **CoreML 转 YOLO detector，做 Swift 侧 PoC**：验证 ANE 推理延迟（理论上比 MPS Python 更快）。1-2 天。
+2. **写一个独立的 Swift target，输入截图文件、输出 box list**：跑通 CoreML inference + baseline 过滤（§5.1）。1-2 天。
+3. **接进 prototype 作为 fall-through 的视觉支**：写阈值判定、screen capture、合成 click commit。1 周。
+4. **测真实端到端延迟**：从 trigger 到 hint label 出现的 wall clock，全链路。
+5. **跑 AX 黑洞 app 收集数据**，决定 §5.2 exploratory 过滤是否要加、`AX_USEFUL_THRESHOLD` 调到多少。
+
+每一步都可以独立产出价值。前两步是 PoC v2 的范围，可以再开一个 throwaway repo。
+
+---
+
+## 8. 参考
+
+- OmniParser repo: `github.com/microsoft/OmniParser`
+- 权重: `huggingface.co/microsoft/OmniParser-v2.0` (`icon_detect/model.pt` 是 YOLOv8)
+- PoC 源代码：`~/Desktop/mouseless-omniparser-poc/`（throwaway，可以随时 `rm -rf`）
+- 相关 specs：
+  - `SPECS.md` known gap #2 (Electron / web compatibility) ← OmniParser 主要解决这个
+  - `SPECS.md` known gap #3 + `hint-discovery.md` §5 (AX cleanup spike) ← OmniParser **不**解决这个，单独治
