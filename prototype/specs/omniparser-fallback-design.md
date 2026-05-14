@@ -149,14 +149,15 @@ synthesizeClick(at: target.clickPoint, ...)
 
 #### click point 的失败模式
 
-box 中心**不总是**可点像素。典型 4 类：
+box 中心**不总是**可点像素。5 类：
 
 1. **box 框得偏移**：detector 输出边缘抖动，几何中心落到 padding 或 border 外。
 2. **可点区域 ≠ 视觉区域**：web app 里 click handler 装在外层 `<div>` 上、可视按钮是个 `<span>`，或反之；OmniParser 只看视觉，无法看 hit-test 边界。
 3. **透明 overlay 截获**：modal 上面盖一层吃点击的层，click 落到它身上而不是底下的目标。
 4. **HiDPI 坐标系**：截图是物理像素，合成 event 走 logical points。**转换错就直接点空气**。这是实现侧的死活要保证的。
+5. **容器嵌套**：大框套小框（IoU 不达 NMS 阈值都保留），大框的几何中心落进小框区域，按外层 hint 反而触发了内层目标的 click handler。
 
-第 4 类是工程问题（必须正确），1-3 类是 OP 路径的**固有概率性失败**——AX 路径下完全不存在。
+第 4 类是工程问题（必须正确），1-3 + 5 类是 OP 路径的**固有概率性失败**——AX 路径下完全不存在。下面的 refiner 算法处理 1、2、5；3 和 4 各自有不同性质，refiner 处理不了。
 
 #### OCR-based click point refiner
 
@@ -165,25 +166,106 @@ box 中心**不总是**可点像素。典型 4 类：
 - 文字是 UI 元素的"label"，本身在视觉区域中央或紧贴中央；
 - 文字所在的像素一定属于可视区域内部，不会落到 padding / border 外。
 
-所以策略：
+但单纯"OCR 出文字 → 点文字中心"还不够，因为 OmniParser 经常输出**容器嵌套** box：一个大框完全包住一个小框，两者 IoU 不达阈值都保留（见 §5.1.4 的 NMS 数学）。这时大框 OCR 会**把小框里的文字也识别进来**——小框是 "Send" 按钮含文字 "Send"，大框是套着 Send 按钮的卡片不含自己的文字，大框的 OCR 输出**仍然是 "Send"**，因为它的 crop 区域包含了 Send 那块像素。
+
+朴素 refiner 在这种 case 下会让大框和小框都点到 "Send" 同一像素，触发同一个 click handler，**用户按外层 hint 想干的事被错误地变成内层 hint 的行为**。
+
+#### 关键设计原则：containment-aware
+
+如果 OmniParser 输出了两个 hint label（外大、内小），按 mouseless 的语义：
+
+> **两个 hint 意味着用户有两个独立的"可点目标"**。inner box 是更精准、更具体的那个；outer box 代表"点容器自身、但不点已经被 inner box 覆盖的部分"。
+
+所以外层 box 的 click point **必须避开** inner box 的覆盖范围——把它视为"outer 减 inner 的剩余区域"的中心。
+
+#### containment-aware OCR refiner 算法
 
 ```
-commit OP-only target:
-    text_regions = OCR(box.crop)   # 只 OCR 这一个 box，不是全屏
-    if text_regions 非空:
-        clickPoint = 最长文字段的几何中心
-    else:
-        clickPoint = box 几何中心     # icon 类元素，OmniParser 训练目标
-                                     # 是紧贴 icon，中心 ≈ icon 中心
+commit OP-only target B:
+    inner_boxes = [b for b in all_targets
+                   if b ≠ B and b.rect ⊂ B.rect]      # B 套住的所有更小框
+    text_regions = OCR(B.crop)                        # 仅 OCR 这一个 box
+
+    # Step 1: 剔除属于 inner box 的文字
+    own_text = [t for t in text_regions
+                if t.center not in any inner_box.rect]
+
+    if own_text 非空:
+        clickPoint = 最长 own_text 段的几何中心
+        return synthesizeClick(at: clickPoint)
+
+    # Step 2: B 没有"自己的文字"——全部 OCR 文字都属于 inner box
+    if inner_boxes 非空:
+        # B 的"自身区域" = B.rect 减去所有 inner box 的并集
+        # 通常是 L 形或 frame 形（环形 minus inner rect）
+        own_region = B.rect minus union(inner_boxes.rects)
+
+        if own_region 几何上非空（有 ≥1 pixel area）:
+            clickPoint = own_region 最大连通分量的几何中心
+        else:
+            # 病态：B 完全被 inner boxes 覆盖，无 own region
+            # 说明 B 其实就不是用户能"额外点"的目标 —— 但既然出了 hint 也得能 commit
+            # 折中：点 B 几何中心，等同于触发某个 inner box 的功能
+            # （这种 case 应该极少，是 detector 输出冗余的兜底）
+            clickPoint = B.center
+
+        return synthesizeClick(at: clickPoint)
+
+    # Step 3: 既无 own_text 也无 inner_boxes —— B 是个纯 icon 类 leaf 框
+    clickPoint = B.center
     synthesizeClick(at: clickPoint)
 ```
 
-这条路径处理上面 1、2 两类失败：
+#### 每个 case 的具体处理
 
-- 第 1 类（偏移 box）：文字在视觉区域内偏中央，中心一定还在 box 范围内的真实区域上，避开了边缘 padding。
-- 第 2 类（可点区域 ≠ 视觉）：文字属于视觉元素，视觉元素属于可点区域的子集（少数 web 反模式除外），中心命中率比 box 几何中心高。
+| 场景 | 走哪条路径 |
+| --- | --- |
+| 大框套小框，小框有文字 "Send"，大框无自己的文字（典型卡片） | Step 1 过滤后 own_text 为空 → Step 2 算 own_region 中心 |
+| 大框套小框，小框有 "Send"，大框还有自己的标题 "Tech Backlog" | Step 1 过滤后 own_text = ["Tech Backlog"] → 点 "Tech Backlog" 中心 |
+| 单独的 Send 按钮（无 inner box，OCR 出 "Send"） | Step 1 own_text 非空 → 点 "Send" 中心 |
+| 单独的 ✓ 图标（无 inner box，OCR 无文字） | 跳到 Step 3 → 点 box 中心 |
+| 完全冗余的容器（B 完全被 inner box 覆盖） | Step 2 own_region 为空 → fallback 到 B.center（极少触发） |
 
-第 3 类透明 overlay 拦不住——任何坐标都会被截获。第 4 类是工程问题，跟 OCR 无关。
+#### 实现复杂度
+
+`own_region = B.rect minus union(inner_boxes.rects)` 听起来复杂但对**轴对齐矩形**很简单：
+
+- inner boxes 都是 axis-aligned，subtract 结果是若干个 axis-aligned 子矩形拼成的多边形
+- 实践中常见两种形状：
+  - 一个 inner box 偏在 B 内某一侧 → own_region 是个 L 形或 frame 形
+  - 多个 inner box 散布 → own_region 是几条"间隙带"
+- 找最大连通子矩形的算法直白：枚举 inner box 边界划分出的网格 cell，取其中不被任何 inner 占据的最大 cell
+
+对我们的用途简化版本就够：
+
+1. 算 B 的几何中心 `c = B.center`
+2. 检查 `c` 是否落在任何 inner box 内
+3. 不落 → 用 `c`，落 → 沿 B 的四条边各取中点，取**离所有 inner box 距离最远**的那个点
+
+这个简化版在大多数 case 下行为正确，且实现 10 行内。等观察到边界 case 失败时再升级到完整 own_region 计算。
+
+#### 这条路径处理的失败模式
+
+回到 §4.6 前面列的 4 类 misclick：
+
+- **第 1 类**（偏移 box）：own_text 的中心一定在 B 内部偏中央，避开边缘 padding ✓
+- **第 2 类**（可点区域 ≠ 视觉）：文字属于视觉区域 ✓
+- **第 3 类**（透明 overlay 截获）：refiner 无能为力 ✗
+- **第 4 类**（HiDPI 坐标系）：工程问题，跟 refiner 无关 ✗
+
+新增的 containment-aware 路径**额外**处理了一类失败：
+
+- **第 5 类**（容器嵌套导致外层 hint 错点内层目标）：containment-aware Step 1 + Step 2 ✓
+
+#### 故意没处理：partial overlap
+
+NMS（§5.1.4）让两个 box 都活下来的条件是 `IoU < 0.5`，containment 只是其中一个特例——理论上也可能两个 box partial overlap（互不包含、但有交集），中心都落进交集那块文字。
+
+PoC 三张图里**没观察到** detector 输出这种 partial overlap 形态——containment 是常见的（会话行套头像/名字），partial overlap 几乎没有，因为视觉上的 UI 元素本来就不该相互错位重叠。
+
+算法理论上一行字就能推广（把 `b.rect ⊂ B.rect` 换成 `intersects(b.rect, B.rect)`，own_region 计算原样适用），但**不在没观察到的情况下提前加**——同 §5.2 的纪律。
+
+如果日后接进 prototype 后真在 commit log 里看到 partial-overlap 导致的 misclick，再把 `inner_boxes` 字面改成 `overlapping_boxes`，算法骨架不动。
 
 #### 为什么 OCR 在这里是 grounded 的（vs §5.2 的 OCR-as-filter）
 
