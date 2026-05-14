@@ -76,7 +76,10 @@ final class VimSession {
             return handlePalette(buffer: buffer, keyCode: keyCode, flags: flags)
         }
 
-        // Esc — always exits Mouseless completely.
+        // Esc deactivates the active mode — back to OFF. The process
+        // keeps running (M● in menu bar, Caps Lock still remapped). To
+        // fully quit, use the menu bar Quit item (which reverts the
+        // Caps Lock remap on its way out). See SPECS §2.1.
         if keyCode == KeyCode.escape {
             exit()
             return true
@@ -102,11 +105,11 @@ final class VimSession {
     // MARK: - TAP mode
 
     private func handleTap(hint: HintMode, keyCode: Int, flags: CGEventFlags) -> Bool {
-        // Bare backtick (no modifiers) toggles sticky. While sticky is on,
-        // each click re-scans hints instead of exiting.
+        // Bare trigger key (Caps Lock → F19) toggles sticky. While sticky
+        // is on, each click re-scans hints instead of exiting.
         let modMask: CGEventFlags = [.maskShift, .maskControl,
                                      .maskCommand, .maskAlternate]
-        if keyCode == KeyCode.grave && flags.intersection(modMask).isEmpty {
+        if keyCode == KeyCode.f19 && flags.intersection(modMask).isEmpty {
             sticky.toggle()
             renderModeHUD()
             return true
@@ -224,9 +227,24 @@ final class VimSession {
     // MARK: - Palette overlay
 
     private func handlePalette(buffer: String, keyCode: Int, flags: CGEventFlags) -> Bool {
+        // Trigger key (Caps Lock → F19) inside palette: close palette,
+        // return to the underlying TAP mode. The mode itself never changed
+        // — palette is an independent overlay. Same effect as Backspace
+        // on an empty buffer; the two paths exist because Backspace is
+        // already the natural "go back" key while editing the buffer.
+        let modMask: CGEventFlags = [.maskShift, .maskControl,
+                                     .maskCommand, .maskAlternate]
+        if keyCode == KeyCode.f19 && flags.intersection(modMask).isEmpty {
+            paletteBuffer = nil
+            renderModeHUD()
+            return true
+        }
+
         switch keyCode {
         case KeyCode.escape:
-            // Esc fully exits Mouseless, regardless of palette state.
+            // Esc deactivates the active mode (back to OFF). The process
+            // keeps running in the menu bar; Caps Lock remap stays in
+            // effect. See `SPECS.md` §2.1 for the full state hierarchy.
             exit()
             return true
 
@@ -262,9 +280,6 @@ final class VimSession {
 
     private func executeCommand(_ cmd: String) {
         switch cmd {
-        case "q":
-            exit()
-
         // Future modes plug in here, e.g.:
         // case "st": switchTo(.selectText(...))
         // case "dr": switchTo(.drag(...))
@@ -272,6 +287,9 @@ final class VimSession {
         default:
             // Unknown command — clear the buffer, leave the palette open
             // so the user can type another command without reopening it.
+            // There's deliberately no built-in `:q` command — Esc already
+            // deactivates the mode, and quitting the Mouseless process is
+            // a menu-bar action, not a hint-mode command (see SPECS §2.1).
             paletteBuffer = ""
             HUD.shared.show(":")
         }
