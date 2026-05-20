@@ -144,6 +144,7 @@ NSApplication
 | [`specs/hint-discovery.md`](specs/hint-discovery.md) | AX 三源（focused / Dock / menu extras）、`walk()` 收录条件、屏幕并集计算、**menu extras 踩坑史 + `MenuExtraCache` 设计**、并发安全 |
 | [`specs/hint-rendering.md`](specs/hint-rendering.md) | 标签生成、typing → commit、AX action vs 合成点击、`HintOverlay` 多屏窗口、坐标系转换、**三种 badge 排版**（Dock / `AXMenuItem` 级联 / 通用）、HUD |
 | [`specs/omniparser-fallback-design.md`](specs/omniparser-fallback-design.md) | **设计草稿，未实现**：视觉 ML 路径作为 AX 兜底（fall-through，不并行）；PoC 数据；captioner 为何搁置；过滤设计的 baseline vs exploratory；集成的开放问题 |
+| [`specs/omniparser-integration-roadmap.md`](specs/omniparser-integration-roadmap.md) | **实施路线图**：把上面设计落到代码上的 9 个分阶段计划（P0 决策 → P8 发布），含估时、风险、降级路径、out-of-scope 边界、验收清单 |
 
 ---
 
