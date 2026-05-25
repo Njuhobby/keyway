@@ -21,23 +21,34 @@ import ScreenCaptureKit
 /// their focused window correctly.
 @MainActor
 enum ScreenCapture {
-    /// End-to-end: AX → CGWindowID → ScreenCaptureKit → CGImage.
-    /// Returns nil if any link fails (no focused window, no permission,
-    /// SC content out of sync, etc.). Callers should treat nil as
-    /// "no OmniParser candidates this scan" and continue with AX-only.
+    /// End-to-end: AX → focused window rect → display capture → crop.
+    /// Returns nil if any link fails.
+    ///
+    /// **Why display capture + crop, not per-window capture**:
+    /// `SCContentFilter(desktopIndependentWindow:)` forces WindowServer to
+    /// re-render the window into an off-screen buffer to produce an
+    /// occlusion-free image (~95ms). We don't need occlusion-free — at
+    /// the moment the user presses Caps Lock, the focused window is
+    /// almost always fully visible (that's what they're looking at).
+    /// Reading the already-composited display framebuffer is much
+    /// faster (~20-30ms) since no recomposition is required.
+    /// See `omniparser-fallback-design.md` §6.4.
     static func captureFocusedWindow() async -> CGImage? {
         let tStart = Date()
-        guard let cgWindowID = focusedCGWindowID() else {
+        guard let (windowEl, _) = focusedWindow() else {
             print("[mouseless] ScreenCapture: no focused window (AX chain returned nil)")
+            return nil
+        }
+        guard let windowRectInAX = windowRect(windowEl) else {
+            print("[mouseless] ScreenCapture: window has no AXPosition/AXSize")
             return nil
         }
         let tAX = Date()
 
         // Lazy permission: only ask when we actually need to capture.
-        // First call without permission triggers the native TCC prompt
-        // via CGRequestScreenCaptureAccess. The user has to grant it +
-        // restart the app — there's no "wait for grant" API. So this
-        // attempt fails; the *next* trigger (after restart) succeeds.
+        // First call without permission triggers the native TCC prompt.
+        // User must grant + restart the app — there's no "wait for grant"
+        // API. So this attempt fails; next trigger after restart works.
         guard CGPreflightScreenCaptureAccess() else {
             print("[mouseless] ScreenCapture: requesting Screen Recording permission")
             _ = CGRequestScreenCaptureAccess()
@@ -45,40 +56,70 @@ enum ScreenCapture {
         }
 
         do {
-            let content = try await SCShareableContent.excludingDesktopWindows(
-                false, onScreenWindowsOnly: true
-            )
+            let displays = try await cachedDisplays()
             let tEnum = Date()
 
-            guard let scWindow = content.windows.first(where: { $0.windowID == cgWindowID })
-            else {
-                print("[mouseless] ScreenCapture: windowID \(cgWindowID) not in SC content")
+            // Find the SCDisplay whose frame contains the focused window.
+            // SCDisplay.frame is in the same global display coordinate
+            // space as AX (top-left origin, points). For multi-display
+            // setups the window's display origin can be non-zero — we
+            // subtract it below when computing crop offset.
+            guard let display = displays.first(where: {
+                $0.frame.intersects(windowRectInAX)
+            }) else {
+                print("[mouseless] ScreenCapture: no SCDisplay contains the focused window")
                 return nil
             }
 
-            // desktopIndependentWindow mode: paints the window's *own*
-            // content, ignoring whatever (other window / menu bar / etc)
-            // is occluding it. We want the full UI for OmniParser to
-            // analyze, not a partial view.
-            let filter = SCContentFilter(desktopIndependentWindow: scWindow)
-            let config = SCStreamConfiguration()
-            // Match the retina pixel resolution of the window — using
-            // the filter's contentRect (in points) × 2 for typical
-            // Apple Silicon displays. SC will scale appropriately.
+            // Capture the full display. Empty excludingWindows means
+            // "everything on screen". This reads the already-composited
+            // framebuffer instead of forcing per-window re-render.
+            let filter = SCContentFilter(display: display, excludingWindows: [])
             let scale = CGFloat(filter.pointPixelScale)
+            let config = SCStreamConfiguration()
             config.width = Int(filter.contentRect.width * scale)
             config.height = Int(filter.contentRect.height * scale)
+            // Don't capture the cursor — OmniParser doesn't need it.
+            config.showsCursor = false
             let tFilter = Date()
 
-            let image = try await SCScreenshotManager.captureImage(
+            let displayImage = try await SCScreenshotManager.captureImage(
                 contentFilter: filter,
                 configuration: config
             )
             let tCap = Date()
 
+            // Crop to the focused window's rect inside the display.
+            // Coordinate math: windowRectInAX and display.frame are both
+            // in points, AX/global-display top-left origin. Convert to
+            // pixel-space relative to the display's top-left.
+            let displayOrigin = display.frame.origin
+            let cropInPoints = windowRectInAX.offsetBy(
+                dx: -displayOrigin.x,
+                dy: -displayOrigin.y
+            )
+            // Clamp to the display's bounds (in case window is partially
+            // off-screen) — cropping(to:) returns nil for out-of-bounds.
+            let displayBoundsInPoints = CGRect(
+                x: 0, y: 0,
+                width: display.frame.width, height: display.frame.height
+            )
+            let clampedInPoints = cropInPoints.intersection(displayBoundsInPoints)
+            let cropInPixels = CGRect(
+                x: floor(clampedInPoints.minX * scale),
+                y: floor(clampedInPoints.minY * scale),
+                width: floor(clampedInPoints.width * scale),
+                height: floor(clampedInPoints.height * scale)
+            )
+            guard let cropped = displayImage.cropping(to: cropInPixels) else {
+                print("[mouseless] ScreenCapture: crop failed (rect=\(cropInPixels) image=\(displayImage.width)×\(displayImage.height))")
+                return nil
+            }
+            let tCrop = Date()
+
             let ms = { (a: Date, b: Date) in Int(b.timeIntervalSince(a) * 1000) }
-            print("[mouseless] ScreenCapture timings: ax=\(ms(tStart, tAX))ms enum=\(ms(tAX, tEnum))ms filter=\(ms(tEnum, tFilter))ms capture=\(ms(tFilter, tCap))ms total=\(ms(tStart, tCap))ms windows=\(content.windows.count)")
-            return image
+            print("[mouseless] ScreenCapture timings: ax=\(ms(tStart, tAX))ms enum=\(ms(tAX, tEnum))ms filter=\(ms(tEnum, tFilter))ms capture=\(ms(tFilter, tCap))ms crop=\(ms(tCap, tCrop))ms total=\(ms(tStart, tCrop))ms display=\(displayImage.width)×\(displayImage.height) crop=\(cropped.width)×\(cropped.height)")
+            return cropped
         } catch {
             print("[mouseless] ScreenCapture failed: \(error.localizedDescription)")
             return nil
@@ -89,6 +130,51 @@ enum ScreenCapture {
 
     static var hasScreenRecordingPermission: Bool {
         CGPreflightScreenCaptureAccess()
+    }
+
+    // MARK: - Display cache
+    //
+    // `SCShareableContent.excludingDesktopWindows(...)` is a cross-process
+    // round-trip that enumerates every window the user could see — ~50ms
+    // per call. We only need the *displays* list, which changes only when
+    // the user plugs/unplugs a monitor or rearranges them in Settings.
+    // Cache it across calls and invalidate on screen change.
+
+    private static var cachedDisplaysValue: [SCDisplay]?
+    private static var screenChangeObserver: NSObjectProtocol?
+
+    private static func cachedDisplays() async throws -> [SCDisplay] {
+        installScreenChangeObserverIfNeeded()
+        if let cached = cachedDisplaysValue {
+            print("[mouseless] ScreenCapture: cache HIT (\(cached.count) displays)")
+            return cached
+        }
+        print("[mouseless] ScreenCapture: cache MISS, querying SCShareableContent")
+        let content = try await SCShareableContent.excludingDesktopWindows(
+            false, onScreenWindowsOnly: true
+        )
+        cachedDisplaysValue = content.displays
+        return content.displays
+    }
+
+    private static func installScreenChangeObserverIfNeeded() {
+        guard screenChangeObserver == nil else { return }
+        screenChangeObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            // Display config changed (plug, unplug, rearrange,
+            // resolution swap). Drop the cached SCDisplay list so the
+            // next capture re-queries SCShareableContent. We can't do
+            // this on @MainActor from a notification handler closure,
+            // but cachedDisplaysValue is also @MainActor; the closure
+            // runs on the main queue so we can just touch it.
+            MainActor.assumeIsolated {
+                ScreenCapture.cachedDisplaysValue = nil
+                print("[mouseless] ScreenCapture: display config changed, cache invalidated")
+            }
+        }
     }
 
     // MARK: - Debug
@@ -124,10 +210,15 @@ enum ScreenCapture {
 
     // MARK: - AX chain
 
-    /// AXFocusedApplication → AXFocusedWindow → CGWindowID.
-    /// Each link can fail independently; returns nil if any does.
-    /// Logs the specific failure step so we can diagnose AX-bad apps.
-    private static func focusedCGWindowID() -> CGWindowID? {
+    /// AXFocusedApplication → AXFocusedWindow (with fallbacks).
+    /// Returns the window AXUIElement; we get the rect from AXPosition +
+    /// AXSize in `windowRect(_:)`. Logs the specific failure step so we
+    /// can diagnose AX-bad apps.
+    ///
+    /// (We used to also extract CGWindowID via the private
+    /// `_AXUIElementGetWindow` API for `SCContentFilter(desktopIndependentWindow:)`,
+    /// but display capture + crop doesn't need it — public APIs only now.)
+    private static func focusedWindow() -> (element: AXUIElement, pid: pid_t)? {
         let sys = AXUIElementCreateSystemWide()
 
         // Step 1: AXFocusedApplication
@@ -147,57 +238,61 @@ enum ScreenCapture {
         let bundleID = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier ?? "?"
         print("[mouseless] AX step 1 ok: pid=\(pid) bundleID=\(bundleID)")
 
-        // Step 2: AXFocusedWindow
+        // Step 2: AXFocusedWindow, with fallbacks for apps that don't
+        // designate a focused window (some Electron apps after Cmd+Tab,
+        // apps with no key window, etc.)
         var winRef: CFTypeRef?
         let winErr = AXUIElementCopyAttributeValue(
             app, "AXFocusedWindow" as CFString, &winRef
         )
-        let win: AXUIElement
         if winErr == .success, let winRaw = winRef {
-            win = winRaw as! AXUIElement
             print("[mouseless] AX step 2 (AXFocusedWindow): ok")
-        } else {
-            print("[mouseless] AX step 2 (AXFocusedWindow): err=\(axErrName(winErr)) nil=\(winRef == nil) — trying fallbacks")
-            // Fallback A: AXMainWindow (set on app launch, doesn't need key state)
-            var mainRef: CFTypeRef?
-            let mainErr = AXUIElementCopyAttributeValue(
-                app, "AXMainWindow" as CFString, &mainRef
-            )
-            if mainErr == .success, let mainRaw = mainRef {
-                win = mainRaw as! AXUIElement
-                print("[mouseless] AX step 2 fallback A (AXMainWindow): ok")
-            } else {
-                // Fallback B: AXWindows[0] (z-ordered, frontmost first)
-                var windowsRef: CFTypeRef?
-                let windowsErr = AXUIElementCopyAttributeValue(
-                    app, "AXWindows" as CFString, &windowsRef
-                )
-                guard windowsErr == .success,
-                      let windows = windowsRef as? [AXUIElement],
-                      let first = windows.first
-                else {
-                    print("[mouseless] AX step 2 fallback B (AXWindows[0]): err=\(axErrName(windowsErr)) count=\((windowsRef as? [AXUIElement])?.count ?? -1) — giving up")
-                    return nil
-                }
-                win = first
-                print("[mouseless] AX step 2 fallback B (AXWindows[0]): ok, \(windows.count) windows total")
-            }
+            return (winRaw as! AXUIElement, pid)
+        }
+        print("[mouseless] AX step 2 (AXFocusedWindow): err=\(axErrName(winErr)) nil=\(winRef == nil) — trying fallbacks")
+
+        // Fallback A: AXMainWindow (set on app launch, doesn't need key state)
+        var mainRef: CFTypeRef?
+        let mainErr = AXUIElementCopyAttributeValue(
+            app, "AXMainWindow" as CFString, &mainRef
+        )
+        if mainErr == .success, let mainRaw = mainRef {
+            print("[mouseless] AX step 2 fallback A (AXMainWindow): ok")
+            return (mainRaw as! AXUIElement, pid)
         }
 
-        // Step 3: AXUIElement → CGWindowID via private API
-        // `_AXUIElementGetWindow` is private (note leading underscore)
-        // but extremely stable — Hammerspoon, Rectangle, Raycast, and
-        // dozens of other macOS automation tools rely on it. The
-        // public alternative (CGWindowListCopyWindowInfo + match by
-        // PID + title) is slower and brittle when titles change.
-        var cgWindowID: CGWindowID = 0
-        let idErr = _AXUIElementGetWindow(win, &cgWindowID)
-        guard idErr == .success, cgWindowID != 0 else {
-            print("[mouseless] AX step 3 (_AXUIElementGetWindow): err=\(axErrName(idErr)) id=\(cgWindowID)")
+        // Fallback B: AXWindows[0] (z-ordered, frontmost first)
+        var windowsRef: CFTypeRef?
+        let windowsErr = AXUIElementCopyAttributeValue(
+            app, "AXWindows" as CFString, &windowsRef
+        )
+        guard windowsErr == .success,
+              let windows = windowsRef as? [AXUIElement],
+              let first = windows.first
+        else {
+            print("[mouseless] AX step 2 fallback B (AXWindows[0]): err=\(axErrName(windowsErr)) count=\((windowsRef as? [AXUIElement])?.count ?? -1) — giving up")
             return nil
         }
-        print("[mouseless] AX step 3 ok: CGWindowID=\(cgWindowID)")
-        return cgWindowID
+        print("[mouseless] AX step 2 fallback B (AXWindows[0]): ok, \(windows.count) windows total")
+        return (first, pid)
+    }
+
+    /// Window's screen-space rect from AX attributes.
+    /// AXPosition / AXSize live in global-display top-left coordinates,
+    /// in points — same space SCDisplay.frame uses.
+    private static func windowRect(_ element: AXUIElement) -> CGRect? {
+        var posRef: CFTypeRef?
+        var sizeRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, "AXPosition" as CFString, &posRef) == .success,
+              AXUIElementCopyAttributeValue(element, "AXSize" as CFString, &sizeRef) == .success,
+              let p = posRef, let s = sizeRef
+        else { return nil }
+        var origin = CGPoint.zero
+        var size = CGSize.zero
+        guard AXValueGetValue(p as! AXValue, .cgPoint, &origin),
+              AXValueGetValue(s as! AXValue, .cgSize, &size)
+        else { return nil }
+        return CGRect(origin: origin, size: size)
     }
 
     private static func axErrName(_ err: AXError) -> String {
@@ -223,11 +318,3 @@ enum ScreenCapture {
     }
 }
 
-// Private AX API to bridge AXUIElement → CGWindowID. Declared here as
-// a Swift `@_silgen_name` shim so we don't need a separate bridging
-// header.
-@_silgen_name("_AXUIElementGetWindow")
-private func _AXUIElementGetWindow(
-    _ element: AXUIElement,
-    _ windowID: UnsafeMutablePointer<CGWindowID>
-) -> AXError
