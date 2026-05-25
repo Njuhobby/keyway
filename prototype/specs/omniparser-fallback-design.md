@@ -585,25 +585,93 @@ PoC v2 的 throwaway spike 在 `~/Desktop/mouseless-omniparser-coreml-spike/`，
 
 `AX_USEFUL_THRESHOLD` 在 §4.4 已经讨论。这里只是再次强调：**这个决定需要数据**。落地时先用最保守的 `N=0`，运行一段时间看实际"OmniParser 是否经常被触发"，再调。
 
-### 6.4 截屏来源
+### 6.4 截屏来源 + 范围（已定）
 
-如果 OmniParser 真要触发，需要快速截屏：
+#### 范围：**只截焦点窗口**（不是全屏，不是焦点屏）
 
-- `CGDisplayCreateImage` —— 单显示器
-- `CGWindowListCreateImage` —— 含权限要求
-- `SCStream` / `SCStreamConfiguration` (ScreenCaptureKit) —— 现代 API，需要 Screen Recording 权限
+讨论时考虑过三种范围：
 
-**Screen Recording 权限是 AX 之外多加的一个授权门槛**。我们一直避开它。一旦走这条路，权限模型从"只要 AX"变成"AX + Screen Recording"。**值得跟用户明确这个 trade-off**——尤其考虑到 OmniParser 是兜底场景，可能不少用户其实不需要这个权限。
+| 方案 | 优 | 缺 |
+| --- | --- | --- |
+| 全屏 | API 最简单 | 跟 AX 路径在 Dock / menu bar 上重叠产生 label 冲突；3000×2000 → 1280² resize 后小图标接近模型识别下限，召回打折；隐私上把用户当前任务无关的内容也喂给 ML pipeline |
+| 焦点屏 | 多显示器场景过滤掉其他屏 | 仍然包含 Dock / menu bar / 桌面 / 其他窗口，重叠和召回问题不解 |
+| **焦点窗口** | 跟 AX 路径分工干净；窗口 1500×900 → 1280² resize 后小图标 scale ~0.85 召回更高；隐私上只看用户当前窗口 | API 略复杂（要先 AX 拿 windowID，再 ScreenCaptureKit 截特定窗口） |
 
-可能的兼容模式：
+**决策：焦点窗口**。理由——AX 路径在 Dock / menu bar / menu extras 上**永远好用**（这些苹果原生 AX 100% 覆盖），不需要 OmniParser 重复识别。OmniParser **精确**地补 AX 黑洞问题——**焦点窗口内部的子元素**——所以截图范围跟 AX 路径互补、不重叠。
 
-- 启动时**不强求** Screen Recording 权限
-- 用户首次落进 AX 黑洞 app 时，**才**提示授权
-- 没授权就退化：报"hint not available"，跟现在 `enter()` 没候选时的行为一致
+#### AXFocusedWindow 在 AX-bad app 上也能拿吗？✅ 能
 
-### 6.5 多显示器
+AX 树有两层：
 
-每块屏单独截 → 单独推理？还是拼成大图一次推理？拼图触碰模型的训练分辨率上限。倾向单屏单推理，多屏并行。fall-through 模式下，通常只用扫焦点屏（用户在哪屏上操作）。
+- **顶层窗口骨架**（AXApplication → AXWindow → AXPosition / AXSize / AXTitle）：**任何 app 都正确**——macOS 系统 framework 在 NSWindow 创建时自动注册，不依赖 app 自身 AX 实现质量
+- **窗口内子元素树**（AXChildren 递归）：**这一层才会在 Electron / WKWebView / Catalyst 上变成 AXGroup 黑洞**
+
+OmniParser 路径只读顶层（窗口在哪、多大、CGWindowID），**完全不碰子元素树**——所以对 AX-bad app 同样 work。从这个角度看 OmniParser 是"AX 顶层元数据的优秀客户 + 子元素树的替代者"。
+
+边缘 case：
+
+| 场景 | 处理 |
+| --- | --- |
+| 焦点 app 没有窗口（menu bar agent app）| `AXFocusedWindow` = nil → OmniParser 不触发，AX 路径处理 menu bar |
+| 多窗口同时可见（多个 Finder） | 第一版只截 `AXFocusedWindow`，按观察决定要不要扩展到所有 AXWindows |
+| 焦点窗口被其他窗口部分遮挡 | ScreenCaptureKit 的 `desktopIndependentWindow` 模式忽略遮挡画完整窗口内容——正合需求 |
+| 全屏游戏（自渲染 bypass NSWindow） | 罕见。整个 Mouseless 本来就在游戏内不能 work，已知 limitation |
+
+#### 实现路径：ScreenCaptureKit per-window
+
+```swift
+// 1. AX 拿焦点窗口 element
+guard let focusedWindow = focusedApp.attribute("AXFocusedWindow") as? AXUIElement
+else { return .axOnly }   // 没窗口，OP 不触发
+
+// 2. 拿 CGWindowID（私有 API but stable: _AXUIElementGetWindow）
+var windowID: CGWindowID = 0
+guard _AXUIElementGetWindow(focusedWindow, &windowID) == .success
+else { return .axOnly }
+
+// 3. ScreenCaptureKit 截
+let content = try await SCShareableContent.current
+guard let scWindow = content.windows.first(where: { $0.windowID == windowID })
+else { return .axOnly }
+let filter = SCContentFilter(desktopIndependentWindow: scWindow)
+let image = try await SCScreenshotManager.captureImage(
+    contentFilter: filter,
+    configuration: SCStreamConfiguration()
+)
+```
+
+**对比 API 候选**：
+
+- ✅ **ScreenCaptureKit (`SCScreenshotManager`)**：现代 API、per-window 原生支持、自动处理多屏 / HiDPI / 窗口 z-order
+- ⚠️ `CGWindowListCreateImage`：legacy，能 per-window 但 macOS 14+ 起被标 deprecated
+- ❌ `CGDisplayCreateImage`：只能整屏，不符合我们需求
+
+选 ScreenCaptureKit。
+
+#### Screen Recording 权限
+
+**这是 AX 之外多加的一个授权门槛**——我们一直避开它，一旦走这条路，权限模型从"只要 AX"变成"AX + Screen Recording"。值得跟用户明确这个 trade-off。
+
+权限请求策略（lazy）：
+
+- 启动时**不**请求 Screen Recording
+- 用户首次落进会触发 OmniParser 的 app（按框架探测）时，**才**用 `CGPreflightScreenCaptureAccess()` 检测，没授权弹原生 prompt
+- 没授权就降级：当次扫描 OmniParser 路径退化为"无候选"，AX 候选仍可用——跟现在 AX 黑洞 app 体验一致，**不会让 Mouseless 整体挂掉**
+
+#### 坐标系对齐
+
+OmniParser 输出 box 是窗口截图内的归一化坐标 (0-1)。要还原到屏幕坐标用于合成 click：
+
+```
+screen_x = window.origin.x + box.cx_normalized * window.size.width
+screen_y = window.origin.y + box.cy_normalized * window.size.height
+```
+
+`window.origin` / `window.size` 直接从前面那步的 AX `AXPosition` / `AXSize` 拿。**完全跟 AX 路径同一个坐标系**——合成 click 时无需特殊处理 OP 来源的 box。
+
+#### 多显示器
+
+OmniParser 只看焦点窗口——窗口在哪一块屏不重要。**多显示器场景自动正确**，无需特殊代码。
 
 ---
 

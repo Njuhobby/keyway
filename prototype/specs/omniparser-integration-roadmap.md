@@ -97,25 +97,36 @@ P0/P1/P2 可以并行（人手够的话）。P3-P8 串行。
 
 ## P2 — 截屏 + 权限流（1-2 天）
 
-**目标**：把"如何在 Swift 里拿到当前焦点屏的截图"这个独立子问题闭环。
+**目标**：把"如何在 Swift 里拿到焦点窗口的截图"这个独立子问题闭环。
+
+**范围决策**：**只截焦点窗口**，不是焦点屏、不是全屏。详见 `omniparser-fallback-design.md` §6.4 的讨论——核心理由：AX 路径在 Dock / menu bar / menu extras 上永远好用，OmniParser 精确补"焦点窗口内子元素 AX 黑洞"问题，截图范围跟 AX 路径互补不重叠 + 召回率更高（窗口 ~1500×900 → 1280² resize 比全屏 3000×2000 → 1280² 召回好）。
 
 **输出**：
-- `Sources/Mouseless/ScreenCapture.swift`：`focusedScreenImage() async throws -> CGImage`
+- `Sources/Mouseless/ScreenCapture.swift`：`focusedWindowImage() async throws -> CGImage?`（nil 表示焦点 app 没窗口）
 - 权限请求 UI：lazy prompt（首次走 OP 路径时才弹）
-- 多显示器逻辑：只截焦点屏
+- 跟 AX 协作的窗口探测：用 `AXFocusedWindow` + `_AXUIElementGetWindow` 拿 CGWindowID
 
 **步骤**：
-1. ScreenCaptureKit 调用样板：`SCShareableContent.current` → `SCDisplay` → `SCStreamConfiguration` → `SCScreenshotManager`
-2. 焦点屏判定：从 `NSScreen.screens` 找含 `NSEvent.mouseLocation` 或焦点窗口的那块
-3. 权限处理：
+1. **AX 拿焦点窗口**：
+   - `AXFocusedApplication` → app element
+   - `app.attribute("AXFocusedWindow")` → window element
+   - `_AXUIElementGetWindow(window, ...)` → CGWindowID（私有但 stable 的 API）
+   - 任何一步 fail → 返回 nil，路径降级为 AX-only
+2. **ScreenCaptureKit per-window 截图**：
+   - `SCShareableContent.current.windows.first { $0.windowID == cgWindowID }` 找对应 SCWindow
+   - `SCContentFilter(desktopIndependentWindow: scWindow)`（关键 mode：忽略遮挡，画完整窗口内容）
+   - `SCScreenshotManager.captureImage(...)` → CGImage
+3. **权限处理**：
    - 启动时**不**请求 Screen Recording
    - 首次 OP 路径触发时检测 `CGPreflightScreenCaptureAccess()`，没权限就弹原生授权 prompt
    - 没授权：当次 OP 路径退化为"无候选"（跟现在 AX 黑洞 app 体验一致），不阻塞 Mouseless 整体
-4. 验证：跑一遍 ScreenCaptureKit 截图耗时（典型 < 30ms 在 M 系列）
+4. **AX-bad app 验证**：在 WeChat / Slack / VS Code 这种 AX 黑洞 app 上跑一遍，确认 `AXFocusedWindow` ✅ 能拿、CGWindowID ✅ 能拿、ScreenCaptureKit ✅ 能出图。**AX 黑洞只是子元素层的问题，顶层窗口骨架对所有 app 都可用**。
+5. **验证延迟**：典型 < 30ms 在 M 系列。
 
 **风险**：
 - **权限 UX 突兀**：用户切到 Slack，按 Caps Lock，弹个授权框很惊。Mitigation：banner 里提示一次"打开 Electron 支持需要 Screen Recording 权限"。
 - **截屏延迟超 50ms**：超过会吃掉 OP 路径的预算。如果发生，调研 `SCStream` 持续流 vs single-shot screenshot 的差异。
+- **`_AXUIElementGetWindow` 是私有 API**：苹果可能哪天 break。备用方案：用 `CGWindowListCopyWindowInfo` 按 PID + 窗口标题匹配（慢但 public）。第一版先用私有 API，遇到问题再切。
 
 ---
 
