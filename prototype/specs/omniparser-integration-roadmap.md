@@ -188,25 +188,38 @@ P0/P1/P2 可以并行（人手够的话）。P3-P8 串行。
          HintWindowCache.shared.markDirty(window: win)
      }
      ```
-3. **`collectAll()` 路由**：
+3. **`collectAll()` 路由**：AX walk 拆成"焦点 app 子元素"vs"其他 3 个 AX 来源"，OP 只替代前者。详见 `omniparser-fallback-design.md` §4.2/§4.4。
    ```swift
    let framework = FrameworkDetector.detect(...)
-   let axTargets = walkAX(...)  // 现有逻辑封装
-   switch framework {
-   case .catalyst, .electron, .webContent:
-       // 这些 app AX 注定不行，跳过 AX walk 也 OK——但第一版稳妥起见
-       // 仍跑 AX（拿 dock/menu bar），叠加 OP
-       let opTargets = runOmniParser()
-       return axTargets ∪ opTargets
-   case .appkit, .unknown:
-       if axTargets.count < FALLBACK_N {
-           let opTargets = runOmniParser()
-           return axTargets ∪ opTargets
+
+   // 永远跑——dock/menubar/extras AX walk 跟下面焦点 app 分支并行
+   async let dockTargets = walkDock(...)
+   async let menubarTargets = walkMenuBar(...)
+   async let extrasTargets = walkMenuExtras(...)
+
+   // 焦点 app 子元素这一支：按 framework 分流
+   async let focusedTargets: [HintTarget] = {
+       switch framework {
+       case .catalyst, .electron, .webContent:
+           // OP 路径：截图 + 推理 + baseline 过滤
+           // 注意：跳过焦点 app AX walk（节省 ~186ms）
+           return await runOmniParser()
+       case .appkit, .unknown:
+           let ax = walkFocusedApp(...)
+           if ax.count < FALLBACK_N {
+               // 安全网：AppKit app 但 AX 候选异常少 → 叠加 OP
+               let op = await runOmniParser()
+               return ax + op
+           }
+           return ax
        }
-       return axTargets
-   }
+   }()
+
+   return await (dockTargets + menubarTargets + extrasTargets + focusedTargets)
    ```
-   `FALLBACK_N` 第一版用 `5`（保守，避免空对话框误触发），P7 数据调
+   `FALLBACK_N` 第一版用 `5`（保守，避免空对话框误触发），P7 数据调。
+
+   **关键点**：用 `async let` 让 4 个分支真正并行，而不是顺序跑。AX-bad app 路径的 user-facing 延迟 = `max(50ms AX 其他来源, 172ms OP)` ≈ 172ms，比 sequence 节省 186ms。
 4. **hint label 分配**：当前是 `dock(numeric) + (focused + extras)(letters)`。OP 候选合并进 letter 池，跟 focused 共用空间。
 5. **`OmniParserPath.swift` stub**：
    ```swift

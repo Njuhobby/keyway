@@ -26,10 +26,12 @@ enum ScreenCapture {
     /// SC content out of sync, etc.). Callers should treat nil as
     /// "no OmniParser candidates this scan" and continue with AX-only.
     static func captureFocusedWindow() async -> CGImage? {
+        let tStart = Date()
         guard let cgWindowID = focusedCGWindowID() else {
             print("[mouseless] ScreenCapture: no focused window (AX chain returned nil)")
             return nil
         }
+        let tAX = Date()
 
         // Lazy permission: only ask when we actually need to capture.
         // First call without permission triggers the native TCC prompt
@@ -46,6 +48,8 @@ enum ScreenCapture {
             let content = try await SCShareableContent.excludingDesktopWindows(
                 false, onScreenWindowsOnly: true
             )
+            let tEnum = Date()
+
             guard let scWindow = content.windows.first(where: { $0.windowID == cgWindowID })
             else {
                 print("[mouseless] ScreenCapture: windowID \(cgWindowID) not in SC content")
@@ -64,11 +68,16 @@ enum ScreenCapture {
             let scale = CGFloat(filter.pointPixelScale)
             config.width = Int(filter.contentRect.width * scale)
             config.height = Int(filter.contentRect.height * scale)
+            let tFilter = Date()
 
             let image = try await SCScreenshotManager.captureImage(
                 contentFilter: filter,
                 configuration: config
             )
+            let tCap = Date()
+
+            let ms = { (a: Date, b: Date) in Int(b.timeIntervalSince(a) * 1000) }
+            print("[mouseless] ScreenCapture timings: ax=\(ms(tStart, tAX))ms enum=\(ms(tAX, tEnum))ms filter=\(ms(tEnum, tFilter))ms capture=\(ms(tFilter, tCap))ms total=\(ms(tStart, tCap))ms windows=\(content.windows.count)")
             return image
         } catch {
             print("[mouseless] ScreenCapture failed: \(error.localizedDescription)")

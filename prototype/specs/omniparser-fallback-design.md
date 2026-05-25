@@ -78,21 +78,68 @@ PoC 草稿里曾考虑过"并行 + IoU fusion"——两条路径都跑、按 IoU
 
 ### 4.2 Fall-through 流程
 
+#### AX walk 不是一个动作，是 4 个独立来源
+
+`HintMode.collectAll()` 当前同时跑 4 个 AX 来源：
+
+| 来源 | AX 表现 | OP 能替代吗 | 备注 |
+| --- | --- | --- | --- |
+| **焦点 app 子元素树**（窗口内按钮/列表项等） | Electron/WebContent/Catalyst 上烂 | ✅ 可以——OP 截焦点窗口看到的就是这一层 | 这是**唯一**需要 OP 兜底的部分 |
+| **Dock items** | 永远好（苹果原生 AX）| ❌ 不行——dock 不在焦点窗口内，OP 截图看不到 | 永远 AX 提供 |
+| **焦点 app 的 AXMenuBar** | 永远好（AppKit/SwiftUI 渲染）| ❌ 同上，菜单栏不在焦点窗口内 | 永远 AX 提供 |
+| **Menu bar extras**（status icons） | 永远好（苹果原生 AX）| ❌ 同上 | 永远 AX 提供 |
+
+**关键洞察**：OP 路径**只替代第一行**。其他 3 个来源在 OP 路径下**继续保留 AX walk**——它们既快（dock + extras + menubar 合计 ~50ms）又准（苹果原生 100% 覆盖），而且 OP 物理上看不到（截图只覆盖焦点窗口）。
+
+#### 完整流程（按 app 类型）
+
 ```
 collectAll:
-    ax_targets = AX walk (现有 HintMode.walk / HintWindowCache / walkMenuBar 全套)
+    framework = detectFramework(app)              // §4.4，cached
 
-    if ax_targets 数量 >= AX_USEFUL_THRESHOLD:
-        return ax_targets         # 主路径，OmniParser 不启动
+    # 永远跑（4 个 AX 来源中的 3 个）
+    dock_targets       = AX walk: Dock           // ~6ms
+    menubar_targets    = AX walk: AXMenuBar      // 内含 ~7ms
+    extras_targets     = AX walk: menu extras    // ~44ms
 
-    # AX 黑洞场景
-    screenshot   = capture focused screen
-    visual_boxes = OmniParser detect(screenshot)
-    visual_boxes = apply_baseline_filters(visual_boxes)   # §5.1
-    return ax_targets ∪ visual_boxes
+    # 焦点 app 子元素树：按 framework 分流
+    if framework in {.catalyst, .electron, .webContent}:
+        # AX 黑洞场景——跳过焦点 app AX walk，用 OP 替代
+        # 这一支跟上面 3 个 AX 来源并行跑
+        screenshot     = capture focused window
+        visual_boxes   = OmniParser detect(screenshot)
+        visual_boxes   = apply_baseline_filters(visual_boxes)   # §5.1
+        focused_targets = visual_boxes
+    else:
+        # AppKit / unknown：AX walk 焦点 app 子元素树
+        focused_targets = AX walk: focused app children   // ~186ms
+        if count(focused_targets) < FALLBACK_N:
+            # 安全网：AX 候选异常少，叠加 OP
+            visual_boxes = OmniParser detect(capture focused window)
+            focused_targets ∪= apply_baseline_filters(visual_boxes)
+
+    return dock_targets ∪ menubar_targets ∪ extras_targets ∪ focused_targets
 ```
 
-OmniParser 只在 AX 显然不够时启动。**99% 的 scan 完全感知不到它存在**，电池、GPU、加载成本都省了。
+#### 延迟分析（M3 Max，实测数）
+
+**AX-good app 路径**（Finder / Safari / Mail / ...）：
+
+```
+focused (~186ms) + dock (~6ms) + extras (~44ms) + menubar (~7ms)
+= ~190ms (并行就是 max(186, 44+其他) ≈ 186ms)
+```
+
+**AX-bad app 路径**（WeChat / Slack / Outlook / ...），并行执行：
+
+```
+thread A: dock + menubar + extras AX walk    ~50ms
+thread B: screencap + OP infer + filter      142 + 30 + 5 = 177ms
+
+user-facing = max(A, B) = 177ms
+```
+
+**比"跳到 OP 之前还要先跑一遍焦点 app AX walk"省 ~186ms**——这是把 4 来源分开后拿到的实质收益。OmniParser 只在 AX 黑洞场景跑，**99% 的 scan 完全感知不到它存在**，电池、GPU、加载成本都省了。
 
 ### 4.3 每类目标的 commit 行为
 
@@ -177,28 +224,40 @@ Layer 1 在前是因为它是**纯文件系统读取，0 IPC**——能命中就
 
 #### 路径选择伪码
 
+注意：下面的「跑 OmniParser」和「跑焦点 app AX walk」是**两选一**的——但 dock/menubar/extras 的 AX walk **永远跑**（§4.2 表 1）。这里的 "return" 只代表"焦点 app 子元素这一来源"的决策完成，其他 3 个 AX 来源跟它**并行**执行。
+
 ```
 collectAll():
     app = frontmost app
     framework = detectFramework(app)       // cached after first call
 
-    // 显式覆盖优先：人工小列表
-    if app.bundleID in AX_FORCE_BLACKLIST:
-        run OmniParser, return
-    if app.bundleID in AX_FORCE_WHITELIST:
-        run AX walk, return                 // e.g. VS Code 之类 Electron 但 AX 不错
+    # 永远跑（3 个 AX 来源跟下面焦点 app 分支并行）
+    dock_targets    = AX walk: Dock
+    menubar_targets = AX walk: focused app's AXMenuBar
+    extras_targets  = AX walk: menu bar extras
 
-    switch framework:
-        case .catalyst, .electron, .webContent:
-            run OmniParser, return          // 框架级判定，省一次 AX 扫描
-        case .appkit, .unknown:
-            ax_targets = run AX walk
-            if count(ax_targets) < FALLBACK_N:
-                # AppKit app 但实际 AX 候选异常少 → 安全网
-                # （SwiftUI 嵌入控件、奇怪自定义 view 兜底）
-                op_targets = run OmniParser
-                return ax_targets ∪ op_targets
-            return ax_targets
+    # 焦点 app 子元素这一来源：按 framework / 列表分流
+    # 显式覆盖优先：人工小列表
+    if app.bundleID in AX_FORCE_BLACKLIST:
+        focused_targets = OmniParser path
+    elif app.bundleID in AX_FORCE_WHITELIST:
+        focused_targets = AX walk: focused app children    // e.g. VS Code 之类 Electron 但 AX 不错
+    else:
+        switch framework:
+            case .catalyst, .electron, .webContent:
+                focused_targets = OmniParser path          // 跳过焦点 app AX walk
+            case .appkit, .unknown:
+                focused_targets = AX walk: focused app children
+                if count(focused_targets) < FALLBACK_N:
+                    # AppKit app 但实际 AX 候选异常少 → 安全网
+                    # （SwiftUI 嵌入控件、奇怪自定义 view 兜底）
+                    op_targets = OmniParser path
+                    focused_targets ∪= op_targets
+
+    return dock_targets ∪ menubar_targets ∪ extras_targets ∪ focused_targets
+
+# 简写：
+OmniParser path = capture focused window  → detect → apply_baseline_filters (§5.1)
 ```
 
 #### 人工维护的两个列表
