@@ -43,6 +43,15 @@ final class VimSession {
         sticky = false
         renderModeHUD()
         print("[mouseless] enter TAP mode")
+
+        // P2 debug: in parallel with AX hint collection, also capture the
+        // focused window via ScreenCaptureKit. This exercises the OP path's
+        // screencap entry point under the *same* trigger (Caps Lock) the
+        // real OP path will use — no menu-click focus shifts to worry
+        // about. Output is /tmp/mouseless-focused.png; flow doesn't block.
+        // Strip this call once OP integration (P4) replaces it with real
+        // downstream use.
+        ScreenCapture.debugCaptureToTmp()
     }
 
     func exit() {
