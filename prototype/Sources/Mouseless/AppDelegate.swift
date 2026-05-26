@@ -27,6 +27,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Caps Lock on an AX-bad app feel as snappy as subsequent
             // ones. See `OmniParserModel.preload`.
             OmniParserModel.preload()
+
+            if OmniParserPath.debugOverlayEnabled {
+                print("[mouseless] DEBUG overlay enabled (MOUSELESS_DEBUG_OVERLAY=1) — /tmp/mouseless-focused.png written on every OP scan, +30-80ms background")
+            }
         } else {
             statusItem.button?.title = "M⚠"
             print("[mouseless] Accessibility not granted.")

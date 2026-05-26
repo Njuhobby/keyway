@@ -1,4 +1,7 @@
 import Cocoa
+import CoreGraphics
+import ImageIO
+import UniformTypeIdentifiers
 
 /// OmniParser visual hint candidates for the focused window.
 ///
@@ -24,6 +27,16 @@ enum OmniParserPath {
         let confidence: Float  // 0.0–1.0
     }
 
+    /// Master switch for the diagnostic overlay dump
+    /// (`/tmp/mouseless-focused.png` with kept/rejected boxes drawn).
+    /// Off in production — the PNG encode of a retina image costs
+    /// 30-80ms even on a background queue (mostly disk write + zlib).
+    /// Toggle via `MOUSELESS_DEBUG_OVERLAY=1` in the env. `run.sh` sets
+    /// it automatically so dev runs always see the overlay. Production
+    /// `.app` launches without it, paying zero overlay cost.
+    static let debugOverlayEnabled: Bool =
+        ProcessInfo.processInfo.environment["MOUSELESS_DEBUG_OVERLAY"] == "1"
+
     /// Collect visual candidates for the currently focused window.
     /// Returns `[]` on any failure (no permission, capture failure,
     /// model load failure, etc.). The caller treats this as "no OP
@@ -47,8 +60,20 @@ enum OmniParserPath {
         }
         let tInfer = Date()
 
-        let filtered = applyBaselineFilters(detections, screenRect: captured.screenRect)
+        let (filtered, rejected) = partitionByBaselineFilters(
+            detections, screenRect: captured.screenRect
+        )
         let tFilter = Date()
+
+        // Diagnostic overlay — only when explicitly enabled via env
+        // var. PNG encode of a retina-sized image is ~30-80ms even on
+        // a background queue, so production launches should leave it
+        // off. See `debugOverlayEnabled` above.
+        if debugOverlayEnabled {
+            saveDebugOverlay(image: captured.image,
+                             kept: filtered, rejected: rejected,
+                             path: "/tmp/mouseless-focused.png")
+        }
 
         // Map normalized rect → screen-space rect using the window's
         // origin + size from the capture. `.scaleFill` distortion (model
@@ -77,21 +102,20 @@ enum OmniParserPath {
 
     // MARK: - Baseline filtering (design doc §5.1)
 
-    /// Rejects boxes by confidence + size.
-    /// NMS is **not** here — model has it baked in.
+    /// Partitions detections into `kept` (passed all filters → become
+    /// hints) and `rejected` (dropped by at least one filter → drawn in
+    /// red on the debug overlay). NMS is not here — model has it baked.
     /// Filters operate in the model's normalized [0,1] coordinate space;
-    /// `screenRect` provides the actual window dimensions for the size
-    /// thresholds (8px min, 25% area max).
-    private static func applyBaselineFilters(
+    /// `windowRect` provides the actual window dimensions for the size
+    /// thresholds (8pt min, 25% area max).
+    private static func partitionByBaselineFilters(
         _ detections: [OmniParserModel.Detection],
         screenRect windowRect: CGRect
-    ) -> [OmniParserModel.Detection] {
+    ) -> (kept: [OmniParserModel.Detection], rejected: [OmniParserModel.Detection]) {
         // §5.1.1: confidence threshold. 0.3 is the design doc default;
         // P7 will tune from real-world data.
         let CONF_THRESHOLD: Float = 0.30
-        // §5.1.2: minimum 8×8 pixels. Window dimensions are in points
-        // but on retina that's a ~16-pixel floor — well below any real
-        // UI element. Same threshold as the AX path uses.
+        // §5.1.2: minimum 8pt sides. Same threshold as the AX path uses.
         let MIN_SIDE_POINTS: CGFloat = 8
         // §5.1.3: maximum 25% of the window area. Detector occasionally
         // emits "the whole panel is a UI element" boxes — those aren't
@@ -99,18 +123,101 @@ enum OmniParserPath {
         // remove them (see design doc §5.1.4's IoU math).
         let MAX_AREA_FRAC: CGFloat = 0.25
         let windowArea = windowRect.width * windowRect.height
-        let maxAreaInPixels = windowArea * MAX_AREA_FRAC
+        let maxAreaInPoints = windowArea * MAX_AREA_FRAC
 
-        return detections.filter { det in
-            guard det.confidence >= CONF_THRESHOLD else { return false }
+        var kept: [OmniParserModel.Detection] = []
+        var rejected: [OmniParserModel.Detection] = []
+        for det in detections {
             let widthInPoints = det.rect.width * windowRect.width
             let heightInPoints = det.rect.height * windowRect.height
-            guard widthInPoints >= MIN_SIDE_POINTS,
-                  heightInPoints >= MIN_SIDE_POINTS
-            else { return false }
             let areaInPoints = widthInPoints * heightInPoints
-            guard areaInPoints <= maxAreaInPixels else { return false }
-            return true
+            let passes = det.confidence >= CONF_THRESHOLD
+                      && widthInPoints >= MIN_SIDE_POINTS
+                      && heightInPoints >= MIN_SIDE_POINTS
+                      && areaInPoints <= maxAreaInPoints
+            if passes { kept.append(det) } else { rejected.append(det) }
+        }
+        return (kept, rejected)
+    }
+
+    // MARK: - Debug overlay
+
+    /// Saves the captured window image with bounding boxes drawn for
+    /// visual diagnosis:
+    ///   - **Yellow thick outline**: detections that passed baseline
+    ///     filtering (these become hint labels).
+    ///   - **Red thin outline**: detections the model produced but
+    ///     baseline filtering dropped (low conf, too small, too large).
+    ///
+    /// Runs **off the main thread** on a background queue — the PNG
+    /// encode of a retina-sized image (~3-4 MP) takes 30-80ms, which
+    /// would noticeably bloat the OP path's wall-clock if we did it
+    /// synchronously. The overlay is a pure diagnostic, doesn't feed
+    /// back into the hint display, so fire-and-forget is fine.
+    ///
+    /// CGImage and Detection are immutable CF / value types so passing
+    /// them across the queue boundary is safe even though Swift 6's
+    /// Sendable checker can't see it.
+    private static func saveDebugOverlay(
+        image: CGImage,
+        kept: [OmniParserModel.Detection],
+        rejected: [OmniParserModel.Detection],
+        path: String
+    ) {
+        DispatchQueue.global(qos: .utility).async {
+            let t0 = Date()
+            let width = image.width
+            let height = image.height
+
+            let colorSpace = CGColorSpaceCreateDeviceRGB()
+            guard let ctx = CGContext(
+                data: nil,
+                width: width, height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: 0,
+                space: colorSpace,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            ) else { return }
+
+            // Flip Y so we can use top-left coords throughout (CGImage's
+            // convention) — CGContext defaults to bottom-left origin.
+            ctx.translateBy(x: 0, y: CGFloat(height))
+            ctx.scaleBy(x: 1, y: -1)
+            ctx.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+
+            // Helper: normalized rect → pixel rect.
+            let denorm = { (r: CGRect) -> CGRect in
+                CGRect(
+                    x: r.minX * CGFloat(width),
+                    y: r.minY * CGFloat(height),
+                    width: r.width * CGFloat(width),
+                    height: r.height * CGFloat(height)
+                )
+            }
+
+            // Rejected first (drawn underneath) — red thin outline.
+            ctx.setStrokeColor(red: 1.0, green: 0.25, blue: 0.25, alpha: 0.75)
+            ctx.setLineWidth(2)
+            for det in rejected {
+                ctx.stroke(denorm(det.rect))
+            }
+
+            // Kept on top — yellow thick outline.
+            ctx.setStrokeColor(red: 1.0, green: 0.85, blue: 0.0, alpha: 1.0)
+            ctx.setLineWidth(4)
+            for det in kept {
+                ctx.stroke(denorm(det.rect))
+            }
+
+            guard let outImage = ctx.makeImage() else { return }
+            let url = URL(fileURLWithPath: path)
+            guard let dest = CGImageDestinationCreateWithURL(
+                url as CFURL, UTType.png.identifier as CFString, 1, nil
+            ) else { return }
+            CGImageDestinationAddImage(dest, outImage, nil)
+            _ = CGImageDestinationFinalize(dest)
+            let ms = Int(Date().timeIntervalSince(t0) * 1000)
+            print("[mouseless] OP debug overlay: \(ms)ms → \(path)")
         }
     }
 }

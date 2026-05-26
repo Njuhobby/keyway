@@ -48,19 +48,14 @@ final class VimSession {
         print("[mouseless] enter TAP mode")
 
         // P3 debug: log the routing decision (AX whitelist vs OP) for
-        // the focused app. Doesn't actually change collectAll() yet —
-        // that's P4. Just lets us verify the whitelist hits the apps
-        // we expect and misses the apps we expect.
+        // the focused app.
         logFocusedAppRouting()
 
-        // P2 debug: in parallel with AX hint collection, also capture the
-        // focused window via ScreenCaptureKit. This exercises the OP path's
-        // screencap entry point under the *same* trigger (Caps Lock) the
-        // real OP path will use — no menu-click focus shifts to worry
-        // about. Output is /tmp/mouseless-focused.png; flow doesn't block.
-        // Strip this call once OP integration (P4) replaces it with real
-        // downstream use.
-        ScreenCapture.debugCaptureToTmp()
+        // Diagnostic overlay (/tmp/mouseless-focused.png) is now written
+        // inside OmniParserPath.collect() — only on OP-routed scans, and
+        // includes the model's bounding boxes so you can see what was
+        // detected vs filtered. AX-routed apps don't produce one (no OP
+        // analysis to visualize). See OmniParserPath.saveDebugOverlay.
     }
 
     /// P3 debug: print whether the currently focused app would route
