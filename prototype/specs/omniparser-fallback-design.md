@@ -265,105 +265,107 @@ box 中心**不总是**可点像素。5 类：
 4. **HiDPI 坐标系**：截图是物理像素，合成 event 走 logical points。**转换错就直接点空气**。这是实现侧的死活要保证的。
 5. **容器嵌套**：大框套小框（IoU 不达 NMS 阈值都保留），大框的几何中心落进小框区域，按外层 hint 反而触发了内层目标的 click handler。
 
-第 4 类是工程问题（必须正确），1-3 + 5 类是 OP 路径的**固有概率性失败**——AX 路径下完全不存在。下面的 refiner 算法处理 1、2、5；3 和 4 各自有不同性质，refiner 处理不了。
+第 4 类是工程问题（必须正确），1-3 + 5 类是 OP 路径的**固有概率性失败**——AX 路径下完全不存在。下面的 refiner **只处理第 5 类**（容器嵌套）——这是唯一能在不 OCR 的情况下廉价检测、且 OCR 修复收益明确的一类。第 1、2 类（box 偏移 / 可点≠视觉）实测下 box 中心命中率已经够高，无脑 OCR 反而引入新错误（详见下方"历史决策"）；第 3、4 类 refiner 处理不了。
 
-#### OCR-based click point refiner
+#### 实现版本：fast-path 优先，只在 center 冲突时才 OCR
 
-观察：**点文字几乎一定命中 click handler**。原因有二：
+> 实现见 `Sources/Mouseless/OCRRefiner.swift`。**早期草稿（保留在本节下方"历史决策"）是"无脑 OCR 优先"——实测推翻了，现在是"先判断 center 是否真的有问题，只在有问题时才 OCR"**。
 
-- 文字是 UI 元素的"label"，本身在视觉区域中央或紧贴中央；
-- 文字所在的像素一定属于可视区域内部，不会落到 padding / border 外。
+观察：**点文字几乎一定命中 click handler**（文字在可视区域内、贴近中央）。但**"无脑 OCR 出文字就点文字中心"是错的**——实测在 WeChat 聊天行上：
 
-但单纯"OCR 出文字 → 点文字中心"还不够，因为 OmniParser 经常输出**容器嵌套** box：一个大框完全包住一个小框，两者 IoU 不达阈值都保留（见 §5.1.4 的 NMS 数学）。这时大框 OCR 会**把小框里的文字也识别进来**——小框是 "Send" 按钮含文字 "Send"，大框是套着 Send 按钮的卡片不含自己的文字，大框的 OCR 输出**仍然是 "Send"**，因为它的 crop 区域包含了 Send 那块像素。
+- 聊天行是"整行可点"——行内任何像素点击都触发选中
+- box 中心本来就 work
+- 但 OCR 只识别到角落的 "21:52" 时间戳（漏了中文名/消息），refiner 反而把 click **从行中央拽到右上角的 21:52**——更糟
 
-朴素 refiner 在这种 case 下会让大框和小框都点到 "Send" 同一像素，触发同一个 click handler，**用户按外层 hint 想干的事被错误地变成内层 hint 的行为**。
+教训：**OCR refiner 只该在 box 中心"真的有问题"时介入**。怎么判断有问题？
 
-#### 关键设计原则：containment-aware
-
-如果 OmniParser 输出了两个 hint label（外大、内小），按 mouseless 的语义：
-
-> **两个 hint 意味着用户有两个独立的"可点目标"**。inner box 是更精准、更具体的那个；outer box 代表"点容器自身、但不点已经被 inner box 覆盖的部分"。
-
-所以外层 box 的 click point **必须避开** inner box 的覆盖范围——把它视为"outer 减 inner 的剩余区域"的中心。
-
-#### containment-aware OCR refiner 算法
+§4.6 列的 5 类 misclick 里，只有**第 5 类（容器嵌套）能在不 OCR 的情况下廉价检测**——直接判断 `box 中心 ∈ 某个 inner box`。第 1 类（box 框偏移）罕见，且 OCR 误判的风险比它的收益大。所以：
 
 ```
-commit OP-only target B:
-    inner_boxes = [b for b in all_targets
-                   if b ≠ B and b.rect ⊂ B.rect]      # B 套住的所有更小框
-    text_regions = OCR(B.crop)                        # 仅 OCR 这一个 box
+refine(B, inner_boxes):
+    center = B 的几何中心
 
-    # Step 1: 剔除属于 inner box 的文字
-    own_text = [t for t in text_regions
-                if t.center not in any inner_box.rect]
+    # Fast path：center 不在任何 inner box 里 → 直接用 center
+    # 覆盖绝大多数（聊天行、列表项、无嵌套的按钮）。
+    # 零 screencap、零 OCR、零额外延迟。
+    if center ∉ any inner_box:
+        return center
 
+    # Slow path：center 落在某个 inner box 里 → 点它会触发 inner box
+    # 的 handler 而非 B 自己的。重新截屏 + OCR B 的 crop，找一个
+    # "在 B 内、但避开所有 inner box" 的点。
+    text_regions = OCR(B.crop)        # .accurate + 显式中文语言
+
+    # Step 1: own_text = 中心不在任何 inner box 内的文字
+    own_text = [t for t in text_regions if t.center ∉ any inner_box]
     if own_text 非空:
-        clickPoint = 最长 own_text 段的几何中心
-        return synthesizeClick(at: clickPoint)
+        return 最长 own_text 段的中心
 
-    # Step 2: B 没有"自己的文字"——全部 OCR 文字都属于 inner box
-    if inner_boxes 非空:
-        # B 的"自身区域" = B.rect 减去所有 inner box 的并集
-        # 通常是 L 形或 frame 形（环形 minus inner rect）
-        own_region = B.rect minus union(inner_boxes.rects)
-
-        if own_region 几何上非空（有 ≥1 pixel area）:
-            clickPoint = own_region 最大连通分量的几何中心
-        else:
-            # 病态：B 完全被 inner boxes 覆盖，无 own region
-            # 说明 B 其实就不是用户能"额外点"的目标 —— 但既然出了 hint 也得能 commit
-            # 折中：点 B 几何中心，等同于触发某个 inner box 的功能
-            # （这种 case 应该极少，是 detector 输出冗余的兜底）
-            clickPoint = B.center
-
-        return synthesizeClick(at: clickPoint)
-
-    # Step 3: 既无 own_text 也无 inner_boxes —— B 是个纯 icon 类 leaf 框
-    clickPoint = B.center
-    synthesizeClick(at: clickPoint)
+    # Step 2: 没有 own_text（文字全属于 inner box）→ 找 own_region
+    #   候选 = [B 中心, B 四条边中点]
+    #   过滤掉落在 inner box 里的候选
+    #   取剩下里离所有 inner box 最远的那个
+    candidates = [B.center, top_mid, bottom_mid, left_mid, right_mid]
+    outside = [c for c in candidates if c ∉ any inner_box]
+    if outside 非空:
+        return outside 里离 inner box 最远的
+    # Step 3: 全部候选都在 inner box 里（病态，B 几乎被 inner 完全覆盖）
+    return B.center
 ```
+
+设计原则不变（**两个 hint = 两个独立目标，外层 click 必须避开 inner box 覆盖范围**），但**触发条件收紧了**：不是"有 OCR 文字就用"，而是"只有 center 真的撞 inner box 才动用 OCR"。
 
 #### 每个 case 的具体处理
 
 | 场景 | 走哪条路径 |
 | --- | --- |
-| 大框套小框，小框有文字 "Send"，大框无自己的文字（典型卡片） | Step 1 过滤后 own_text 为空 → Step 2 算 own_region 中心 |
-| 大框套小框，小框有 "Send"，大框还有自己的标题 "Tech Backlog" | Step 1 过滤后 own_text = ["Tech Backlog"] → 点 "Tech Backlog" 中心 |
-| 单独的 Send 按钮（无 inner box，OCR 出 "Send"） | Step 1 own_text 非空 → 点 "Send" 中心 |
-| 单独的 ✓ 图标（无 inner box，OCR 无文字） | 跳到 Step 3 → 点 box 中心 |
-| 完全冗余的容器（B 完全被 inner box 覆盖） | Step 2 own_region 为空 → fallback 到 B.center（极少触发） |
+| 聊天行 / 列表项 / 普通按钮（无 inner box 或 center 不撞 inner） | **fast path** → 点 box 中心，不 OCR |
+| 大框套小框，小框含文字，**大框中心恰好压在小框上** | slow path：OCR → Step 1 own_text（大框自己的文字）或 Step 2 own_region |
+| 大框中心压在小框上 + 大框有自己标题 "Tech Backlog" | slow path → own_text = ["Tech Backlog"] → 点它中心 |
+| 大框中心压在小框上 + 大框无自己文字 | slow path → own_text 空 → Step 2 own_region（边中点离 inner 最远的） |
+| 大框中心**不**压在小框上（小框偏在一侧） | fast path → 点大框中心（中心本来就是大框自己的区域） |
 
-#### 实现复杂度
+关键区别：**只有"大框中心恰好压在小框"才进 slow path**。"大框套小框但小框偏在角落" → 大框中心仍在自己区域 → fast path。
 
-`own_region = B.rect minus union(inner_boxes.rects)` 听起来复杂但对**轴对齐矩形**很简单：
+#### CJK OCR 配置（实现细节，但 load-bearing）
 
-- inner boxes 都是 axis-aligned，subtract 结果是若干个 axis-aligned 子矩形拼成的多边形
-- 实践中常见两种形状：
-  - 一个 inner box 偏在 B 内某一侧 → own_region 是个 L 形或 frame 形
-  - 多个 inner box 散布 → own_region 是几条"间隙带"
-- 找最大连通子矩形的算法直白：枚举 inner box 边界划分出的网格 cell，取其中不被任何 inner 占据的最大 cell
+slow path 的 OCR 必须能识别非拉丁字符，否则 containment 算法在中文/日文/韩文 UI 上失效：
 
-对我们的用途简化版本就够：
+```swift
+request.recognitionLevel = .accurate         // .fast 是拉丁偏向的字符检测器，漏 CJK
+request.recognitionLanguages = ["zh-Hans", "zh-Hant", "en-US"]  // 显式，否则跟系统 locale
+request.usesLanguageCorrection = false       // UI 文字不是句子
+```
 
-1. 算 B 的几何中心 `c = B.center`
-2. 检查 `c` 是否落在任何 inner box 内
-3. 不落 → 用 `c`，落 → 沿 B 的四条边各取中点，取**离所有 inner box 距离最远**的那个点
+`.fast` 实测在 WeChat 上只能识别 "21:52" 这种数字，中文名直接漏掉。`.accurate` + 显式中文语言后，"许大维长点脑子" / "洗好了" 都能识别。代价 ~20-40ms，但 slow path 本来就罕见。
 
-这个简化版在大多数 case 下行为正确，且实现 10 行内。等观察到边界 case 失败时再升级到完整 own_region 计算。
+#### own_region 的简化实现
+
+完整版 `own_region = B.rect minus union(inner_boxes.rects)`（轴对齐矩形减法，结果是 L 形 / frame 形）理论上更精确，但实现复杂。当前用**边中点近似**：候选 = {B 中心 + 四边中点}，过滤掉落在 inner box 里的，取离 inner 最远的。~10 行，大多数 case 行为正确。观察到边界 case 失败再升级到完整多边形减法。
 
 #### 这条路径处理的失败模式
 
-回到 §4.6 前面列的 4 类 misclick：
+回到 §4.6 前面列的 5 类 misclick：
 
-- **第 1 类**（偏移 box）：own_text 的中心一定在 B 内部偏中央，避开边缘 padding ✓
-- **第 2 类**（可点区域 ≠ 视觉）：文字属于视觉区域 ✓
+- **第 1 类**（偏移 box）：fast path 下不处理（接受 box 中心，罕见且 OCR 风险大于收益）
+- **第 2 类**（可点区域 ≠ 视觉）：同上，fast path 接受 box 中心
 - **第 3 类**（透明 overlay 截获）：refiner 无能为力 ✗
 - **第 4 类**（HiDPI 坐标系）：工程问题，跟 refiner 无关 ✗
+- **第 5 类**（容器嵌套导致外层 hint 错点内层目标）：**slow path 专门处理** ✓
 
-新增的 containment-aware 路径**额外**处理了一类失败：
+注意跟早期草稿的区别：草稿声称 refiner 处理第 1、2 类（"点文字避开 padding"），实测发现**无脑 OCR 引入的新错误（聊天行被拽到时间戳）比它修的第 1、2 类更多**，所以收紧成只处理第 5 类。第 1、2 类留给 box 中心——实测大多数 OP box 中心都可点。
 
-- **第 5 类**（容器嵌套导致外层 hint 错点内层目标）：containment-aware Step 1 + Step 2 ✓
+#### 历史决策
+
+§4.6 的 refiner 算法经过一次实测推翻：
+
+**草稿版（已弃）**：commit 时**无脑** OCR box → Step 1 取最长 own_text 中心 → Step 2 own_region → Step 3 box 中心。理由是"点文字一定命中 handler"。
+
+**实测推翻**：WeChat 聊天行——OCR 在 `.fast` 模式下只识别到 "21:52" 时间戳（漏中文），refiner 把 click 从行中央拽到右上角时间戳，**比直接点 box 中心更糟**。即使修好 CJK 识别（`.accurate`），无脑取"最长文字"在多文字行上也不一定是用户想点的位置。
+
+**改后版（当前）**：fast-path 优先——`box 中心 ∉ 任何 inner box` 就直接用中心（覆盖绝大多数），**只有 center 真的撞 inner box（容器嵌套的第 5 类）才动 OCR**。既省 60-90ms（大多数点击不 screencap/OCR），又避免 OCR 误判。
+
+教训：**"理论上更精确的方案"（无脑 OCR）实测可能更差**——OCR 本身有识别失败/不全的概率，把它放进每次点击的关键路径，等于把它的失败概率叠加进来。只在"不用它一定错"（center 撞 inner box）时才用，是更稳的工程选择。
 
 #### 故意没处理：partial overlap
 
