@@ -1,16 +1,29 @@
 import Cocoa
 import ApplicationServices
 
+/// Provenance of a hint target — drives commit-time behavior that
+/// can't be derived from rect/role alone:
+///
+/// - `.ax`: target came from an AX walk. Carries the `AXUIElement`
+///   ref + (optionally) the `AXWindow` it belongs to. Cache
+///   invalidation on commit uses the window ref; click semantics
+///   are identical to the `.omni` case (both synthesize a mouse
+///   event at the rect center — AX actions were dropped earlier).
+///
+/// - `.omni`: target came from the OmniParser visual path. No AX
+///   element, no window — purely a screen-space rect + the
+///   detector's confidence. Cache doesn't apply. See
+///   `omniparser-fallback-design.md` §4.2.
+enum HintSource {
+    case ax(element: AXUIElement, sourceWindow: AXUIElement?)
+    case omni(confidence: Float)
+}
+
 struct HintTarget {
     let label: String
-    let element: AXUIElement
     let rect: CGRect       // AX screen-space (top-left origin)
-    let role: String       // AXButton / AXMenuItem / AXDockItem / ...
-    /// The `AXWindow` this target was collected from, if any. Used by
-    /// `HintMode.commit` to tell `HintWindowCache` which window's cache to
-    /// mark dirty. nil for dock items, menu extras, and menu bar items —
-    /// those are app-level, not window-scoped.
-    let sourceWindow: AXUIElement?
+    let role: String       // AXButton / AXMenuItem / AXDockItem / "AXOmni" for OP
+    let source: HintSource
 }
 
 enum HintResult {
@@ -87,31 +100,58 @@ final class HintMode {
     @discardableResult
     func activate() -> Bool {
         let collected = Self.collectAll()
-        if collected.focused.isEmpty && collected.dock.isEmpty && collected.menuBarExtras.isEmpty {
+        if collected.focused.isEmpty
+            && collected.focusedOmni.isEmpty
+            && collected.dock.isEmpty
+            && collected.menuBarExtras.isEmpty {
             return false
         }
 
         // Dock gets numeric labels (0, 1, 2, ...).
         let dockLabels = Self.generateNumericLabels(count: collected.dock.count)
         let dockTargets = zip(dockLabels, collected.dock).map { (label, c) in
-            HintTarget(label: label, element: c.element, rect: c.rect, role: c.role,
-                       sourceWindow: c.sourceWindow)
+            HintTarget(label: label, rect: c.rect, role: c.role,
+                       source: .ax(element: c.element, sourceWindow: c.sourceWindow))
         }
 
-        // Focused app + menu bar extras share the alphabetic label space.
-        let nonDockCandidates = collected.focused + collected.menuBarExtras
-        let letterLabels = Self.generateLabels(count: nonDockCandidates.count)
-        let nonDockTargets = zip(letterLabels, nonDockCandidates).map { (label, c) in
-            HintTarget(label: label, element: c.element, rect: c.rect, role: c.role,
-                       sourceWindow: c.sourceWindow)
+        // Focused (AX + OP) and menu bar extras share the alphabetic label
+        // pool. Order: AX-windows → OP candidates → AX menubar/extras —
+        // arbitrary but deterministic so labels stay stable across rescans
+        // within the same content.
+        let totalLetters = collected.focused.count
+                         + collected.focusedOmni.count
+                         + collected.menuBarExtras.count
+        let letterLabels = Self.generateLabels(count: totalLetters)
+        var nonDockTargets: [HintTarget] = []
+        nonDockTargets.reserveCapacity(totalLetters)
+        var idx = 0
+        for c in collected.focused {
+            nonDockTargets.append(HintTarget(
+                label: letterLabels[idx], rect: c.rect, role: c.role,
+                source: .ax(element: c.element, sourceWindow: c.sourceWindow)
+            ))
+            idx += 1
+        }
+        for c in collected.focusedOmni {
+            nonDockTargets.append(HintTarget(
+                label: letterLabels[idx], rect: c.rect, role: "AXOmni",
+                source: .omni(confidence: c.confidence)
+            ))
+            idx += 1
+        }
+        for c in collected.menuBarExtras {
+            nonDockTargets.append(HintTarget(
+                label: letterLabels[idx], rect: c.rect, role: c.role,
+                source: .ax(element: c.element, sourceWindow: c.sourceWindow)
+            ))
+            idx += 1
         }
 
         targets = dockTargets + nonDockTargets
         typed = ""
         isActiveFlag = true
         HintOverlay.shared.show(targets: targets, typed: "")
-        // HUD is owned by VimSession; we no longer touch it from here.
-        print("[mouseless] hint: \(targets.count) targets (focused: \(collected.focused.count), dock: \(collected.dock.count), extras: \(collected.menuBarExtras.count))")
+        print("[mouseless] hint: \(targets.count) targets (focusedAX: \(collected.focused.count), focusedOP: \(collected.focusedOmni.count), dock: \(collected.dock.count), extras: \(collected.menuBarExtras.count))")
         return true
     }
 
@@ -173,8 +213,9 @@ final class HintMode {
         // selection, disclosure, pane reload, ...). Mark it dirty so the
         // next sticky rescan walks this window fresh while reusing the
         // cache for untouched sibling windows. nil for dock/menu-extra/
-        // menu-bar items — they don't belong to any AXWindow.
-        if let window = target.sourceWindow {
+        // menu-bar items — they don't belong to any AXWindow. OP-sourced
+        // targets have no AXWindow either — the cache is AX-only.
+        if case .ax(_, let window?) = target.source {
             HintWindowCache.shared.markDirty(window: window)
         }
     }
@@ -193,9 +234,17 @@ final class HintMode {
     }
 
     /// Result of one collection pass — split by source so we can label them
-    /// differently (Dock = numeric, everything else = alphabetic).
+    /// differently (Dock = numeric, everything else = alphabetic) and route
+    /// click semantics by `HintSource`.
+    ///
+    /// Invariant: `focused` (AX-sourced) and `focusedOmni` (OP-sourced) are
+    /// **mutually exclusive for window-level content** within a single
+    /// scan — only one path runs per app (`AppRegistry.shouldUseAXForFocused`).
+    /// `focused` may still include AX menu bar items even on the OP route
+    /// because focused-app AXMenuBar is an always-good AX source (§4.2).
     private struct CollectedElements {
-        let focused: [ElementCandidate]
+        let focused: [ElementCandidate]                       // AX (windows + menu bar)
+        let focusedOmni: [OmniParserPath.OmniCandidate]       // OP (default path only)
         let dock: [ElementCandidate]
         let menuBarExtras: [ElementCandidate]
     }
@@ -218,61 +267,79 @@ final class HintMode {
     private static func collectAll() -> CollectedElements {
         let screenSpan = Self.totalScreenSpan()
 
-        // 1. Focused app: AXWindows go through the per-window cache (so a
-        // sticky rescan after closing a popup reuses the surviving
-        // windows without re-walking them). AXMenuBar is walked fresh —
-        // it's small (closed dropdowns short-circuit) and not worth
-        // caching.
+        // 1. Focused app. Two sub-sources:
+        //   (a) Window subtree — routed by AppRegistry. Whitelisted apps
+        //       run the AX walk (per-window cache + walk + recurse). Others
+        //       go to OmniParser via `OmniParserPath.collect()` (P4 stub —
+        //       returns [] until P5 wires real screencap + inference).
+        //   (b) Focused app's AXMenuBar — always AX-walked regardless of
+        //       routing. It's an always-good AX source (AppKit/SwiftUI
+        //       renders it natively) and OP can't see the menu bar
+        //       because it's outside the focused window's pixel area.
         let t0 = Date()
         var focusedOut: [ElementCandidate] = []
+        var focusedOmniOut: [OmniParserPath.OmniCandidate] = []
         var focusedIPC = 0
         var cacheHits = 0
+        var routeLabel = "no-app"
         if let (focusedApp, focusedPID) = focusedApplication() {
             focusedIPC += 1   // AXFocusedApplication on system-wide
 
-            HintWindowCache.shared.syncFocusedApp(pid: focusedPID)
+            let bundleID = NSRunningApplication(processIdentifier: focusedPID)?.bundleIdentifier
+            let useAX = bundleID.map { AppRegistry.shouldUseAXForFocused(bundleID: $0) } ?? false
+            routeLabel = useAX ? "AX(whitelist)" : "OP(default)"
 
-            // AXWindows attribute on the app (1 IPC). This is the diff input.
-            focusedIPC += 1
-            var windowsRef: CFTypeRef?
-            let windows: [AXUIElement] = {
-                if AXUIElementCopyAttributeValue(focusedApp, "AXWindows" as CFString,
-                                                 &windowsRef) == .success,
-                   let arr = windowsRef as? [AXUIElement] {
-                    return arr
-                }
-                return []
-            }()
-            HintWindowCache.shared.pruneTo(currentWindows: windows)
+            if useAX {
+                // Whitelist path: AX walk the focused app's window subtree.
+                HintWindowCache.shared.syncFocusedApp(pid: focusedPID)
 
-            for window in windows {
-                if let reused = HintWindowCache.shared.reuse(window: window,
-                                                             ipcCount: &focusedIPC) {
-                    cacheHits += 1
-                    for r in reused {
-                        focusedOut.append(ElementCandidate(
-                            element: r.element, rect: r.rect, role: r.role,
-                            sourceWindow: window))
+                focusedIPC += 1   // AXWindows attribute on the app
+                var windowsRef: CFTypeRef?
+                let windows: [AXUIElement] = {
+                    if AXUIElementCopyAttributeValue(focusedApp, "AXWindows" as CFString,
+                                                     &windowsRef) == .success,
+                       let arr = windowsRef as? [AXUIElement] {
+                        return arr
                     }
-                } else {
-                    var fresh: [ElementCandidate] = []
-                    walk(element: window, depth: 0, into: &fresh,
-                         screenSpan: screenSpan, ipcCount: &focusedIPC,
-                         sourceWindow: window)
-                    let stored = fresh.map {
-                        HintWindowCache.StoredTarget(element: $0.element,
-                                                     rect: $0.rect, role: $0.role)
+                    return []
+                }()
+                HintWindowCache.shared.pruneTo(currentWindows: windows)
+
+                for window in windows {
+                    if let reused = HintWindowCache.shared.reuse(window: window,
+                                                                 ipcCount: &focusedIPC) {
+                        cacheHits += 1
+                        for r in reused {
+                            focusedOut.append(ElementCandidate(
+                                element: r.element, rect: r.rect, role: r.role,
+                                sourceWindow: window))
+                        }
+                    } else {
+                        var fresh: [ElementCandidate] = []
+                        walk(element: window, depth: 0, into: &fresh,
+                             screenSpan: screenSpan, ipcCount: &focusedIPC,
+                             sourceWindow: window)
+                        let stored = fresh.map {
+                            HintWindowCache.StoredTarget(element: $0.element,
+                                                         rect: $0.rect, role: $0.role)
+                        }
+                        HintWindowCache.shared.store(window: window, targets: stored,
+                                                     ipcCount: &focusedIPC)
+                        focusedOut.append(contentsOf: fresh)
                     }
-                    HintWindowCache.shared.store(window: window, targets: stored,
-                                                 ipcCount: &focusedIPC)
-                    focusedOut.append(contentsOf: fresh)
                 }
+            } else {
+                // Default path: skip the focused-app window AX walk,
+                // call OmniParser visual path instead. P4 stub returns
+                // []; real implementation in P5/P6.
+                focusedOmniOut = OmniParserPath.collect()
+                // No cache to populate — OP candidates are ephemeral.
             }
 
-            // App-level menu bar (not cached). Uses a specialized walk
-            // that short-circuits the (overwhelmingly common) "no menu
-            // dropdown open" case — saves ~40 IPCs per scan on a typical
-            // ~10-item menu bar.
+            // Focused app's AXMenuBar — always walked regardless of route.
+            // Specialized walk that short-circuits the (overwhelmingly
+            // common) "no menu dropdown open" case — saves ~40 IPCs per
+            // scan on a typical ~10-item menu bar.
             focusedIPC += 1
             var menubarRef: CFTypeRef?
             if AXUIElementCopyAttributeValue(focusedApp, "AXMenuBar" as CFString,
@@ -312,12 +379,14 @@ final class HintMode {
         }
         let t3 = Date()
 
-        print(String(format: "[mouseless] collect timings: focused=%.0fms (%d IPC, %d window cache hit) dock=%.0fms (%d IPC) extras=%.0fms",
-                     t1.timeIntervalSince(t0) * 1000, focusedIPC, cacheHits,
+        print(String(format: "[mouseless] collect timings: focused=%.0fms [%@] (%d IPC, %d window cache hit, ax=%d op=%d) dock=%.0fms (%d IPC) extras=%.0fms",
+                     t1.timeIntervalSince(t0) * 1000, routeLabel, focusedIPC, cacheHits,
+                     focusedOut.count, focusedOmniOut.count,
                      t2.timeIntervalSince(t1) * 1000, dockIPC,
                      t3.timeIntervalSince(t2) * 1000))
 
-        return CollectedElements(focused: focusedOut, dock: dockOut, menuBarExtras: extrasOut)
+        return CollectedElements(focused: focusedOut, focusedOmni: focusedOmniOut,
+                                 dock: dockOut, menuBarExtras: extrasOut)
     }
 
     private static func focusedApplication() -> (element: AXUIElement, pid: pid_t)? {
