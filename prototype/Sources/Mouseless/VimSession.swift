@@ -102,7 +102,7 @@ final class VimSession {
         // Cmd+Shift+4 (screenshot), Cmd+Space (Spotlight), Cmd+Tab, and
         // Ctrl+Up (Mission Control) still work while Mouseless is active.
         // Shift / Option are reserved for hint click-action modifiers
-        // (Shift = right-click, Option = double-click), so they stay.
+        // (Shift = double-click, Option = right-click), so they stay.
         if !flags.intersection([.maskCommand, .maskControl]).isEmpty {
             return false
         }
@@ -228,11 +228,16 @@ final class VimSession {
         guard let ch = Self.hintChar(for: keyCode) else { return true }
 
         // Modifier on the final hint letter chooses the click action.
+        // Shift → double-click, Option → right-click. Rationale: Shift
+        // is the more comfortable / frequently-used modifier for Mac
+        // users, and double-click (open file, select word, launch app)
+        // is a more common action than right-click (context menu). So
+        // the high-frequency action gets the easy modifier.
         let action: ClickAction
         if flags.contains(.maskShift) {
-            action = .right
-        } else if flags.contains(.maskAlternate) {
             action = .double
+        } else if flags.contains(.maskAlternate) {
+            action = .right
         } else {
             action = .left
         }

@@ -162,7 +162,7 @@ NSApplication
 | 退出"空白处"（`x`） | 激活 Finder + AX-cancel Dock 菜单 | Finder 激活关掉 app 菜单/popover/status menu；`AXUIElementPerformAction(menu, kAXCancelAction)` 是唯一能让 Dock 真正销毁 AXMenu 元素的方式（合成 Esc 只让菜单视觉关，留下 ghost 让 re-scan 画悬空 hint） |
 | 异步操作的"等" | AX / NSWorkspace observer + async/await + timeout 兜底 | 不用固定 sleep 猜时间。OS 通知比经验值早就发了就早走；慢路径一直等到 AX 同步完。silent failure 时超时兜底防 Task 卡死 |
 | Cmd/Ctrl 透传 | 不消费 | 保 Spotlight、Mission Control、screenshot 等系统功能 |
-| Shift/Option | 消费 | 给 hint click action 用（右键 / 双击） |
+| Shift/Option | 消费 | 给 hint click action 用（Shift=双击 / Option=右键） |
 | 标签字符集 | home row 9 字母 + 10 数字 | 数字独立给 Dock，字母组留给其他来源 |
 | KeyCode 抽象 | 物理 `kVK_ANSI_*` 常量 | 简单；代价：非 QWERTY 布局错位（已知缺口） |
 
