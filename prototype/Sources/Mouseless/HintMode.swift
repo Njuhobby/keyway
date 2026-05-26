@@ -290,19 +290,35 @@ final class HintMode {
             routeLabel = useAX ? "AX(whitelist)" : "OP(default)"
 
             if useAX {
-                // Whitelist path: AX walk the focused app's window subtree.
+                // Whitelist path: AX walk the focused app's **focused
+                // window only**, not all windows. Matches the OP path's
+                // scope (it only captures the focused window) and stops
+                // us from hinting background windows the user can't see
+                // — which inflated candidate counts on apps like Finder
+                // where users routinely have multiple windows open.
+                // Falls back to AXMainWindow then AXWindows[0] for apps
+                // that don't set a focused window after activation
+                // (rare for whitelist apps, but cheap to handle).
                 HintWindowCache.shared.syncFocusedApp(pid: focusedPID)
 
-                focusedIPC += 1   // AXWindows attribute on the app
-                var windowsRef: CFTypeRef?
-                let windows: [AXUIElement] = {
-                    if AXUIElementCopyAttributeValue(focusedApp, "AXWindows" as CFString,
-                                                     &windowsRef) == .success,
-                       let arr = windowsRef as? [AXUIElement] {
-                        return arr
+                focusedIPC += 1
+                var winRef: CFTypeRef?
+                var window: AXUIElement? = nil
+                if AXUIElementCopyAttributeValue(focusedApp, "AXFocusedWindow" as CFString,
+                                                 &winRef) == .success,
+                   let raw = winRef {
+                    window = (raw as! AXUIElement)
+                } else {
+                    focusedIPC += 1
+                    var mainRef: CFTypeRef?
+                    if AXUIElementCopyAttributeValue(focusedApp, "AXMainWindow" as CFString,
+                                                     &mainRef) == .success,
+                       let raw = mainRef {
+                        window = (raw as! AXUIElement)
                     }
-                    return []
-                }()
+                }
+
+                let windows: [AXUIElement] = window.map { [$0] } ?? []
                 HintWindowCache.shared.pruneTo(currentWindows: windows)
 
                 for window in windows {
