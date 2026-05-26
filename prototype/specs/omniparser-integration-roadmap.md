@@ -130,32 +130,24 @@ P0/P1/P2 可以并行（人手够的话）。P3-P8 串行。
 
 ---
 
-## P3 — 框架探测（2 天）
+## P3 — 路由决策（0.5 天）
 
-**目标**：实现 design doc §4.4 的两层探测。
+**目标**：实现 OP-default + AX whitelist 路由（详见 design doc §4.4）。
+
+> **历史**：P3 最初是"两层框架探测"——撞 WeChat 后整体推翻。WeChat 是 native AppKit 但 AX 黑洞，说明框架 ≠ AX 质量。改成显式 whitelist。`FrameworkDetector.swift` 实现已在 commit `04f57f4` 提交、`b0e4...` (P3 pivot 这次) 删除。
 
 **输出**：
-- `Sources/Mouseless/FrameworkDetector.swift`
-- API：`static func detect(bundleID: String, app: AXUIElement) -> AppFramework`
-- 枚举：`enum AppFramework { case appkit, catalyst, electron, webContent, unknown }`
-- per-bundleID 缓存（dict）
+- `Sources/Mouseless/AppRegistry.swift`：`AX_FOCUSED_WHITELIST: Set<String>` + `shouldUseAXForFocused(bundleID:) -> Bool`
+- 初始 whitelist：~15 条 Apple-built AppKit app（Finder、Mail、Safari、Pages、Xcode 等）
+- VimSession.enter() 加 routing 决策 log（debug 用）
 
 **步骤**：
 
-1. **Layer 1（bundle-layout，0 IPC）**：
-   - 读 `Info.plist` 检测 `UIDeviceFamily` / `LSRequiresIPhoneOS` → catalyst
-   - `fileExists` 检查 `.app/Contents/Frameworks/Electron Framework.framework` 和 `.app/Contents/Resources/app.asar` → electron
-2. **Layer 2（AXWebArea BFS，~10-20 IPC 一次性）**：
-   - 从 AX 根开始 BFS，maxDepth = 3
-   - 任何节点 role == `AXWebArea` 就返回 `.webContent`
-   - 实现：用 `AXChildren` 一层层展开，short-circuit
-3. **缓存**：
-   - key 是 bundleID（不是 PID——app restart 后框架不变）
-   - value 是 `AppFramework`
-   - 命中直接返回，0 IPC
-4. **logging**：每个 app 首次探测时打 `[mouseless] framework: <bundleID> -> <result>`，方便调试
+1. **新建 `AppRegistry.swift`**：whitelist 用 `Set<String>` 即可，O(1) lookup
+2. **VimSession.enter() 加 log**：从 `AXFocusedApplication` 拿 bundleID，调 `shouldUseAXForFocused`，打 log `route: <bundleID> -> AX walk (whitelist) | OmniParser (default)`
+3. **不改 routing 真分流**：collectAll 实际分流在 P4 接入。P3 只做"决策机制 + log"，验证 whitelist 命中预期
 
-**风险**：低。这一步完全本地，可以独立单测。
+**风险**：极低。一个 set lookup。
 
 ---
 
@@ -188,38 +180,28 @@ P0/P1/P2 可以并行（人手够的话）。P3-P8 串行。
          HintWindowCache.shared.markDirty(window: win)
      }
      ```
-3. **`collectAll()` 路由**：AX walk 拆成"焦点 app 子元素"vs"其他 3 个 AX 来源"，OP 只替代前者。详见 `omniparser-fallback-design.md` §4.2/§4.4。
+3. **`collectAll()` 路由**：AX walk 拆成"焦点 app 子元素"vs"其他 3 个 AX 来源"，OP 在 default 路径替代前者。详见 `omniparser-fallback-design.md` §4.2/§4.4。
    ```swift
-   let framework = FrameworkDetector.detect(...)
-
    // 永远跑——dock/menubar/extras AX walk 跟下面焦点 app 分支并行
    async let dockTargets = walkDock(...)
    async let menubarTargets = walkMenuBar(...)
    async let extrasTargets = walkMenuExtras(...)
 
-   // 焦点 app 子元素这一支：按 framework 分流
+   // 焦点 app 子元素这一支：OP-default + AX whitelist
    async let focusedTargets: [HintTarget] = {
-       switch framework {
-       case .catalyst, .electron, .webContent:
-           // OP 路径：截图 + 推理 + baseline 过滤
-           // 注意：跳过焦点 app AX walk（节省 ~186ms）
+       if AppRegistry.shouldUseAXForFocused(bundleID: bundleID) {
+           // Whitelist 路径：AX walk 焦点 app 子元素
+           return walkFocusedApp(...)
+       } else {
+           // 默认路径：OP（截图 + 推理 + baseline 过滤）
            return await runOmniParser()
-       case .appkit, .unknown:
-           let ax = walkFocusedApp(...)
-           if ax.count < FALLBACK_N {
-               // 安全网：AppKit app 但 AX 候选异常少 → 叠加 OP
-               let op = await runOmniParser()
-               return ax + op
-           }
-           return ax
        }
    }()
 
    return await (dockTargets + menubarTargets + extrasTargets + focusedTargets)
    ```
-   `FALLBACK_N` 第一版用 `5`（保守，避免空对话框误触发），P7 数据调。
 
-   **关键点**：用 `async let` 让 4 个分支真正并行，而不是顺序跑。AX-bad app 路径的 user-facing 延迟 = `max(50ms AX 其他来源, 172ms OP)` ≈ 172ms，比 sequence 节省 186ms。
+   **关键点**：用 `async let` 让 4 个分支真正并行，而不是顺序跑。**OP 路径下** user-facing 延迟 ≈ `max(50ms AX 其他来源, 95ms OP) = 95ms`。**Whitelist 路径下**延迟 ≈ `max(50ms, 150-200ms 焦点 AX walk) = 150-200ms`。**OP 比 whitelist 还快** —— 这是 ScreenCaptureKit + Metal GPU 把 AX walk 反超的实际结果（见 P1/P2 数据）。
 4. **hint label 分配**：当前是 `dock(numeric) + (focused + extras)(letters)`。OP 候选合并进 letter 池，跟 focused 共用空间。
 5. **`OmniParserPath.swift` stub**：
    ```swift
@@ -231,7 +213,7 @@ P0/P1/P2 可以并行（人手够的话）。P3-P8 串行。
 
 **风险**：
 - **HintTarget 改造波及面**：grep `target.element` / `target.sourceWindow`，会动到 HintOverlay、VimSession 等。Mitigation：先 grep 列清单，refactor 一次性做完。
-- **路由判断在 collectAll() 开销**：framework 探测有缓存，单次扫描 < 1ms。OK。
+- **路由判断在 collectAll() 开销**：一个 Set lookup，< 1us。OK。
 
 ---
 
@@ -324,8 +306,7 @@ P0/P1/P2 可以并行（人手够的话）。P3-P8 串行。
   - misclick（点了没反应）
 - 根据数据调：
   - `confidence threshold`（默认 0.3，可能要 0.2 拉召回，或 0.4 减误检）
-  - `FALLBACK_N`（默认 5）
-  - `AX_FORCE_WHITELIST`（如 VS Code）
+  - `AX_FOCUSED_WHITELIST`（add/remove apps based on hint quality observations）
   - 是否需要 §5.2 的 exploratory 过滤
 
 **风险**：
@@ -347,8 +328,8 @@ P0/P1/P2 可以并行（人手够的话）。P3-P8 串行。
    - `NSScreenCaptureUsageDescription`：填一段"Mouseless 在不支持 accessibility 的 app 上需要截屏来识别可点元素"
 3. **Notarization 验证**：CoreML 模型不会触发问题（Apple 自家格式），跑一遍 `notarytool` 确认
 4. **Settings panel 更新**（如果有的话）：
-   - 显示 framework 探测结果（debug）
-   - 提供 manual whitelist/blacklist 编辑
+   - 显示当前 app 的路由决策（AX whitelist vs OP default）
+   - 提供 manual whitelist 编辑（增删 bundleID）
    - 显示 Screen Recording 权限状态
 5. **README 更新**：说明 Electron 支持要 Screen Recording 权限
 
@@ -367,15 +348,14 @@ P0/P1/P2 可以并行（人手够的话）。P3-P8 串行。
 | ScreenCapture | 无权限 / 调用失败 | 返回 nil，OP 路径降级为"无候选"，AX 候选仍可用 |
 | CoreML 推理 | 模型加载失败 | log error，OP 路径退化为"无候选"，**Mouseless 整体仍可用** |
 | OCR | Vision 调用失败 | refiner 降级到 `box.center` |
-| FrameworkDetector | Layer 2 AX BFS 超时（异常 app） | 标记 `.unknown`，走 appkit 路径 + safety net |
 
-**核心原则**：OP 路径任何环节挂掉，**只影响 OP 候选**，AX 主路径继续工作。不能因为 OP 实现 bug 让整个 Mouseless 不可用。
+**核心原则**：OP 路径任何环节挂掉，**只影响焦点 app 子元素这一来源**——dock/menubar/extras 三个 AX 来源继续工作，用户至少能 hint 到这些。
 
 ### Telemetry / 调试
 
 - 所有 OP 路径相关 log 用 `[mouseless OP]` 前缀，方便 grep
 - Debug 模式（环境变量 `MOUSELESS_OP_DEBUG=1`）：dump 截图 + box 叠加图到 `/tmp`
-- Framework 探测决策一次性 log 到 console
+- 每次 trigger 时 log 路由决策（AX whitelist vs OP default + bundleID）
 
 ### Out of scope（暂不做）
 

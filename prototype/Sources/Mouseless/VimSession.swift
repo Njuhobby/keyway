@@ -44,11 +44,11 @@ final class VimSession {
         renderModeHUD()
         print("[mouseless] enter TAP mode")
 
-        // P3 debug: log the focused app's framework classification so
-        // we can verify the detector on the test matrix before wiring
-        // routing (P4). Cached per-bundleID — second+ Caps Lock on the
-        // same app is instant.
-        FrameworkDetector.debugDetectFocused()
+        // P3 debug: log the routing decision (AX whitelist vs OP) for
+        // the focused app. Doesn't actually change collectAll() yet —
+        // that's P4. Just lets us verify the whitelist hits the apps
+        // we expect and misses the apps we expect.
+        logFocusedAppRouting()
 
         // P2 debug: in parallel with AX hint collection, also capture the
         // focused window via ScreenCaptureKit. This exercises the OP path's
@@ -58,6 +58,29 @@ final class VimSession {
         // Strip this call once OP integration (P4) replaces it with real
         // downstream use.
         ScreenCapture.debugCaptureToTmp()
+    }
+
+    /// P3 debug: print whether the currently focused app would route
+    /// to AX or OP for its focused-app subtree.
+    private func logFocusedAppRouting() {
+        let sys = AXUIElementCreateSystemWide()
+        var appRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(sys, "AXFocusedApplication" as CFString, &appRef) == .success,
+              let appRaw = appRef
+        else {
+            print("[mouseless] route: no focused app")
+            return
+        }
+        var pid: pid_t = 0
+        AXUIElementGetPid(appRaw as! AXUIElement, &pid)
+        guard let running = NSRunningApplication(processIdentifier: pid),
+              let bundleID = running.bundleIdentifier
+        else {
+            print("[mouseless] route: focused app has no bundleID (pid=\(pid))")
+            return
+        }
+        let useAX = AppRegistry.shouldUseAXForFocused(bundleID: bundleID)
+        print("[mouseless] route: \(bundleID) -> \(useAX ? "AX walk (whitelist)" : "OmniParser (default)")")
     }
 
     func exit() {

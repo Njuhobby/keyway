@@ -61,20 +61,21 @@ PoC overlay 图存在 `~/Desktop/mouseless-omniparser-poc/screenshots/*_overlay.
 
 ---
 
-## 4. Fall-through：AX 主，OmniParser 兜底
+## 4. OP-default：OmniParser 主，AX 在 whitelist 上兜底
 
-PoC 草稿里曾考虑过"并行 + IoU fusion"——两条路径都跑、按 IoU 合并候选。**否决了**。
+> **本节经过 3 次重写**。先是"AX 主、OP 黑洞兜底"（fall-through），然后"框架探测路由"，最后落到当前的"OP-default + AX whitelist"。每次推翻的原因都记在 §4.4 末尾的「历史决策」。
 
 ### 4.1 为什么不并行 fusion
 
-| Scenario | AX 路径 | 跑 OmniParser 是否值得 |
-| --- | --- | --- |
-| 好 AX（Slack、VS Code、Safari、Finder） | ~50ms，role 全、AXPress 精确，候选量够用 | **不值得**：多花 140ms + GPU + 电池，只为捡可能多出来的几个 box |
-| AX 黑洞（WeChat 文件列表、Wrike SPA） | 0 / 极少候选 | **必须**：没有别的来源 |
+之前考虑过"并行 + IoU fusion"——两条路径都跑、按 IoU 合并候选。**否决了**：并行 fusion 引入了 IoU 合并、两路结果协调的复杂度，**而对任何单一 app 来说只有一条路径是真正信息源**（要么 AX 信息全、要么 AX 信息空）——fusion 拿不到对应价值。
 
-并行的代价是 100% 的扫描都背上 OmniParser 的延迟 + 资源开销，**收益却集中在不到 10% 的 app 场景**。明显不合算。
+### 4.1a 也不"AX-default with OP fallback"
 
-并且并行 fusion 还引入了 IoU 合并逻辑、两路结果协调的复杂度，**没换来对应价值**。
+中间一版方案是 AX-default：所有 app 先跑 AX，框架探测说是 AX-bad 才补 OP。这一版被 WeChat 击破——WeChat 是 native AppKit（bundle 是 AppKit、`AXTable` `AXRow` `AXColumn` 等标准 widget 都在 AX 树里），但**聊天消息气泡是自定义 NSView，AX 树里没有**。AX 焦点 walk 在 WeChat 上返回 ~58 个候选（够多），却**漏掉了用户最想点的东西**（消息、文件、表情）。
+
+由此推出：**framework ≠ AX 质量**。同样模式的 app 还有 QQ / 钉钉 / 飞书 / 网易系——一大类「**native AppKit 但 AX 黑洞**」根本无法通过 bundle 探测识别。Blacklist 路径会无限膨胀。
+
+详见 §4.4 末尾的"历史决策"。
 
 ### 4.2 Fall-through 流程
 
@@ -91,55 +92,57 @@ PoC 草稿里曾考虑过"并行 + IoU fusion"——两条路径都跑、按 IoU
 
 **关键洞察**：OP 路径**只替代第一行**。其他 3 个来源在 OP 路径下**继续保留 AX walk**——它们既快（dock + extras + menubar 合计 ~50ms）又准（苹果原生 100% 覆盖），而且 OP 物理上看不到（截图只覆盖焦点窗口）。
 
-#### 完整流程（按 app 类型）
+#### 完整流程
 
 ```
 collectAll:
-    framework = detectFramework(app)              // §4.4，cached
+    # 永远跑（OP 看不到这 3 个来源——dock/menubar/extras 不在焦点窗口内）
+    dock_targets       = AX walk: Dock                       // ~6ms
+    menubar_targets    = AX walk: focused app's AXMenuBar    // ~7ms
+    extras_targets     = AX walk: menu extras                // ~44ms
 
-    # 永远跑（4 个 AX 来源中的 3 个）
-    dock_targets       = AX walk: Dock           // ~6ms
-    menubar_targets    = AX walk: AXMenuBar      // 内含 ~7ms
-    extras_targets     = AX walk: menu extras    // ~44ms
-
-    # 焦点 app 子元素树：按 framework 分流
-    if framework in {.catalyst, .electron, .webContent}:
-        # AX 黑洞场景——跳过焦点 app AX walk，用 OP 替代
-        # 这一支跟上面 3 个 AX 来源并行跑
-        screenshot     = capture focused window
-        visual_boxes   = OmniParser detect(screenshot)
-        visual_boxes   = apply_baseline_filters(visual_boxes)   # §5.1
-        focused_targets = visual_boxes
+    # 焦点 app 子元素树：OP-default，少数 app 走 AX
+    if app.bundleID in AX_FOCUSED_WHITELIST:
+        focused_targets = AX walk: focused app children      // ~150-200ms
     else:
-        # AppKit / unknown：AX walk 焦点 app 子元素树
-        focused_targets = AX walk: focused app children   // ~186ms
-        if count(focused_targets) < FALLBACK_N:
-            # 安全网：AX 候选异常少，叠加 OP
-            visual_boxes = OmniParser detect(capture focused window)
-            focused_targets ∪= apply_baseline_filters(visual_boxes)
+        # 默认路径——任何不在 whitelist 里的 app
+        screenshot      = capture focused window             // ~60ms warm
+        visual_boxes    = OmniParser detect(screenshot)      // ~30ms
+        focused_targets = apply_baseline_filters(visual_boxes)   // §5.1, ~5ms
 
     return dock_targets ∪ menubar_targets ∪ extras_targets ∪ focused_targets
 ```
 
+**`AX_FOCUSED_WHITELIST`** 见 `Sources/Mouseless/AppRegistry.swift`。初始内容：Apple 自家 AppKit app（Finder、Mail、Safari、Pages、Xcode...），10-15 条。第三方 app 必须经过实测验证 AX 覆盖好才能进。
+
 #### 延迟分析（M3 Max，实测数）
 
-**AX-good app 路径**（Finder / Safari / Mail / ...）：
-
-```
-focused (~186ms) + dock (~6ms) + extras (~44ms) + menubar (~7ms)
-= ~190ms (并行就是 max(186, 44+其他) ≈ 186ms)
-```
-
-**AX-bad app 路径**（WeChat / Slack / Outlook / ...），并行执行：
+**Whitelist 路径**（Finder / Mail / Xcode / ... 这种 AX 优秀的）：
 
 ```
 thread A: dock + menubar + extras AX walk    ~50ms
-thread B: screencap + OP infer + filter      142 + 30 + 5 = 177ms
+thread B: AX walk focused app subtree         150-200ms
 
-user-facing = max(A, B) = 177ms
+user-facing = max(A, B) = 150-200ms
 ```
 
-**比"跳到 OP 之前还要先跑一遍焦点 app AX walk"省 ~186ms**——这是把 4 来源分开后拿到的实质收益。OmniParser 只在 AX 黑洞场景跑，**99% 的 scan 完全感知不到它存在**，电池、GPU、加载成本都省了。
+**OP-default 路径**（WeChat / Slack / VS Code / Tauri app / 任何不在 whitelist 的）：
+
+```
+thread A: dock + menubar + extras AX walk    ~50ms
+thread B: screencap + OP infer + filter      60 + 30 + 5 = 95ms warm
+
+user-facing = max(A, B) = ~95ms
+```
+
+**反直觉**：OP-default 比 whitelist 路径还**更快**——因为 AX 焦点 walk（150-200ms）是 Mouseless 最重的操作，OP 取代它后 wall-clock 反而下降。AX walk 的速度优势其实早被现代 ScreenCaptureKit + CoreML on Metal GPU 抹平了（详见 P1 spike `omniparser-coreml-spike` 的 29ms 推理数据 + P2 `ScreenCapture.swift` 的 60ms warm screencap）。
+
+Whitelist 在性能上**只是相同/略劣**，它存在的真正理由是别的：
+- 不依赖 Screen Recording 权限（仅对真正不想授权的用户有意义）
+- AX 元素携带 role / label / state，未来 mode 扩展（selectText、drag）可能用得到
+- AX click 精度 100%（box 中心一定可点），不需要 §4.6 的 OCR refiner
+
+权衡后选 OP-default 是因为：**universal coverage + 简单决策（一个 set lookup） + 大多数 app 上更快**。Whitelist 的两项优势对当前 hint mode 实际用不上，未来需要再扩展。
 
 ### 4.3 每类目标的 commit 行为
 
@@ -152,142 +155,74 @@ user-facing = max(A, B) = 177ms
 
 Sticky rescan / `HintWindowCache` 逻辑保留——AX 是主路径，缓存有价值。OmniParser 这一支每次重新跑 detection（140ms 稳态，不值得缓存复杂度）。
 
-### 4.4 路径选择：框架探测 + 小白/黑名单
+### 4.4 路径选择：OP-default + AX whitelist
 
-最初 spec 这一节叫 `AX_USEFUL_THRESHOLD`——按"AX 返回候选数低于 N 就触发 OP"决定。实际写下来发现这个 framing **抓不住真实情况**。
+**决策**：bundle ID 在 `AX_FOCUSED_WHITELIST` 里 → AX 焦点 walk；其他全部 → OP 路径。Dock / menubar / extras AX walk 永远跑（§4.2）。
 
-#### 现实是什么
+实现位于 `Sources/Mouseless/AppRegistry.swift`：
 
-按"用户日常时间分布"看，macOS app 大致分两类：
+```swift
+@MainActor
+enum AppRegistry {
+    static let axFocusedWhitelist: Set<String> = [
+        "com.apple.finder",
+        "com.apple.mail",
+        "com.apple.Safari",
+        "com.apple.TextEdit",
+        "com.apple.Preview",
+        "com.apple.calculator",
+        "com.apple.Terminal",
+        "com.apple.Console",
+        "com.apple.ActivityMonitor",
+        "com.apple.Pages", "com.apple.Keynote", "com.apple.Numbers",
+        "com.apple.iCal",
+        "com.apple.dt.Xcode",
+        "com.apple.Notes",
+    ]
 
-| 框架 | AX 质量 | 代表 |
-| --- | --- | --- |
-| **Pure AppKit (老派)** | 干净 | Finder / Mail / Xcode / Pages 全家 / TextEdit / Preview / Terminal / Safari **chrome** / BBEdit / Things / 各种生产力工具 |
-| **Catalyst (UIKit→macOS)** | 稀薄 | Music / TV / Podcasts / News / Maps / Stocks / Home / Books / 部分版本的 Notes |
-| **SwiftUI** | 参差，改善中 | System Settings (Ventura+) / 部分新 Apple app / 一些第三方 |
-| **Electron / web wrapper** | 几乎没有 | VS Code / Slack / Discord / Notion / Figma / WeChat / Wrike / 各类 SaaS |
-| **WebKit 内 web content** | 看 site 的 ARIA 卫生 | 好：MDN/GitHub。差：大多数 SPA |
-| **自渲染** | 没有 | 游戏 / Unity / Unreal |
-
-**"AX 干净的 app 没几个"**——按用户加权时间算，AppKit-good 大约占 20-30%，剩下 70%+ 在 Catalyst / Electron / 自渲染里。
-
-#### 简单 count 阈值的问题
-
-`if ax_targets.count < N: run OmniParser` 看起来直观，实际两头都不准：
-
-- **AX-bad app 上仍然有大量虚高 count**：WeChat 文件列表 AX 仍然能给 menu bar / dock / sidebar 30+ 候选，但用户实际想点的 PDF 行 = 0。count 高、recall 烂——阈值漏掉。
-- **AX-good app 上偶尔合法 low count**：用户开了个空 Finder 窗口或一个无聊的对话框，AX 返回 5 个 target——本来就这么多。阈值误触发跑 OP，浪费 ~140ms + GPU。
-
-所以 count 不是好信号。**真正的信号是"这个 app 的 UI 框架是什么"**——框架决定了 AX 质量的 ceiling，跟某次扫描的具体数字无关。
-
-#### 框架探测：两层
-
-bundle-layout 判定单独不够——很多 "native shell + web 内核" 的 app（New Outlook for Mac、Teams、OneNote 新版……）**没有** Electron Framework 也**没有** Catalyst 标志，但主 UI 是 WKWebView 渲染的 web 页面。Microsoft 这类 app 的 shell 是 bespoke 的，bundle layout 跟正经 AppKit app 几乎没区别。所以我们要**两层探测**：
-
-```
-detectFramework(app):
-    // Layer 1: 廉价 bundle-layout 探测（0 IPC，纯文件系统读取）
-
-    if Info.plist 含 UIDeviceFamily / LSRequiresIPhoneOS
-       或 executable layout 是 iOS-style:
-        return .catalyst
-
-    if .app/Contents/Frameworks/Electron Framework.framework 存在
-       或 .app/Contents/Resources/app.asar 存在:
-        return .electron
-
-    // Layer 2: AX 结构探测（per-app cached，10-20 IPC 一次性）
-
-    if rootHasAXWebArea(app, maxDepth: 3):
-        return .webContent     // covers Outlook / Teams / OneNote /
-                               // 任何 WKWebView 包装的 native shell
-                               // 也覆盖一些 Electron app（双重命中无妨）
-
-    return .appkit             // 默认假设 native AppKit
+    static func shouldUseAXForFocused(bundleID: String) -> Bool {
+        return axFocusedWhitelist.contains(bundleID)
+    }
+}
 ```
 
-##### Layer 2 (AXWebArea probe) 的原理
+#### 维护原则
 
-任何"主 UI 是 web 渲染"的 app，AX 树里都有 `AXWebArea` 节点——这是 WebKit / Chromium 的 AX bridge 给"web content 区"的标准 role。从 AXApplication 根 BFS 走前 3-4 层就能命中：
+- **保守入选**：第三方 app 必须经过实测 + 主观确认"在这个 app 里 AX 路径 hint 体验明显优于 OP 路径"才入。默认是 OP。
+- **错向无害**：whitelist 漏了一个 AX-good app → 多花 ~80ms 跑 OP（OP 也能给好 hint），不影响功能正确性。whitelist 误收一个 AX-bad app → 用户直接观察到"hint 在这个 app 上少了关键东西"，剔除即可。**错向都不致命，但漏比误便宜**。
+- **不依赖自动探测**：上一轮设计尝试 framework detection 自动分类（Catalyst / Electron / WKWebView / 自渲染），但 WeChat 击破了"native = AX-good"的假设（详见下文「历史决策」第三轮），证明自动探测不可靠。**手工 whitelist + 错向便宜 = 正确权衡**。
 
-- **Pure AppKit** app：没 AXWebArea（即使内嵌帮助小窗那也在深层）
-- **Catalyst** app：没（这条 Layer 1 已经先 return 了，不会走到 Layer 2）
-- **Electron** app：有（Layer 1 也先 return 了；走到 Layer 2 是冗余兜底）
-- **WKWebView 包装的 shell**（New Outlook、Teams、OneNote 等）：有 ← **这是 Layer 2 唯一不可替代的命中**
-- **Safari**：有 AXWebArea 但只在 web 视图节点，chrome 部分是 AppKit。Layer 2 命中后整个 app 被归到 webContent——**可接受的折中**，Safari 的导航 + 标签 chrome 走 OmniParser 也能识别
+#### 决策是否要 per-view 细化（暂不做）
 
-`rootHasAXWebArea` 实现：BFS app 的 AXChildren 树，每个节点检查 role，发现 `AXWebArea` 立即返回 true，maxDepth = 3 限深。一次性，per-app 缓存进 dict，**整个 app 生命周期只判定一次**。
+理想情况：
 
-##### 探测顺序
+- Safari → chrome (AppKit, 好) + web view (per-site varies)
+- Xcode → 编辑器 (好) + 集成 doc viewer (WebKit)
+- VS Code → menu bar (native, 好) + editor (Monaco) + bottom panel
 
-Layer 1 在前是因为它是**纯文件系统读取，0 IPC**——能命中就立刻返回。Catalyst / Electron 大多数情况在 Layer 1 就被识别。Layer 2 兜底那些没明显 bundle 标志的 web-wrapper（主要是微软家产）。
-
-#### 路径选择伪码
-
-注意：下面的「跑 OmniParser」和「跑焦点 app AX walk」是**两选一**的——但 dock/menubar/extras 的 AX walk **永远跑**（§4.2 表 1）。这里的 "return" 只代表"焦点 app 子元素这一来源"的决策完成，其他 3 个 AX 来源跟它**并行**执行。
-
-```
-collectAll():
-    app = frontmost app
-    framework = detectFramework(app)       // cached after first call
-
-    # 永远跑（3 个 AX 来源跟下面焦点 app 分支并行）
-    dock_targets    = AX walk: Dock
-    menubar_targets = AX walk: focused app's AXMenuBar
-    extras_targets  = AX walk: menu bar extras
-
-    # 焦点 app 子元素这一来源：按 framework / 列表分流
-    # 显式覆盖优先：人工小列表
-    if app.bundleID in AX_FORCE_BLACKLIST:
-        focused_targets = OmniParser path
-    elif app.bundleID in AX_FORCE_WHITELIST:
-        focused_targets = AX walk: focused app children    // e.g. VS Code 之类 Electron 但 AX 不错
-    else:
-        switch framework:
-            case .catalyst, .electron, .webContent:
-                focused_targets = OmniParser path          // 跳过焦点 app AX walk
-            case .appkit, .unknown:
-                focused_targets = AX walk: focused app children
-                if count(focused_targets) < FALLBACK_N:
-                    # AppKit app 但实际 AX 候选异常少 → 安全网
-                    # （SwiftUI 嵌入控件、奇怪自定义 view 兜底）
-                    op_targets = OmniParser path
-                    focused_targets ∪= op_targets
-
-    return dock_targets ∪ menubar_targets ∪ extras_targets ∪ focused_targets
-
-# 简写：
-OmniParser path = capture focused window  → detect → apply_baseline_filters (§5.1)
-```
-
-#### 人工维护的两个列表
-
-| 列表 | 内容 | 期望规模 |
-| --- | --- | --- |
-| `AX_FORCE_BLACKLIST` | Layer 1 + Layer 2 都漏掉的 AX-烂 app（理论上几乎不存在——Layer 2 的 AXWebArea probe 是个非常宽的网） | **接近 0** |
-| `AX_FORCE_WHITELIST` | 框架探测说 Electron / webContent 但实际 AX 不错的 | VS Code、可能 Cursor、可能 Discord 较新版本——目前估 < 5 |
-
-**两层探测覆盖了几乎所有自动决策**。Blacklist 在以前的草稿里被预计 < 10 条（要塞 New Outlook / Teams / OneNote 之类），加上 Layer 2 之后这些 app 全部被 AXWebArea probe 自动归类，Blacklist 接近空。这是把 framework detection 做得更通用换来的实际收益。
-
-#### 还没解的细分场景
-
-**同一 app 内 AX 质量分层**：
-
-- Safari：browser chrome (AppKit, 好) + web view 内容（看 site）
-- Xcode：编辑器 (AppKit, 好) + 集成 doc viewer (WebKit, 看文档源)
-- VS Code：menu bar (native, 好) + editor (Monaco, 好) + bottom panel (Electron, 看)
-
-严格说应该 per-view 判定，但**第一版按 app 维度 + count 安全网就能拿到 80/20**——AX 候选异常少时退化到 fall-through 跑一次 OP 兜住。
+严格说应该 per-view 判定。**第一版按 app 维度足够 80/20**。哪个 app 真的需要 per-view 分流再单独处理。
 
 #### 历史决策
 
-这一节经过两轮翻盘：
+这一节**经过三轮翻盘**：
 
-**第一轮**：最初 spec 按"count 阈值是主信号"写。讨论后发现 AX-bad app 经常返回虚高 count（menu bar / dock / sidebar 加起来 30+ 但实际内容区域 = 0），AX-good app 偶发合法 low count。**改成"框架探测优先 + count 当安全网"**。
+**第一轮（推翻）**：最初按 "count 阈值是主信号" 写——AX 返回候选数 < N 时触发 OP。发现两头都不准：AX-bad app 经常返回虚高 count（menu bar / dock / sidebar 加起来 30+ 但实际内容区域 = 0），AX-good app 偶发合法 low count（空 Finder 窗口、简单对话框）。**改成"框架探测优先 + count 当安全网"**。
 
-**第二轮**：第一版框架探测只用 bundle-layout（Catalyst 的 Info.plist 标志 / Electron 的 Framework 路径），漏掉了 **WKWebView 包装的 web app**（New Outlook for Mac / Teams / OneNote 新版……）。这些 app 没有明显 bundle 标志、但主 UI 是 web 渲染。当时草稿提议把它们塞进 `AX_FORCE_BLACKLIST` 手工维护——但 blacklist 越长越说明探测不够通用。**改成"两层探测：bundle-layout fast path + AXWebArea probe 兜底"**，自动把 web-shell 类 app 归到 webContent 桶，blacklist 接近 0 条。
+**第二轮（推翻）**：第一版框架探测只用 bundle-layout（Catalyst Info.plist / Electron Framework 路径），漏掉 WKWebView 包装的 web shell（New Outlook、Teams、OneNote 新版）。**改成"两层探测：bundle fast path + AXWebArea BFS 兜底"**——Layer 2 BFS 到 depth 5 能命中绝大多数 web 内核 app（Clash Verge / Tauri 等也覆盖）。
 
-留这段史是为了不让未来读者重新走这个推理过程。下一次再调整时，第一反应应该是"探测能不能做得更通用"，不是"加 entry 到 blacklist"。
+**第三轮（推翻——本次）**：实测 WeChat 击破核心假设「**non-native = AX-bad / native = AX-good**」。WeChat 是 genuine native AppKit（bundle 含 swift dylibs 和 .nib 资源、AX 树里有 `AXTable` `AXRow` `AXScrollArea` 等 AppKit 标准 widget），但**聊天消息气泡是自定义 NSView，AX 完全看不到**——AX 焦点 walk 返回 58 个候选（够多），却全是 sidebar 和 nav，**用户真正想点的消息内容 0 候选**。
+
+WeChat 不是孤例：QQ / 钉钉 / 飞书 / 网易系一大类中国大厂 native app 都是这个模式。一旦"框架 ≠ AX 质量"，整个 framework-detection 路由失去基础——blacklist 路径不可持续。
+
+**改成"OP-default + 显式 AX whitelist"**：
+
+- OP 路径**对所有 app 都 work**（包括 WeChat 这种 "native + 自渲染" 的 AX 黑洞）
+- OP 性能数据（screencap 60ms warm + CoreML 推理 29ms = ~95ms parallel with AX 50ms = max 95ms wall-clock）**已经比 AX 焦点 walk 快**（AX 焦点 walk 单独要 150-200ms）。OP-default 的成本只是 Screen Recording 权限要求和略低的 click 精度（用 OCR refiner 补偿，§4.6）。
+- 决策机制简化为一个 `Set<String>` lookup，**没有自动探测、没有缓存、没有 BFS、没有 fallback chain**。
+
+`FrameworkDetector.swift` 已经从代码库删除（保留在 git commit `04f57f4` 里供未来回看）。
+
+留这段史是为了**警告未来读者**：每次撞墙的反应都是"再加一层启发式探测让它更智能"，但实际上**人工 whitelist 比自动探测更便宜、更可控、更可解释**。下一次想要"自动 detect AX-bad app"之前，先问"我们为什么不直接维护 whitelist？"
 
 ### 4.5 跟 AX 卡顿尖峰（hint-discovery.md §5）的关系
 
