@@ -91,6 +91,31 @@ final class HintOverlayView: NSView {
 
             let isDockLabel = target.label.first?.isNumber == true
 
+            // Inside-top-left placement (no tail) when the target rect
+            // is large enough to accommodate the badge — applies to
+            // BOTH AX and OmniParser targets.
+            //
+            // Threshold: 30pt × 16pt. Horizontal needs 4pt padding on
+            // each side so the badge doesn't touch the rect's left
+            // edge. Vertical needs zero padding — many AX elements
+            // (date / size cells in Finder list view) have rects
+            // sized tight to their text glyphs (~14-16pt tall), so
+            // any positive Y padding rejects them and they fall back
+            // to speech-bubble placement (which is exactly the
+            // ambiguous "label floating between rows" case the inset
+            // path was built to fix). Label flush to rect's top edge
+            // is acceptable — content below the label is still
+            // readable because text usually doesn't start at the
+            // absolute top pixel.
+            //
+            // The original "speech bubble + tail" floats the badge in
+            // the gap between rects, ambiguous when they're packed
+            // tightly. Inside placement makes ownership unambiguous
+            // and drops the tiny tail entirely.
+            let insidePadX: CGFloat = 4
+            let fitsInside = target.rect.width >= labelW + 2 * insidePadX
+                && target.rect.height >= labelH
+
             let fillRect: NSRect
             var tail: NSBezierPath? = nil
 
@@ -233,6 +258,20 @@ final class HintOverlayView: NSView {
                 }
                 p.close()
                 tail = p
+            } else if fitsInside {
+                // Big-enough target (AX or OP): top-left INSIDE with
+                // 4pt horizontal padding, zero vertical (badge flush
+                // to rect's top edge). NSView coords have Y going up,
+                // so the rect's top edge is at `viewY + r.size.height`
+                // and the label rect's bottom-left is `top - labelH`.
+                fillRect = NSRect(
+                    x: viewX + insidePadX,
+                    y: viewY + r.size.height - labelH,
+                    width: labelW,
+                    height: labelH
+                )
+                // tail stays nil — badge inside the rect is self-evident,
+                // no pointer needed.
             } else {
                 // Non-Dock: speech-bubble below element, fall back to above
                 // if below would land off any screen.

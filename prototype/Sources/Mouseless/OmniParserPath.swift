@@ -179,20 +179,27 @@ enum OmniParserPath {
                 bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
             ) else { return }
 
-            // Flip Y so we can use top-left coords throughout (CGImage's
-            // convention) — CGContext defaults to bottom-left origin.
-            ctx.translateBy(x: 0, y: CGFloat(height))
-            ctx.scaleBy(x: 1, y: -1)
+            // No CTM flip. `CGContext.draw(image, in:)` interacts with
+            // the bitmap context such that the resulting PNG (where row
+            // 0 is the top) comes out right-side up when the context is
+            // **un-flipped**. (Counterintuitive to Apple's docs, but
+            // empirically verified — flipping the context produces an
+            // upside-down PNG.)
             ctx.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
 
-            // Helper: normalized rect → pixel rect.
+            // Box coordinates come in normalized [0,1] with TOP-LEFT
+            // origin (same as the rest of our pipeline). The bitmap
+            // context however is BOTTOM-LEFT origin, so we flip Y per
+            // box to compensate: pxY_bl = height - normY*height -
+            // normH*height.
+            let Wf = CGFloat(width)
+            let Hf = CGFloat(height)
             let denorm = { (r: CGRect) -> CGRect in
-                CGRect(
-                    x: r.minX * CGFloat(width),
-                    y: r.minY * CGFloat(height),
-                    width: r.width * CGFloat(width),
-                    height: r.height * CGFloat(height)
-                )
+                let pxX = r.minX * Wf
+                let pxW = r.width * Wf
+                let pxH = r.height * Hf
+                let pxY_bl = Hf - r.minY * Hf - pxH
+                return CGRect(x: pxX, y: pxY_bl, width: pxW, height: pxH)
             }
 
             // Rejected first (drawn underneath) — red thin outline.

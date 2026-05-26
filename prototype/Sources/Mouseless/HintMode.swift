@@ -787,19 +787,42 @@ final class HintMode {
     }
 
     private static func generateLabels(count: Int) -> [String] {
+        // CRITICAL: all returned labels must be the same length within
+        // a single call's output. Mixing lengths creates prefix
+        // collisions (e.g. "aa" is a prefix of "aaa"): user types
+        // "a a" and the system can't tell if they want to commit "aa"
+        // or are still building "aaa". Picking the shortest tier that
+        // fits avoids this entirely.
+        let n = alphabet.count   // 9
         var out: [String] = []
         out.reserveCapacity(count)
-        // Single-char labels when there are few elements — faster to commit.
-        if count <= alphabet.count {
+
+        if count <= n {
+            // 1-letter labels — fastest to commit.
             for ch in alphabet.prefix(count) {
                 out.append(String(ch))
             }
             return out
         }
+        if count <= n * n {
+            // 2-letter labels — covers most realistic scans (typical
+            // app + dock + extras stays under 81).
+            for first in alphabet {
+                for second in alphabet {
+                    out.append("\(first)\(second)")
+                    if out.count == count { return out }
+                }
+            }
+            return out
+        }
+        // 3-letter labels — dense scans (full Finder, Xcode, OP+AX
+        // combined). 9³ = 729, well past maxTargets.
         for first in alphabet {
             for second in alphabet {
-                out.append("\(first)\(second)")
-                if out.count == count { return out }
+                for third in alphabet {
+                    out.append("\(first)\(second)\(third)")
+                    if out.count == count { return out }
+                }
             }
         }
         return out
