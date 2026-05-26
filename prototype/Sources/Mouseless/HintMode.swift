@@ -181,32 +181,51 @@ final class HintMode {
 
     private func commit(target: HintTarget, action: ClickAction) {
         // We deliberately bypass AXPress / AXShowMenu / AXOpen and always
-        // synthesize a mouse event at the element's rect center. AX
-        // **metadata** (the element exists, here's its rect, role, label)
-        // is reliable — that's how we found the target and put a hint on
-        // it. AX **actions** are not: many controls (NSBrowser cells,
-        // NSTableRowView, custom views, Electron's bridge layer) expose
-        // AXPress in their action list but the handler is a no-op or has
-        // unexpected semantics, leading to "hint appeared, user pressed,
-        // nothing happened." Empirically synth click is the more
-        // predictable primitive — it behaves exactly like a real mouse
-        // click, which is the user's mental model anyway.
+        // synthesize a mouse event. AX **metadata** is reliable — that's
+        // how we found the target and put a hint on it. AX **actions**
+        // are not: many controls expose AXPress in their action list but
+        // the handler is a no-op or has unexpected semantics. Synth
+        // click is the more predictable primitive — it behaves exactly
+        // like a real mouse click, which is the user's mental model.
         //
-        // Trade-offs we accept:
-        //   - The mouse cursor visibly moves to the click point. Matches
-        //     "this hint = clicking that pixel" — predictable.
-        //   - Occluded elements can't be clicked. Practically a non-issue:
-        //     our onScreen filter already excluded them.
-        //   - Same coordinates for AX-derived and (future) OmniParser-
-        //     derived hints — single commit code path.
-        let center = CGPoint(x: target.rect.midX, y: target.rect.midY)
-        switch action {
-        case .left:
-            Self.synthesizeClick(at: center, button: .left, count: 1)
-        case .right:
-            Self.synthesizeClick(at: center, button: .right, count: 1)
-        case .double:
-            Self.synthesizeClick(at: center, button: .left, count: 2)
+        // Click point selection differs by source:
+        //   - AX target: rect center. AX rects are tight element bounds,
+        //     center is always inside the click handler.
+        //   - OP target: OCR-refined point. OP boxes may have padding /
+        //     border / hidden hit-test boundaries — center is often
+        //     fine but sometimes misses (see omniparser-fallback-design
+        //     §4.6 for the 5 failure modes). OCR finds text inside the
+        //     box; the text's center is almost always inside the real
+        //     click handler. Containment-aware: filters out text that
+        //     belongs to OP boxes contained within this one.
+        switch target.source {
+        case .ax:
+            let center = CGPoint(x: target.rect.midX, y: target.rect.midY)
+            Self.synthesizeClick(at: center, button: buttonForAction(action),
+                                 count: countForAction(action))
+        case .omni:
+            // OCR refiner needs to re-screencap + OCR (~60-90ms total).
+            // Dispatch as a Task so the keyboard event tap callback can
+            // return synchronously. The hint UI is already going to
+            // deactivate via the caller; user perceives the click 60-90ms
+            // after pressing the hint key (acceptable — typing rhythm
+            // covers this).
+            let innerBoxes: [CGRect] = self.targets.compactMap { other in
+                guard !targetsAreEqual(other, target),
+                      case .omni = other.source,
+                      target.rect.contains(other.rect)
+                else { return nil }
+                return other.rect
+            }
+            let boxRect = target.rect
+            Task { @MainActor in
+                let clickPoint = await OCRRefiner.refine(
+                    boxScreenRect: boxRect,
+                    innerBoxes: innerBoxes
+                )
+                Self.synthesizeClick(at: clickPoint, button: buttonForAction(action),
+                                     count: countForAction(action))
+            }
         }
 
         // The click may have changed the source window's contents (list
@@ -218,6 +237,26 @@ final class HintMode {
         if case .ax(_, let window?) = target.source {
             HintWindowCache.shared.markDirty(window: window)
         }
+    }
+
+    private func buttonForAction(_ action: ClickAction) -> CGMouseButton {
+        switch action {
+        case .left, .double: return .left
+        case .right: return .right
+        }
+    }
+
+    private func countForAction(_ action: ClickAction) -> Int {
+        switch action {
+        case .left, .right: return 1
+        case .double: return 2
+        }
+    }
+
+    /// HintTarget identity for "is this the same target?" — by label
+    /// since labels are uniquely assigned per session.
+    private func targetsAreEqual(_ a: HintTarget, _ b: HintTarget) -> Bool {
+        return a.label == b.label
     }
 
     // MARK: - AX collection
