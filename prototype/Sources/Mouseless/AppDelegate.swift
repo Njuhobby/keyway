@@ -20,6 +20,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // first trigger key press) keeps every subsequent TAP
             // collect pass essentially free.
             MenuExtraCache.shared.warmUp()
+
+            // Pre-load the OmniParser CoreML model in the background.
+            // ~1-1.5s cold load; doing it at launch (invisible — user
+            // is presumably busy after pressing Login) makes the first
+            // Caps Lock on an AX-bad app feel as snappy as subsequent
+            // ones. See `OmniParserModel.preload`.
+            OmniParserModel.preload()
         } else {
             statusItem.button?.title = "M⚠"
             print("[mouseless] Accessibility not granted.")

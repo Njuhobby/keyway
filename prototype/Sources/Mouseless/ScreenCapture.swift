@@ -21,6 +21,15 @@ import ScreenCaptureKit
 /// their focused window correctly.
 @MainActor
 enum ScreenCapture {
+    /// Captured window: the pixel image plus the window's screen-space
+    /// rect in points (top-left origin, AX coordinate space). OP path
+    /// needs both — image for inference, rect for translating normalized
+    /// model output back to screen-space hint targets.
+    struct Captured {
+        let image: CGImage      // crop's pixel content
+        let screenRect: CGRect  // window rect in points, AX coords
+    }
+
     /// End-to-end: AX → focused window rect → display capture → crop.
     /// Returns nil if any link fails.
     ///
@@ -33,7 +42,7 @@ enum ScreenCapture {
     /// Reading the already-composited display framebuffer is much
     /// faster (~20-30ms) since no recomposition is required.
     /// See `omniparser-fallback-design.md` §6.4.
-    static func captureFocusedWindow() async -> CGImage? {
+    static func captureFocusedWindow() async -> Captured? {
         let tStart = Date()
         guard let (windowEl, _) = focusedWindow() else {
             print("[mouseless] ScreenCapture: no focused window (AX chain returned nil)")
@@ -119,7 +128,7 @@ enum ScreenCapture {
 
             let ms = { (a: Date, b: Date) in Int(b.timeIntervalSince(a) * 1000) }
             print("[mouseless] ScreenCapture timings: ax=\(ms(tStart, tAX))ms enum=\(ms(tAX, tEnum))ms filter=\(ms(tEnum, tFilter))ms capture=\(ms(tFilter, tCap))ms crop=\(ms(tCap, tCrop))ms total=\(ms(tStart, tCrop))ms display=\(displayImage.width)×\(displayImage.height) crop=\(cropped.width)×\(cropped.height)")
-            return cropped
+            return Captured(image: cropped, screenRect: windowRectInAX)
         } catch {
             print("[mouseless] ScreenCapture failed: \(error.localizedDescription)")
             return nil
@@ -186,10 +195,11 @@ enum ScreenCapture {
     static func debugCaptureToTmp() {
         Task { @MainActor in
             let t0 = Date()
-            guard let image = await captureFocusedWindow() else {
+            guard let captured = await captureFocusedWindow() else {
                 print("[mouseless] debug capture: returned nil (see preceding log)")
                 return
             }
+            let image = captured.image
             let elapsed = Int(Date().timeIntervalSince(t0) * 1000)
             let path = "/tmp/mouseless-focused.png"
             let url = URL(fileURLWithPath: path)

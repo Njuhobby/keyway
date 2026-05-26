@@ -76,7 +76,13 @@ final class HotkeyTap {
             let modifierMask: CGEventFlags = [.maskShift, .maskControl,
                                               .maskCommand, .maskAlternate]
             if keyCode == KeyCode.f19 && flags.intersection(modifierMask).isEmpty {
-                session.enter()
+                // enter() is async — its OP path may run ScreenCaptureKit
+                // + CoreML inference. Dispatch fire-and-forget; the event
+                // tap callback must return synchronously, but we already
+                // know we want to consume this event (return nil).
+                Task { @MainActor [session] in
+                    await session.enter()
+                }
                 return nil
             }
             return Unmanaged.passUnretained(event)

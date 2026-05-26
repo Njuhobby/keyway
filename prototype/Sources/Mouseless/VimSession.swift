@@ -25,7 +25,10 @@ final class VimSession {
     // MARK: - Lifecycle
 
     /// Trigger key pressed → enter TAP mode (hints visible).
-    func enter() {
+    /// async because the OmniParser path (P5+) involves ScreenCaptureKit
+    /// and CoreML inference, both inherently async. Caller (HotkeyTap)
+    /// dispatches via Task — keyboard event handler stays sync.
+    func enter() async {
         guard mode == nil else { return }
         // The cache survives in memory across Mouseless on/off cycles, but
         // it has no visibility into what the user did with the mouse while
@@ -34,7 +37,7 @@ final class VimSession {
         // sticky rescans within the session can reuse.
         HintWindowCache.shared.clear()
         let h = HintMode()
-        guard h.activate() else {
+        guard await h.activate() else {
             HUD.shared.show("no hints here")
             return
         }
@@ -217,7 +220,7 @@ final class VimSession {
                 // returns. If that ever stops being true, ghosts
                 // would reappear and we'd add a wait back.
                 let next = HintMode()
-                if next.activate() {
+                if await next.activate() {
                     self.mode = .tap(next)
                     self.renderModeHUD()
                 } else {
@@ -244,14 +247,17 @@ final class VimSession {
             break
         case .committed:
             if sticky {
-                // Re-scan and stay in TAP for the next click.
+                // Re-scan and stay in TAP for the next click. activate()
+                // is async (OmniParser path may run), so dispatch.
                 hint.deactivate()
-                let nextHint = HintMode()
-                if nextHint.activate() {
-                    mode = .tap(nextHint)
-                    renderModeHUD()
-                } else {
-                    exit()
+                Task { @MainActor in
+                    let nextHint = HintMode()
+                    if await nextHint.activate() {
+                        self.mode = .tap(nextHint)
+                        self.renderModeHUD()
+                    } else {
+                        self.exit()
+                    }
                 }
             } else {
                 exit()
