@@ -44,6 +44,12 @@ final class VimSession {
         renderModeHUD()
         print("[mouseless] enter TAP mode")
 
+        // P3 debug: log the focused app's framework classification so
+        // we can verify the detector on the test matrix before wiring
+        // routing (P4). Cached per-bundleID — second+ Caps Lock on the
+        // same app is instant.
+        FrameworkDetector.debugDetectFocused()
+
         // P2 debug: in parallel with AX hint collection, also capture the
         // focused window via ScreenCaptureKit. This exercises the OP path's
         // screencap entry point under the *same* trigger (Caps Lock) the
