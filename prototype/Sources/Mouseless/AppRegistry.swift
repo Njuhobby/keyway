@@ -53,6 +53,9 @@ enum AppRegistry {
 
         // Notes app (Catalyst variants — may need to drop if hints regress)
         "com.apple.Notes",
+
+        // Third-party (verified AX-good)
+        "net.kovidgoyal.kitty",      // kitty terminal
     ]
 
     /// Routing decision for the focused-app subtree.
