@@ -414,3 +414,14 @@ P0/P1/P2 可以并行（人手够的话），可压缩到 ~3 周。
 - **P3 结束**：框架探测命中率合理吗？跑测试矩阵里每个 app 都该归对类
 - **P4 结束**：合并后 commit 路径在 AX-only app 上有 regression 吗？
 - **P7 结束**：misclick 率 / cold start / hot path 都达标吗？达不到回看是哪一步要优化
+
+---
+
+## P8 之后：per-app 修正层（重要独立模块）
+
+OP 路径上线后会暴露"没有通用最强标准"——OP 不是 100% 准、confidence 阈值不通用、漏检/误报因 app 而异。解法是 **per-app 个性化修正**（可能是产品护城河），设计已固化在
+[`per-app-correction-design.md`](per-app-correction-design.md)。
+
+核心：**模板匹配补 OP 漏的固定 chrome icon**（teach-by-example，self-gating，无需训模型）+ pattern-based exclude 删误报 + per-app confidence override。**不是** per-app fine-tune 模型（体积/维护成本天文，已否决）。
+
+暂不实现，等 P7 数据确认这是高频痛点后启动。
