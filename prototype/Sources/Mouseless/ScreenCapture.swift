@@ -220,7 +220,7 @@ enum ScreenCapture {
 
     // MARK: - AX chain
 
-    /// AXFocusedApplication → AXFocusedWindow (with fallbacks).
+    /// Frontmost app (via NSWorkspace) → AXFocusedWindow (with fallbacks).
     /// Returns the window AXUIElement; we get the rect from AXPosition +
     /// AXSize in `windowRect(_:)`. Logs the specific failure step so we
     /// can diagnose AX-bad apps.
@@ -229,22 +229,12 @@ enum ScreenCapture {
     /// `_AXUIElementGetWindow` API for `SCContentFilter(desktopIndependentWindow:)`,
     /// but display capture + crop doesn't need it — public APIs only now.)
     private static func focusedWindow() -> (element: AXUIElement, pid: pid_t)? {
-        let sys = AXUIElementCreateSystemWide()
-
-        // Step 1: AXFocusedApplication
-        var appRef: CFTypeRef?
-        let appErr = AXUIElementCopyAttributeValue(
-            sys, "AXFocusedApplication" as CFString, &appRef
-        )
-        guard appErr == .success, let appRaw = appRef else {
-            print("[mouseless] AX step 1 (AXFocusedApplication): err=\(axErrName(appErr)) nil=\(appRef == nil)")
+        // Step 1: frontmost app via NSWorkspace (reliable on Electron;
+        // AXFocusedApplication was not — see FocusedApp.swift).
+        guard let (app, pid) = FocusedApp.current() else {
+            print("[mouseless] AX step 1 (frontmost app): NSWorkspace returned nil")
             return nil
         }
-        let app = appRaw as! AXUIElement
-
-        // Identify which app we're talking to (helps debug Electron quirks)
-        var pid: pid_t = 0
-        AXUIElementGetPid(app, &pid)
         let bundleID = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier ?? "?"
         print("[mouseless] AX step 1 ok: pid=\(pid) bundleID=\(bundleID)")
 

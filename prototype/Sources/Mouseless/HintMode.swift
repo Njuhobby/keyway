@@ -322,7 +322,10 @@ final class HintMode {
         var cacheHits = 0
         var routeLabel = "no-app"
         if let (focusedApp, focusedPID) = focusedApplication() {
-            focusedIPC += 1   // AXFocusedApplication on system-wide
+            // focusedApplication() now resolves via NSWorkspace (no AX
+            // round-trip), so this isn't an IPC — but keep counting it
+            // for log continuity with earlier measurements.
+            focusedIPC += 1
 
             let bundleID = NSRunningApplication(processIdentifier: focusedPID)?.bundleIdentifier
             let useAX = bundleID.map { AppRegistry.shouldUseAXForFocused(bundleID: $0) } ?? false
@@ -445,14 +448,9 @@ final class HintMode {
     }
 
     private static func focusedApplication() -> (element: AXUIElement, pid: pid_t)? {
-        let sys = AXUIElementCreateSystemWide()
-        var ref: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(sys, "AXFocusedApplication" as CFString, &ref) == .success,
-              let app = ref else { return nil }
-        let element = app as! AXUIElement
-        var pid: pid_t = 0
-        AXUIElementGetPid(element, &pid)
-        return (element, pid)
+        // Via NSWorkspace, not AXFocusedApplication — the latter is
+        // flaky on Electron apps. See FocusedApp.swift.
+        return FocusedApp.current()
     }
 
     private static func applicationElement(forBundleID bundleID: String) -> AXUIElement? {

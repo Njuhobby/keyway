@@ -61,20 +61,16 @@ final class VimSession {
     /// P3 debug: print whether the currently focused app would route
     /// to AX or OP for its focused-app subtree.
     private func logFocusedAppRouting() {
-        let sys = AXUIElementCreateSystemWide()
-        var appRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(sys, "AXFocusedApplication" as CFString, &appRef) == .success,
-              let appRaw = appRef
-        else {
-            print("[mouseless] route: no focused app")
+        // Frontmost app via NSWorkspace — AXFocusedApplication was flaky
+        // on Electron apps (returned nil for VS Code). See FocusedApp.swift.
+        guard let (_, pid) = FocusedApp.current() else {
+            print("[mouseless] route: no frontmost app")
             return
         }
-        var pid: pid_t = 0
-        AXUIElementGetPid(appRaw as! AXUIElement, &pid)
         guard let running = NSRunningApplication(processIdentifier: pid),
               let bundleID = running.bundleIdentifier
         else {
-            print("[mouseless] route: focused app has no bundleID (pid=\(pid))")
+            print("[mouseless] route: frontmost app has no bundleID (pid=\(pid))")
             return
         }
         let useAX = AppRegistry.shouldUseAXForFocused(bundleID: bundleID)
