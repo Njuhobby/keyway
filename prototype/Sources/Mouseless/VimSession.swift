@@ -100,8 +100,7 @@ final class VimSession {
             h.deactivate()
         }
         if case .scroll(let controller) = mode {
-            controller.stop()
-            // S4: also hide the scroll-area overlay here.
+            controller.teardown()   // stop scrolling + hide area overlay
         }
         mode = nil
         paletteBuffer = nil
@@ -170,7 +169,7 @@ final class VimSession {
         // Caps Lock (F19) → switch to TAP mode (scan + hints). Explicit
         // rescan; releasing j/k never auto-rescans (design §3.1).
         if keyCode == KeyCode.f19 && flags.intersection(modMask).isEmpty {
-            controller.stop()
+            controller.teardown()
             mode = nil            // clear so enter() proceeds
             HUD.shared.hide()
             Task { @MainActor in await self.enter() }
@@ -188,8 +187,14 @@ final class VimSession {
             return true
         }
 
-        // Scroll mode is modal — swallow everything else (number keys for
-        // area switching wire up in S4). Esc already exited above.
+        // Number keys 1-9 → switch the selected scroll area.
+        if let digit = Self.digit(for: keyCode), digit >= 1 {
+            controller.selectArea(number: digit)
+            return true
+        }
+
+        // Scroll mode is modal — swallow everything else. Esc already
+        // exited above.
         return true
     }
 
@@ -203,6 +208,23 @@ final class VimSession {
             return true
         }
         return false
+    }
+
+    /// US-ANSI digit key codes → 0-9. nil for non-digit keys.
+    private static func digit(for keyCode: Int) -> Int? {
+        switch keyCode {
+        case 29: return 0
+        case 18: return 1
+        case 19: return 2
+        case 20: return 3
+        case 21: return 4
+        case 23: return 5
+        case 22: return 6
+        case 26: return 7
+        case 28: return 8
+        case 25: return 9
+        default: return nil
+        }
     }
 
     // MARK: - TAP mode

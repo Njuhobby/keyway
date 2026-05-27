@@ -24,16 +24,50 @@ final class ScrollController {
     private var directionDown = true   // true = scroll page down (see lower content)
     private var fast = false
 
-    /// Called on entering SCROLL mode. Warps the cursor onto the target
-    /// region so subsequent scroll events route there. S2: focused
-    /// window center.
+    private var areas: [ScrollAreaDetector.Area] = []
+    private var selectedIndex = 0
+
+    /// Called on entering SCROLL mode. Detects scroll areas, picks the
+    /// one nearest the cursor, warps the cursor into it, and shows the
+    /// numbered picker overlay. Falls back to the focused window center
+    /// when AX exposes no scroll areas (zero-AX apps).
     func enter() {
-        guard let center = Self.focusedWindowCenter() else {
-            print("[mouseless] scroll: no focused window rect — cursor not warped")
+        areas = ScrollAreaDetector.detect()
+        if areas.isEmpty {
+            // Fallback: window center, no overlay (nothing to pick).
+            if let center = Self.focusedWindowCenter() {
+                CGWarpMouseCursorPosition(center)
+                print("[mouseless] scroll: no AXScrollArea — fallback to window center")
+            } else {
+                print("[mouseless] scroll: no scroll area and no window rect")
+            }
             return
         }
-        CGWarpMouseCursorPosition(center)
-        print("[mouseless] scroll: warped cursor to window center (\(Int(center.x)),\(Int(center.y)))")
+        selectedIndex = Self.nearestAreaIndex(areas, to: Self.cursorPoint())
+        warpToSelected()
+        ScrollOverlay.shared.show(areas: areas.map { $0.rect }, selected: selectedIndex)
+        print("[mouseless] scroll: \(areas.count) area(s), selected #\(selectedIndex + 1)")
+    }
+
+    /// Switch the active scroll area (number-key press). 1-based `number`.
+    func selectArea(number: Int) {
+        let idx = number - 1
+        guard idx >= 0, idx < areas.count else { return }
+        selectedIndex = idx
+        warpToSelected()
+        ScrollOverlay.shared.show(areas: areas.map { $0.rect }, selected: selectedIndex)
+    }
+
+    /// Hide the overlay + stop scrolling. Called on mode exit.
+    func teardown() {
+        stop()
+        ScrollOverlay.shared.hide()
+    }
+
+    private func warpToSelected() {
+        guard selectedIndex < areas.count else { return }
+        let r = areas[selectedIndex].rect
+        CGWarpMouseCursorPosition(CGPoint(x: r.midX, y: r.midY))
     }
 
     /// Begin (or update) continuous scrolling. Idempotent under OS
@@ -78,7 +112,29 @@ final class ScrollController {
         ev.post(tap: .cghidEventTap)
     }
 
-    // MARK: - Focused window center (S2 placeholder for S3's area pick)
+    // MARK: - Cursor + nearest-area
+
+    private static func cursorPoint() -> CGPoint {
+        // CGEvent location is global display coords, top-left origin —
+        // matches AX rects. (NSEvent.mouseLocation would be bottom-left.)
+        return CGEvent(source: nil)?.location ?? .zero
+    }
+
+    /// Index of the area nearest `point`: 0 distance if the point is
+    /// inside an area, else the area with the smallest edge distance.
+    private static func nearestAreaIndex(_ areas: [ScrollAreaDetector.Area], to point: CGPoint) -> Int {
+        var best = 0
+        var bestDist = CGFloat.greatestFiniteMagnitude
+        for (i, a) in areas.enumerated() {
+            let dx = max(0, max(a.rect.minX - point.x, point.x - a.rect.maxX))
+            let dy = max(0, max(a.rect.minY - point.y, point.y - a.rect.maxY))
+            let d = dx * dx + dy * dy
+            if d < bestDist { bestDist = d; best = i }
+        }
+        return best
+    }
+
+    // MARK: - Focused window center (fallback when no AXScrollArea)
 
     private static func focusedWindowCenter() -> CGPoint? {
         guard let (app, _) = FocusedApp.current() else { return nil }
