@@ -32,8 +32,11 @@ enum ScrollAreaDetector {
         guard let (app, _) = FocusedApp.current(),
               let window = focusedWindow(of: app)
         else { return [] }
+        // (Tried AXManualAccessibility to force-enable Chromium/Electron
+        // a11y here — apps with the tree off didn't respond. Removed.)
 
         var out: [Area] = []
+        var seenRoles: [Int: Set<String>] = [:]   // diagnostic: depth → roles
         // BFS frontier of (element, depth).
         var frontier: [(AXUIElement, Int)] = [(window, 0)]
         while !frontier.isEmpty {
@@ -41,11 +44,14 @@ enum ScrollAreaDetector {
             if depth > maxDepth { continue }
 
             let role = stringAttr(node, "AXRole")
+            if let role { seenRoles[depth, default: []].insert(role) }
             if let role, scrollRoles.contains(role) {
-                if let rect = rect(of: node),
-                   rect.width >= minSide, rect.height >= minSide,
-                   onScreen(rect) {
-                    out.append(Area(rect: rect))
+                let r = rect(of: node)
+                let ok = r != nil && r!.width >= minSide && r!.height >= minSide && onScreen(r!)
+                if let r, ok {
+                    out.append(Area(rect: r))
+                } else {
+                    print("[mouseless] scroll: \(role) rejected (rect=\(r.map { "\(Int($0.width))x\(Int($0.height))" } ?? "nil"))")
                 }
                 // Don't descend into a found scroll area — nested scroll
                 // areas are rare and descending walks the (potentially
@@ -63,6 +69,17 @@ enum ScrollAreaDetector {
         var deduped: [Area] = []
         for a in out where !deduped.contains(where: { nearlyEqual($0.rect, a.rect) }) {
             deduped.append(a)
+        }
+
+        // Diagnostic role census — only when we found NOTHING, to tell
+        // "app exposes no scroll AX" (zero-AX Electron) from "our BFS
+        // depth/filter missed it". Quiet in the normal case.
+        if deduped.isEmpty {
+            let census = (0...maxDepth).compactMap { d -> String? in
+                guard let roles = seenRoles[d], !roles.isEmpty else { return nil }
+                return "d\(d)=[\(roles.sorted().joined(separator: ","))]"
+            }.joined(separator: " ")
+            print("[mouseless] scroll: 0 areas — AX role census: \(census.isEmpty ? "(empty tree)" : census)")
         }
         return deduped
     }

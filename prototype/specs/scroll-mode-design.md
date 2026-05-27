@@ -96,7 +96,17 @@ SCROLL 模式：
 
 AX 认不出的区域（零 AX 的 Electron / 游戏）**不做兜底 hack**。未来会有"键盘平移鼠标"功能——用户手动把光标移到目标区域，再 j/k 照样发滚动指令（滚动事件路由到光标底下的 view）。
 
-所以 v1：**AXScrollArea 能认的精确认，认不出的留给未来人力补**。不用窗口中心猜。
+所以 v1：**AXScrollArea 能认的精确认，认不出的留给未来人力补**。当前实现里认不出时退到焦点窗口中心（至少主内容区能滚），不画 overlay。
+
+#### 试过但无效：AXManualAccessibility 唤醒 Electron
+
+Chromium/Electron 默认关 AX 树。理论上在 app 的 AX 元素上设 `AXManualAccessibility = true`（辅助技术唤醒 Chromium a11y 的标准信号）能让它建完整 AX 树。**实测在 Claude 桌面 app（Electron）上无效**——设了之后多次重试，AX role census 仍然从窗口往下全是 `AXGroup`，没有冒出 `AXScrollArea`/`AXWebArea`。
+
+可能原因：该版本 Electron 没接 `AXManualAccessibility`、或需要更早设置（app 启动时而非运行时）、或需配合 `AXEnhancedUserInterface`（但后者会让 app 以为 VoiceOver 开了，可能改变行为/出 bug，不敢轻易用）。
+
+**结论**：不靠这个。零-AX Electron 的 scroll 区域识别留给"键盘平移鼠标"兜底。**别再试 AXManualAccessibility 这条路**（除非有证据某些 Electron 版本响应）。
+
+诊断：检测到 0 区域时会打 `[mouseless] scroll: 0 areas — AX role census: ...`，能区分"app 零-AX"（全 AXGroup）vs"我们 BFS 漏了"（有 scroll role 但没抓到）。
 
 ### 4.3 检测时机 + 成本
 
