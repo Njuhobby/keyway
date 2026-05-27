@@ -13,6 +13,7 @@ import Cocoa
 final class VimSession {
     enum Mode {
         case tap(HintMode)
+        case scroll   // S1: shell. ScrollController payload added in S2.
         // Future: case selectText(...), case drag(...), case rightClick(...)
     }
 
@@ -23,6 +24,23 @@ final class VimSession {
     var isActive: Bool { mode != nil }
 
     // MARK: - Lifecycle
+
+    /// Chord (Caps Lock + j/k) pressed → enter SCROLL mode. No hint
+    /// scan — scroll is independent of hints. async to match enter()'s
+    /// shape and because S3 will do an AX walk for scroll areas (off the
+    /// event-tap hot path via the caller's Task).
+    /// See `specs/scroll-mode-design.md`.
+    func enterScroll() async {
+        guard mode == nil else { return }
+        mode = .scroll
+        paletteBuffer = nil
+        sticky = false
+        // S2: ScrollController setup. S3: AX scroll-area detection.
+        // S4: numbered-area overlay. S1 just establishes the mode +
+        // a minimal HUD so we can verify chord entry.
+        HUD.shared.show("SCROLL")
+        print("[mouseless] enter SCROLL mode")
+    }
 
     /// Trigger key pressed → enter TAP mode (hints visible).
     /// async because the OmniParser path (P5+) involves ScreenCaptureKit
@@ -81,6 +99,8 @@ final class VimSession {
         if case .tap(let h) = mode {
             h.deactivate()
         }
+        // S2+: if case .scroll, stop the scroll timer + hide the
+        // scroll-area overlay here. S1 has neither yet.
         mode = nil
         paletteBuffer = nil
         sticky = false
@@ -131,7 +151,55 @@ final class VimSession {
         switch mode {
         case .tap(let hint):
             return handleTap(hint: hint, keyCode: keyCode, flags: flags)
+        case .scroll:
+            return handleScroll(keyCode: keyCode, flags: flags)
         }
+    }
+
+    // MARK: - SCROLL mode
+
+    /// SCROLL mode keystrokes. (Esc is handled before handleMode → exits
+    /// to OFF.) S1: chord-entry verification — j/k logged, Caps Lock
+    /// switches to TAP. Real scrolling + area picker land in S2-S4.
+    private func handleScroll(keyCode: Int, flags: CGEventFlags) -> Bool {
+        let modMask: CGEventFlags = [.maskShift, .maskControl,
+                                     .maskCommand, .maskAlternate]
+
+        // Caps Lock (F19) → switch to TAP mode (scan + hints). Explicit
+        // rescan; releasing j/k never auto-rescans (design §3.1).
+        if keyCode == KeyCode.f19 && flags.intersection(modMask).isEmpty {
+            mode = nil            // clear so enter() proceeds
+            HUD.shared.hide()
+            Task { @MainActor in await self.enter() }
+            return true
+        }
+
+        // j / k → scroll down / up. S1 stub: log only. S2 wires the
+        // ScrollController (continuous scroll on hold).
+        if keyCode == KeyCode.j {
+            print("[mouseless] scroll: j (down)\(flags.contains(.maskShift) ? " fast" : "") [S1 stub]")
+            return true
+        }
+        if keyCode == KeyCode.k {
+            print("[mouseless] scroll: k (up)\(flags.contains(.maskShift) ? " fast" : "") [S1 stub]")
+            return true
+        }
+
+        // Scroll mode is modal — swallow everything else (number keys for
+        // area switching wire up in S4). Esc already exited above the
+        // mode dispatch.
+        return true
+    }
+
+    /// Key release handler — routed from HotkeyTap. S1 stub: logs the
+    /// j/k release that S2 will turn into "stop the scroll timer".
+    func handleKeyUp(keyCode: Int) -> Bool {
+        guard case .scroll = mode else { return false }
+        if keyCode == KeyCode.j || keyCode == KeyCode.k {
+            print("[mouseless] scroll: stop [S1 stub]")
+            return true
+        }
+        return false
     }
 
     // MARK: - TAP mode
@@ -342,6 +410,7 @@ final class VimSession {
         let label: String
         switch m {
         case .tap: label = sticky ? "TAP · sticky" : "TAP"
+        case .scroll: label = "SCROLL"
         }
         HUD.shared.show(label + suffix)
     }
