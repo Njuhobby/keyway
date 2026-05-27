@@ -13,7 +13,7 @@ import Cocoa
 final class VimSession {
     enum Mode {
         case tap(HintMode)
-        case scroll   // S1: shell. ScrollController payload added in S2.
+        case scroll(ScrollController)
         // Future: case selectText(...), case drag(...), case rightClick(...)
     }
 
@@ -32,12 +32,12 @@ final class VimSession {
     /// See `specs/scroll-mode-design.md`.
     func enterScroll() async {
         guard mode == nil else { return }
-        mode = .scroll
+        let controller = ScrollController()
+        controller.enter()   // S2: warp cursor to focused window center
+        mode = .scroll(controller)
         paletteBuffer = nil
         sticky = false
-        // S2: ScrollController setup. S3: AX scroll-area detection.
-        // S4: numbered-area overlay. S1 just establishes the mode +
-        // a minimal HUD so we can verify chord entry.
+        // S3: AX scroll-area detection. S4: numbered-area overlay.
         HUD.shared.show("SCROLL")
         print("[mouseless] enter SCROLL mode")
     }
@@ -99,8 +99,10 @@ final class VimSession {
         if case .tap(let h) = mode {
             h.deactivate()
         }
-        // S2+: if case .scroll, stop the scroll timer + hide the
-        // scroll-area overlay here. S1 has neither yet.
+        if case .scroll(let controller) = mode {
+            controller.stop()
+            // S4: also hide the scroll-area overlay here.
+        }
         mode = nil
         paletteBuffer = nil
         sticky = false
@@ -151,52 +153,53 @@ final class VimSession {
         switch mode {
         case .tap(let hint):
             return handleTap(hint: hint, keyCode: keyCode, flags: flags)
-        case .scroll:
-            return handleScroll(keyCode: keyCode, flags: flags)
+        case .scroll(let controller):
+            return handleScroll(controller: controller, keyCode: keyCode, flags: flags)
         }
     }
 
     // MARK: - SCROLL mode
 
     /// SCROLL mode keystrokes. (Esc is handled before handleMode → exits
-    /// to OFF.) S1: chord-entry verification — j/k logged, Caps Lock
-    /// switches to TAP. Real scrolling + area picker land in S2-S4.
-    private func handleScroll(keyCode: Int, flags: CGEventFlags) -> Bool {
+    /// to OFF.) j/k drive the ScrollController (continuous on hold);
+    /// Caps Lock switches to TAP. Number-key area switching lands in S4.
+    private func handleScroll(controller: ScrollController, keyCode: Int, flags: CGEventFlags) -> Bool {
         let modMask: CGEventFlags = [.maskShift, .maskControl,
                                      .maskCommand, .maskAlternate]
 
         // Caps Lock (F19) → switch to TAP mode (scan + hints). Explicit
         // rescan; releasing j/k never auto-rescans (design §3.1).
         if keyCode == KeyCode.f19 && flags.intersection(modMask).isEmpty {
+            controller.stop()
             mode = nil            // clear so enter() proceeds
             HUD.shared.hide()
             Task { @MainActor in await self.enter() }
             return true
         }
 
-        // j / k → scroll down / up. S1 stub: log only. S2 wires the
-        // ScrollController (continuous scroll on hold).
+        // j / k → start continuous scroll down / up. Shift = fast.
+        // Held-key OS repeats just refresh direction/speed (idempotent).
         if keyCode == KeyCode.j {
-            print("[mouseless] scroll: j (down)\(flags.contains(.maskShift) ? " fast" : "") [S1 stub]")
+            controller.start(directionDown: true, fast: flags.contains(.maskShift))
             return true
         }
         if keyCode == KeyCode.k {
-            print("[mouseless] scroll: k (up)\(flags.contains(.maskShift) ? " fast" : "") [S1 stub]")
+            controller.start(directionDown: false, fast: flags.contains(.maskShift))
             return true
         }
 
         // Scroll mode is modal — swallow everything else (number keys for
-        // area switching wire up in S4). Esc already exited above the
-        // mode dispatch.
+        // area switching wire up in S4). Esc already exited above.
         return true
     }
 
-    /// Key release handler — routed from HotkeyTap. S1 stub: logs the
-    /// j/k release that S2 will turn into "stop the scroll timer".
+    /// Key release handler — routed from HotkeyTap. j/k release stops the
+    /// continuous scroll. (The chord's own j/k keyUp also lands here and
+    /// harmlessly stops a timer that was never started.)
     func handleKeyUp(keyCode: Int) -> Bool {
-        guard case .scroll = mode else { return false }
+        guard case .scroll(let controller) = mode else { return false }
         if keyCode == KeyCode.j || keyCode == KeyCode.k {
-            print("[mouseless] scroll: stop [S1 stub]")
+            controller.stop()
             return true
         }
         return false
