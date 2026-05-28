@@ -223,6 +223,27 @@ final class VimSession {
             return true
         }
 
+        // s/d/f/e → move the cursor (Shift = fast). SCROLL uses SDFE
+        // (e up, s left, d down, f right — inverted-T centered on d),
+        // not IJKL: j/k are taken by scrolling here. SDFE keeps the left
+        // hand on home row (s/d/f under ring/middle/index, e is a middle-
+        // finger reach up) — no leftward stretch to 'a' like WASD. Left
+        // hand moves, right hand scrolls — they run in parallel. (TAP
+        // uses IJKL because its home-row a/s/d/f are hint letters; SCROLL
+        // has no hints so home row is free.) See modes.md §5.
+        if let dir = Self.moveDirectionSDFE(for: keyCode) {
+            mover.start(direction: dir, fast: flags.contains(.maskShift))
+            return true
+        }
+
+        // x → left click at the current cursor position, stay in SCROLL.
+        // Pairs with SDFE: move the cursor, x to click. Bare only.
+        if keyCode == KeyCode.x,
+           flags.intersection([.maskShift, .maskControl, .maskCommand, .maskAlternate]).isEmpty {
+            MouseSynth.click(at: MouseSynth.cursorPosition(), button: .left, count: 1)
+            return true
+        }
+
         // Number keys 1-9 → switch the selected scroll area.
         if let digit = Self.digit(for: keyCode), digit >= 1 {
             controller.selectArea(number: digit)
@@ -234,13 +255,27 @@ final class VimSession {
         return true
     }
 
+    private static func moveDirectionSDFE(for keyCode: Int) -> MouseMover.Direction? {
+        switch keyCode {
+        case KeyCode.e: return .up
+        case KeyCode.s: return .left
+        case KeyCode.d: return .down
+        case KeyCode.f: return .right
+        default: return nil
+        }
+    }
+
     /// Key release handler — routed from HotkeyTap. j/k release stops the
     /// continuous scroll. (The chord's own j/k keyUp also lands here and
     /// harmlessly stops a timer that was never started.)
     func handleKeyUp(keyCode: Int) -> Bool {
         if case .scroll(let controller) = mode {
             if keyCode == KeyCode.j || keyCode == KeyCode.k {
-                controller.stop()
+                controller.stop()       // stop continuous scroll
+                return true
+            }
+            if Self.moveDirectionSDFE(for: keyCode) != nil {
+                mover.stop()            // stop continuous cursor move
                 return true
             }
             return false
