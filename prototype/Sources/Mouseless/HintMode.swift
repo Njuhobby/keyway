@@ -186,6 +186,13 @@ final class HintMode {
         return .pending
     }
 
+    /// Undo the last typed hint character. No-op when nothing's typed.
+    func backspace() {
+        guard !typed.isEmpty else { return }
+        typed.removeLast()
+        HintOverlay.shared.show(targets: targets, typed: typed)
+    }
+
     private func commit(target: HintTarget, action: ClickAction) {
         // We deliberately bypass AXPress / AXShowMenu / AXOpen and always
         // synthesize a mouse event. AX **metadata** is reliable — that's

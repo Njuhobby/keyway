@@ -21,6 +21,8 @@ final class VimSession {
     private var paletteBuffer: String? = nil   // nil = palette closed
     private var sticky: Bool = false           // toggled by trigger key in TAP
     private let mover = MouseMover()            // Ctrl+hjkl cursor move in TAP
+    private var rehintGeneration = 0           // supersede in-flight re-hints
+    private let focusWatcher = FocusChangeWatcher()  // post-click focus change
 
     var isActive: Bool { mode != nil }
 
@@ -102,9 +104,48 @@ final class VimSession {
     /// hints) and reset to OFF. Used when switching modes.
     private func teardownCurrentMode() {
         mover.stop()
+        focusWatcher.stop()
         if case .tap(let h) = mode { h.deactivate() }
         if case .scroll(let c) = mode { c.teardown() }
         mode = nil
+    }
+
+    // MARK: - Sticky re-hint (+ async-focus recheck)
+
+    /// Re-scan + redraw hints, staying in TAP (the sticky path after a
+    /// commit/x). Generation-guarded: a later re-hint (e.g. the focus-
+    /// recheck poller firing) bumps the generation so an earlier in-
+    /// flight scan, when it finishes, sees it's been superseded and bows
+    /// out instead of racing to overwrite `mode`.
+    private func rehintSticky() {
+        rehintGeneration += 1
+        let gen = rehintGeneration
+        if case .tap(let h) = mode { h.deactivate() }
+        Task { @MainActor in
+            let next = HintMode()
+            let ok = await next.activate()
+            guard gen == self.rehintGeneration else { return }  // superseded
+            if ok {
+                self.mode = .tap(next)
+                self.renderModeHUD()
+            } else {
+                self.exit()
+            }
+        }
+    }
+
+    /// A sticky commit's click may open a new window / switch app
+    /// **asynchronously** — the immediate re-hint then scanned the old
+    /// (still-focused) window. Watch for a focused-window change
+    /// (notification-driven, see FocusChangeWatcher); if it fires, re-
+    /// hint again to catch the new window. No change within the timeout
+    /// → the immediate re-hint was already correct (synchronous UI
+    /// update, or a plain click). See discussion in modes.md §4.2.
+    private func scheduleFocusRecheck() {
+        guard let (_, pid) = FocusedApp.current() else { return }
+        focusWatcher.start(pid: pid, timeoutMs: 400) { [weak self] in
+            self?.rehintSticky()   // new window / app → re-scan it
+        }
     }
 
     /// P3 debug: print whether the currently focused app would route
@@ -128,6 +169,7 @@ final class VimSession {
 
     func exit() {
         mover.stop()
+        focusWatcher.stop()
         if case .tap(let h) = mode {
             h.deactivate()
         }
@@ -360,18 +402,19 @@ final class VimSession {
             hint.deactivate()
             MouseSynth.click(at: MouseSynth.cursorPosition(), button: .left, count: 1)
             if sticky {
-                Task { @MainActor in
-                    let next = HintMode()
-                    if await next.activate() {
-                        self.mode = .tap(next)
-                        self.renderModeHUD()
-                    } else {
-                        self.exit()
-                    }
-                }
+                rehintSticky()
+                scheduleFocusRecheck()
             } else {
                 exit()
             }
+            return true
+        }
+
+        // Backspace — undo the last typed hint character (e.g. pressed a
+        // wrong first letter). Empty typed → no-op (don't exit; Esc does
+        // that). Works in sticky too.
+        if keyCode == KeyCode.delete && flags.intersection(modMask).isEmpty {
+            hint.backspace()
             return true
         }
 
@@ -397,18 +440,11 @@ final class VimSession {
             break   // .ignored = misfire, swallowed; stay in TAP
         case .committed:
             if sticky {
-                // Re-scan and stay in TAP for the next click. activate()
-                // is async (OmniParser path may run), so dispatch.
-                hint.deactivate()
-                Task { @MainActor in
-                    let nextHint = HintMode()
-                    if await nextHint.activate() {
-                        self.mode = .tap(nextHint)
-                        self.renderModeHUD()
-                    } else {
-                        self.exit()
-                    }
-                }
+                // Re-scan and stay in TAP. Immediate re-hint covers
+                // synchronous UI updates (most native controls); the
+                // focus recheck catches an async new window / app switch.
+                rehintSticky()
+                scheduleFocusRecheck()
             } else {
                 exit()
             }
