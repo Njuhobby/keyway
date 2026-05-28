@@ -23,6 +23,7 @@ final class VimSession {
     private let mover = MouseMover()            // Ctrl+hjkl cursor move in TAP
     private var rehintGeneration = 0           // supersede in-flight re-hints
     private let focusWatcher = FocusChangeWatcher()  // post-click focus change
+    private var scrollPendingG = false         // first 'g' of a gg (SCROLL)
 
     var isActive: Bool { mode != nil }
 
@@ -105,6 +106,7 @@ final class VimSession {
     private func teardownCurrentMode() {
         mover.stop()
         focusWatcher.stop()
+        scrollPendingG = false
         if case .tap(let h) = mode { h.deactivate() }
         if case .scroll(let c) = mode { c.teardown() }
         mode = nil
@@ -170,6 +172,7 @@ final class VimSession {
     func exit() {
         mover.stop()
         focusWatcher.stop()
+        scrollPendingG = false
         if case .tap(let h) = mode {
             h.deactivate()
         }
@@ -258,6 +261,27 @@ final class VimSession {
     /// the ScrollController (continuous on hold); number keys switch
     /// the selected area.
     private func handleScroll(controller: ScrollController, keyCode: Int, flags: CGEventFlags) -> Bool {
+        // gg / G — vim-style jump to top / bottom of the selected area.
+        // Reset the gg-pending flag up front; the bare-g branch re-arms
+        // it. So any key other than a second bare g clears a half-typed
+        // gg (g alone does nothing).
+        let wasPendingG = scrollPendingG
+        scrollPendingG = false
+        if keyCode == KeyCode.g && flags.contains(.maskShift) {
+            controller.jumpToBottom()       // G → bottom
+            return true
+        }
+        if keyCode == KeyCode.g
+            && flags.intersection([.maskShift, .maskControl,
+                                   .maskCommand, .maskAlternate]).isEmpty {
+            if wasPendingG {
+                controller.jumpToTop()      // gg → top
+            } else {
+                scrollPendingG = true       // first g, wait for the second
+            }
+            return true
+        }
+
         // j / k → start continuous scroll down / up. Shift = fast.
         // Held-key OS repeats just refresh direction/speed (idempotent).
         if keyCode == KeyCode.j {

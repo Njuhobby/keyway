@@ -92,6 +92,13 @@ final class ScrollController {
         timer = nil
     }
 
+    /// gg / G — jump the selected area to top / bottom. One huge pixel
+    /// delta; the app clamps it at the content edge. 200k px is well
+    /// past any real content height. Scrolls the area under the cursor
+    /// (already warped to the selected area).
+    func jumpToTop()    { postScroll(deltaY:  200_000) }   // +y = up
+    func jumpToBottom() { postScroll(deltaY: -200_000) }   // -y = down
+
     private func tick() {
         let magnitude = fast ? fastDelta : normalDelta
         // wheel1 sign: negative scrolls the page DOWN (reveals lower

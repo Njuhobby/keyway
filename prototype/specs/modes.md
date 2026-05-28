@@ -172,6 +172,8 @@ MouseSynth.click(at: MouseSynth.cursorPosition(), button: .left, count: 1)
 | --- | --- |
 | `j` / `k` (bare) | 下/上滚（按住连续，60fps timer 合成 scroll wheel 事件） |
 | `Shift + j/k` | 加速滚动 |
+| `gg` (连按两次 g) | 跳到选中区域**顶部**（vim 风格） |
+| `G` (Shift+g) | 跳到选中区域**底部** |
 | `s/d/f/e` (bare) | 移光标 左/下/右/上（SDFE 倒 T，按住连续） |
 | `Shift + sdfe` / `Option + sdfe` | 加速 / 精细移光标 |
 | `Enter` (bare) | 当前光标位置左键单击（留在 SCROLL） |
