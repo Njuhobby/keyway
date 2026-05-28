@@ -282,9 +282,9 @@ final class VimSession {
             return true
         }
 
-        // x → left click at the current cursor position, stay in SCROLL.
-        // Pairs with SDFE: move the cursor, x to click. Bare only.
-        if keyCode == KeyCode.x,
+        // Enter → left click at the current cursor position, stay in
+        // SCROLL. Pairs with SDFE: move the cursor, Enter to click. Bare.
+        if keyCode == KeyCode.return,
            flags.intersection([.maskShift, .maskControl, .maskCommand, .maskAlternate]).isEmpty {
             MouseSynth.click(at: MouseSynth.cursorPosition(), button: .left, count: 1)
             return true
@@ -384,21 +384,16 @@ final class VimSession {
         let modMask: CGEventFlags = [.maskShift, .maskControl,
                                      .maskCommand, .maskAlternate]
 
-        // Bare `x` — single left click at the current cursor position.
-        // Combined with the future keyboard mouse-move feature this
-        // becomes "move the cursor anywhere → x clicks there", which is
-        // why x is defined as a plain click rather than a special
-        // gesture.
-        //
-        // This replaced an older "dismiss all open menus + rescan"
-        // gesture (AXCancel + focus switch). A plain click can mis-fire
-        // if the cursor happens to sit on a control — accepted. And
-        // until keyboard mouse-move ships, x lands wherever the cursor
-        // already happens to be — an intentional interim state.
+        // Bare Enter — single left click at the current cursor position.
+        // Enter reads as "confirm/click" and pairs with IJKL move: move
+        // the cursor, Enter to click there. (Was `x`; Enter is more
+        // intuitive. Enter is safe to consume here — in palette it means
+        // "run command" but palette intercepts before this, and hint
+        // labels are letters/digits so Enter never collides.)
         //
         // After-click behavior mirrors a hint commit: sticky → rescan +
         // stay in TAP; otherwise → exit to OFF.
-        if keyCode == KeyCode.x && flags.intersection(modMask).isEmpty {
+        if keyCode == KeyCode.return && flags.intersection(modMask).isEmpty {
             hint.deactivate()
             MouseSynth.click(at: MouseSynth.cursorPosition(), button: .left, count: 1)
             if sticky {

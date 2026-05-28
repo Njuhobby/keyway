@@ -25,7 +25,7 @@ static let alphabet: [Character] = ["a","s","d","f","g","h","e","r","u"]
 
 字母 / 数字独立空间的好处：用户输入 `a` 立刻锁定字母组，输入 `1` 立刻锁定 Dock，前缀不会撞。
 
-两字母 / 两数字标签的好处：第一字符过滤一次，第二字符才提交，错按时前缀不匹配立即 `.cancelled` 而非误触发。
+两字母 / 两数字标签的好处：第一字符过滤一次，第二字符才提交，错按时前缀不匹配 `.ignored` 吞掉（不误触发、也不退出）。
 
 排列顺序：Dock targets 先入 `targets` 数组，非 Dock 后入。**这只影响内部数组顺序**，绘制完全按 target 自己的 rect 定位。
 
@@ -39,8 +39,7 @@ static let alphabet: [Character] = ["a","s","d","f","g","h","e","r","u"]
 let next = typed + String(char)
 let matches = targets.filter { $0.label.hasPrefix(next) }
 if matches.isEmpty {
-    deactivate()
-    return .cancelled
+    return .ignored          // 误按：吞掉，typed 不变，留在 TAP
 }
 if matches.count == 1 && matches[0].label == next {
     commit(target: matches[0], action: action)
@@ -55,7 +54,7 @@ return .pending
 三种返回值由 `VimSession.handleTap` 处理：
 - `.pending` —— 啥也不做，等下一个键
 - `.committed` —— 看 sticky：true 则 re-scan 进新 HintMode；false 则 exit
-- `.cancelled` —— 直接 exit（"你按错了，退出 mode 别瞎点"）
+- `.ignored` —— 误按（不匹配任何 hint 前缀）：吞掉不退出，typed 保持上一个有效值。退出只靠 Esc。（另有 `backspace()` 撤销已输入的前缀字符。）
 
 ---
 
