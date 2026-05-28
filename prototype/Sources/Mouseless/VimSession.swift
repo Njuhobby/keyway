@@ -380,8 +380,8 @@ final class VimSession {
         }
 
         switch hint.handle(char: ch, action: action) {
-        case .pending:
-            break
+        case .pending, .ignored:
+            break   // .ignored = misfire, swallowed; stay in TAP
         case .committed:
             if sticky {
                 // Re-scan and stay in TAP for the next click. activate()
@@ -399,8 +399,6 @@ final class VimSession {
             } else {
                 exit()
             }
-        case .cancelled:
-            exit()
         }
         return true
     }

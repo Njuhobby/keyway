@@ -27,9 +27,9 @@ struct HintTarget {
 }
 
 enum HintResult {
-    case pending
-    case committed
-    case cancelled
+    case pending    // 前缀匹配多个 hint，等更多字符（typed 已更新）
+    case committed  // 唯一匹配，已点击
+    case ignored    // 不匹配任何 hint 前缀：误按，吞掉不退出（typed 不变）
 }
 
 enum ClickAction {
@@ -170,8 +170,11 @@ final class HintMode {
         let next = typed + String(char)
         let matches = targets.filter { $0.label.hasPrefix(next) }
         if matches.isEmpty {
-            deactivate()
-            return .cancelled
+            // Pressed a key that matches no hint prefix — just a misfire.
+            // Swallow it: stay in TAP, keep the previous valid `typed`
+            // (the bad char isn't appended). User exits with Esc, not by
+            // fat-fingering a wrong key.
+            return .ignored
         }
         if matches.count == 1 && matches[0].label == next {
             commit(target: matches[0], action: action)
