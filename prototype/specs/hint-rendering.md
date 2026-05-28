@@ -10,13 +10,14 @@
 
 `HintMode.alphabet`：
 ```swift
-static let alphabet: [Character] = ["a","s","d","f","g","h","j","k","l"]
+static let alphabet: [Character] = ["a","s","d","f","g","h","e","r","u"]
 ```
-home row 9 个字母（顺序按物理位置左→右，不是字母表序）。
+9 个字母。**不含 i/j/k/l**——它们在 TAP 里是 IJKL 移光标键，裸按一定是"移动"，不能再当 hint 标签（见 `modes.md` §4）。移除 home row 的 j/k/l 后补 e/r/u 凑回 9 个。
 
-**字母组**（焦点 app + menu extras 共享）：
-- count ≤ 9：单字母 `a, s, d, f, g, h, j, k, l`
-- count > 9：两字母 `aa, as, ad, ..., ll`（9 × 9 = 81 个组合，再多就溢出尾部，不报错）
+**字母组**（焦点 app + menu extras 共享），同一次扫描内所有标签**等长**——混长度会前缀冲突（"aa" 是 "aaa" 的前缀，用户输 "aa" 会卡住等第三字符）：
+- count ≤ 9：单字母
+- 10–81：两字母（9 × 9）
+- 82+：三字母（9³ = 729，远超 `maxTargets`）
 
 **数字组**（Dock 独享）：
 - count ≤ 10：单字符 `0, 1, ..., 9`
@@ -193,9 +194,9 @@ let viewY = nsGlobalY - winOrigin.y      // NSScreen 全局 → view 局部 Y
 
 ---
 
-## 7. 三种 badge 排版
+## 7. 四种 badge 排版
 
-`HintOverlayView.draw` 用 `target.role` 和 `target.label` 分流到三个分支。
+`HintOverlayView.draw` 按优先级分流：Dock（数字标签）→ AXMenuItem → **足够大的 rect 用 inside 放置** → 其余 speech bubble。
 
 ### 7.1 Dock items（label 首字符是数字）
 
@@ -212,7 +213,7 @@ let dockOrientation = UserDefaults(suiteName: "com.apple.dock")?
 | `left` | 图标右侧 | 向左指 |
 | `right` | 图标左侧 | 向右指 |
 
-Badge 居中对齐文字（其他两种是左对齐）。
+Badge 居中对齐文字（其他几种是左对齐）。
 
 ### 7.2 `AXMenuItem`（下拉菜单项）
 
@@ -241,9 +242,17 @@ for other in targets where other.role == "AXMenuItem" {
 
 **`contains` vs `intersects`**：用 `viewBounds.contains(rect)` 严格判断"badge 完整在屏幕内"，不用 `intersects`。部分超出会被裁剪不可读。
 
-### 7.3 其他（普通按钮 / 链接 / status icon）
+### 7.3 Inside 放置（足够大的 rect —— AX 和 OP 都适用）
 
-Badge 22×16 矩形 + 尾巴三角。默认**下方**（尾巴指上），不 fit 翻**上方**（尾巴指下）。同样用 `contains` 判断 fit。
+非 Dock、非 AXMenuItem 的 target，只要 rect ≥ **30pt 宽 × 16pt 高**，badge 画在 rect **内部左上角**（水平 4pt inset，垂直贴顶，无尾巴）。
+
+为什么：speech bubble（§7.4）+ 尾巴在密集列表（Finder 文件行、OP 聊天气泡）上会浮在相邻 rect 的间隙里，归属不清——badge 到底属于上面那行还是下面那行看不出来。放进 rect 内部，归属一目了然，那个又小又难看的尾巴也省了。
+
+阈值由来：水平要 4pt×2 + 22pt 标签宽 = 30pt；垂直贴顶（0 inset），因为 Finder 日期/大小列的 AX rect 高仅 ~14-16pt，任何正垂直 padding 都会把它们踢回 speech bubble（恰是 inside 要解决的"浮在行间"老问题）。小于阈值的（工具栏小图标）落到 §7.4。
+
+### 7.4 Speech bubble（rect 太小，放不下 inside）
+
+Badge 22×16 矩形 + 尾巴三角。默认**下方**（尾巴指上），不 fit 翻**上方**（尾巴指下）。同样用 `contains` 判断 fit。只有小于 §7.3 阈值的 target 才走这里。
 
 ---
 
@@ -301,7 +310,7 @@ w.setFrameOrigin(NSPoint(x: f.midX - 80, y: f.minY + 80))
 
 ## 10. 跨屏元素
 
-如果某个 target 的矩形不在当前 view 的 bounds 上（比如焦点 app 在另一块屏），三种分支都会 `continue` 跳过绘制。
+如果某个 target 的矩形不在当前 view 的 bounds 上（比如焦点 app 在另一块屏），各分支都会 `continue` 跳过绘制。
 这就是为什么每屏一个独立的 HintOverlayView：每个 view 只画落在自己屏幕上的 hints，自动分流。
 
 判断：

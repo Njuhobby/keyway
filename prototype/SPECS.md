@@ -101,35 +101,61 @@ NSApplication
 
 控制流：
 
-1. **HotkeyTap** 是唯一事件入口。注册 `CGEvent.tapCreate` 监听 `keyDown` + `flagsChanged`。
+1. **HotkeyTap** 是唯一事件入口。注册 `CGEvent.tapCreate` 监听 `keyDown` + `keyUp` + `flagsChanged`。
    每个事件先检查 `eventSourceUserData == "MOUS"` —— 我们自己合成的直接放行（避免反馈环）。
-2. **未激活**时只看 bare F19（= 重映射后的 Caps Lock） —— 命中调 `session.enter()` 吞掉该事件，其余全放行。
-3. **已激活**时事件交给 `VimSession.handle()`。返回 `true` = 消费，`false` = 放行
-   （让 Cmd+Space / Cmd+Tab 等系统快捷键继续工作）。
-4. `VimSession` 按 mode 和 palette 状态分发；mode 内部决定要不要触发 hint、要不要退出。
-5. 提交点击优先用 AX 语义动作（`AXPress` / `AXShowMenu`），失败再合成 mouse event。
+2. **F19（= Caps Lock）走 arm 机制，任何 mode 都适用**：按下不立即动作（arm）；松手时若期间没按 chord → `session.handleTriggerTap()`（按当前 mode 分派：OFF→进 TAP / TAP→切 sticky / SCROLL→切 TAP / palette→关）；arm 期间按 j/k → `session.enterScroll()`。详见 `modes.md` §2.1。
+3. **其他键**在已激活时交给 `VimSession.handle()`。返回 `true` = 消费，`false` = 放行（让 Cmd+Space / Cmd+Tab 等系统快捷键继续工作）。
+4. `VimSession` 按 mode（`.tap` / `.scroll`）和 palette 状态分发；mode 内部决定 hint / 移光标 / 滚动 / 退出。
+5. 提交点击**统一合成 mouse event**（AX 语义动作 AXPress/AXShowMenu 已弃用——不可靠，见 `hint-rendering.md` §3）。
    合成事件统一打 `"MOUS"` 标记。
 
 ---
 
 ## 4. 文件职责
 
+**核心**：
+
 | 文件 | 职责 |
 | --- | --- |
 | `main.swift` | NSApp 启动器，accessory activation policy |
-| `AppDelegate.swift` | 菜单栏、AX 权限检查、启动 HotkeyTap、kick off `MenuExtraCache.warmUp()` |
-| `HotkeyTap.swift` | CGEventTap 注册 + 反馈环避免 + 触发键 → `session.enter()` |
-| `VimSession.swift` | Mode 状态机、命令面板缓冲、按键到 hint char 的映射 |
-| `HintMode.swift` | AX 扫描三个来源 → 生成标签 → 处理 typing → 提交点击 |
-| `HintWindowCache.swift` | 焦点 app 的 per-`AXWindow` 缓存。sticky rescan 时复用没动过的 window 子树，关弹框这种"只销毁一个窗"的常见 case 不重扫 |
+| `AppDelegate.swift` | 菜单栏、AX 权限检查、启动 HotkeyTap、`MenuExtraCache.warmUp()`、`OmniParserModel.preload()`、`TriggerRemap` 生命周期 |
+| `HotkeyTap.swift` | CGEventTap 注册（keyDown/keyUp/flagsChanged）+ 反馈环避免 + F19 arm/chord 分派 |
+| `VimSession.swift` | Mode 状态机（`.tap`/`.scroll`）、arm 分派（`handleTriggerTap`/`enterScroll`）、palette、按键路由 |
+| `HintMode.swift` | 收集 4 来源（焦点窗口 AX **或** OP / Dock / menubar / extras）→ 生成标签 → typing → commit（合成点击）|
+| `HintWindowCache.swift` | 焦点 app 的 per-`AXWindow` 缓存。sticky rescan 复用没动过的 window 子树 |
 | `MenuExtraCache.swift` | 后台维护"哪些 PID 有 menu extras"的 PID 集合 |
-| `HintOverlay.swift` | 每屏一个无边框透明窗口，绘制 hint 标签 |
+| `HintOverlay.swift` | 每屏一个无边框透明窗口，绘制 hint 标签（大 rect 用 inside 放置） |
 | `HUD.swift` | 右下角 mode 提示 |
-| `KeyCode.swift` | `kVK_ANSI_*` 物理键码常量（ANSI 布局，非 QWERTY 会出错） |
-| `KeyPoster.swift` | 合成键盘事件的辅助函数（当前主路径未使用；留给未来 select-text mode） |
-| `AXWait.swift` | 把 NSWorkspace / AX observer 通知桥接成 `async/await`，带超时兜底。`x` 路径用它替代固定 sleep |
-| `TriggerRemap.swift` | App 启动时 shell-out `/usr/bin/hidutil` 把物理 Caps Lock → F19；退出时还原 |
-| `setup-trigger.sh` | 高级用户用。`--persist` 模式装 LaunchAgent，让 F19 映射独立于 Mouseless 生命周期 |
+| `KeyCode.swift` | `kVK_ANSI_*` 物理键码常量（含 `f19=80`；ANSI 布局，非 QWERTY 会出错） |
+| `FocusedApp.swift` | 经 `NSWorkspace.frontmostApplication` 解析前台 app（Electron 上比 AXFocusedApplication 可靠） |
+| `MouseSynth.swift` | 合成 mouse click + 取光标位置（hint commit、x、未来移动共用） |
+| `TriggerRemap.swift` | App 启动 shell-out `hidutil` 把 Caps Lock → F19；退出还原 |
+| `KeyPoster.swift` | 合成键盘事件辅助（主路径未用；留给未来 select-text mode） |
+
+**键盘鼠标 / 滚动**：
+
+| 文件 | 职责 |
+| --- | --- |
+| `MouseMover.swift` | TAP 内 IJKL 连续移光标（60fps timer 合成 `.mouseMoved`，Shift 加速） |
+| `ScrollController.swift` | SCROLL 模式滚动合成 + 连续 + 加速 + 区域选择 + 光标 warp |
+| `ScrollAreaDetector.swift` | AX-walk 焦点窗口找 `AXScrollArea`/`AXWebArea`（不依赖 OP 路由）|
+| `ScrollOverlay.swift` | 滚动区域 picker：蓝色光晕边框 + 数字标记 |
+
+**OmniParser 视觉路径**（AX-bad app 的焦点窗口 hint，见 `omniparser-fallback-design.md`）：
+
+| 文件 | 职责 |
+| --- | --- |
+| `AppRegistry.swift` | `AX_FOCUSED_WHITELIST` —— 焦点窗口走 AX 还是 OP 的路由决策 |
+| `ScreenCapture.swift` | ScreenCaptureKit 截焦点窗口（display capture + crop，display 缓存）|
+| `OmniParserModel.swift` | CoreML YOLO 检测器（icon_detect.mlpackage，启动预加载）|
+| `OmniParserPath.swift` | 截图 → 推理 → §5.1 baseline 过滤 → 屏幕坐标候选；debug overlay |
+| `OCRRefiner.swift` | OP 点击精度：center 落进 inner box 时用 Vision OCR 重定位（含 CJK）|
+
+**脚本**：
+
+| 文件 | 职责 |
+| --- | --- |
+| `setup-trigger.sh` | 高级用户用。`--persist` 装 LaunchAgent，让 F19 映射独立于 Mouseless 生命周期 |
 
 ---
 
@@ -140,11 +166,13 @@ NSApplication
 | 文档 | 内容 |
 | --- | --- |
 | [`specs/event-pipeline.md`](specs/event-pipeline.md) | HotkeyTap 注册、callback 三层 short-circuit、反馈环 `"MOUS"` 标记、修饰键透传策略（Cmd/Ctrl 放行，Shift/Option 消费） |
-| [`specs/modes.md`](specs/modes.md) | Mode 状态机、palette 正交性、sticky、状态转移图、**所有键位表**、KeyCode 常量、新 mode 接入路径 |
+| [`specs/modes.md`](specs/modes.md) | Mode 状态机（`.tap`/`.scroll`）、F19 arm 机制、palette、sticky、IJKL 移光标 + x 点击、**所有键位表**、KeyCode 常量、新 mode 接入 |
+| [`specs/scroll-mode-design.md`](specs/scroll-mode-design.md) | **SCROLL 模式完整设计**：chord 进入、AXScrollArea/AXWebArea 检测、多区域 picker、滚动合成、零-AX Electron 限制 |
 | [`specs/hint-discovery.md`](specs/hint-discovery.md) | AX 三源（focused / Dock / menu extras）、`walk()` 收录条件、屏幕并集计算、**menu extras 踩坑史 + `MenuExtraCache` 设计**、并发安全 |
-| [`specs/hint-rendering.md`](specs/hint-rendering.md) | 标签生成、typing → commit、AX action vs 合成点击、`HintOverlay` 多屏窗口、坐标系转换、**三种 badge 排版**（Dock / `AXMenuItem` 级联 / 通用）、HUD |
-| [`specs/omniparser-fallback-design.md`](specs/omniparser-fallback-design.md) | **设计草稿，未实现**：视觉 ML 路径作为 AX 兜底（fall-through，不并行）；PoC 数据；captioner 为何搁置；过滤设计的 baseline vs exploratory；集成的开放问题 |
-| [`specs/omniparser-integration-roadmap.md`](specs/omniparser-integration-roadmap.md) | **实施路线图**：把上面设计落到代码上的 9 个分阶段计划（P0 决策 → P8 发布），含估时、风险、降级路径、out-of-scope 边界、验收清单 |
+| [`specs/hint-rendering.md`](specs/hint-rendering.md) | 标签生成、typing → commit、**统一合成点击**（AX action 已弃）、`HintOverlay` 多屏窗口、坐标系转换、badge 排版（inside / Dock / 级联）、HUD |
+| [`specs/omniparser-fallback-design.md`](specs/omniparser-fallback-design.md) | **已实现 (P5-P6)**：OP 视觉路径，OP-default + AX whitelist 路由（非 fall-through）；baseline 过滤；OCR click-point refiner（§4.6）；PoC 数据；captioner 搁置 |
+| [`specs/omniparser-integration-roadmap.md`](specs/omniparser-integration-roadmap.md) | **实施路线图**：P0-P6 已完成（CoreML spike → 截屏 → 路由 → 集成 → 端到端 → OCR refiner），P7（数据调参）/ P8（发布）待做 |
+| [`specs/per-app-correction-design.md`](specs/per-app-correction-design.md) | **设计草稿，未实现**：per-app 修正层（模板匹配补 OP 漏检 + exclude 误报），护城河；P8 之后启动 |
 
 ---
 
@@ -156,10 +184,13 @@ NSApplication
 | Sticky rescan 复用 | per-`AXWindow` cache + `AXWindows` diff + commit-driven dirty | 关弹框这种"只销毁一窗、其他没动"的常见操作不重扫 |
 | Menu bar fast path | AXMenuBar 上读一次 `AXSelectedChildren`；空则不下钻 | 99% 时刻菜单栏没展开，跳过 N×4 个 axMenuIsOpen 探针 |
 | Menu extras 发现 | 后台 PID cache + NSWorkspace 增量 | 触发期 < 30ms；预热成本对用户透明 |
-| 点击实现 | AX 动作优先，合成事件回退 | AX 不依赖鼠标位置和遮挡 |
+| 点击实现 | **统一合成 mouse event**（不用 AX 动作） | AX 动作（AXPress/AXShowMenu）在 NSBrowser cell / 自定义 view / Electron 上常静默失败；合成点击行为可预测，跟用户心智一致 |
+| `x` 手势 | 当前光标位置合成左键单击 | 跟 IJKL 移光标配套（移→点闭环）；取代了旧的"关菜单+重扫"手势 |
+| 移光标 / 滚动用裸键不用 Ctrl | IJKL 移光标、jk 滚动 | power user（HHKB）常把 Ctrl+hjkl 系统级映射成方向键，会冲突 |
+| 焦点窗口 hint 路由 | AX whitelist → AX walk；其余 → OmniParser | 框架 ≠ AX 质量（WeChat 是 native 但 AX 黑洞）；OP 对所有 app 都 work 且 ~95ms 不比 AX walk 慢 |
+| 滚动区检测 | 只用 AX（`AXScrollArea`/`AXWebArea`），不用 OP | 滚动区是容器无视觉特征，OP 识别不了；结构 AX 即使内容 AX 烂也可靠 |
 | Overlay 数量 | 每屏一个窗口 | 单窗口跨屏 macOS 渲染不可靠 |
 | Overlay 层级 | `.statusBar` (25) | 高于菜单栏，低于下拉菜单（保持自然 z-order） |
-| 退出"空白处"（`x`） | 激活 Finder + AX-cancel Dock 菜单 | Finder 激活关掉 app 菜单/popover/status menu；`AXUIElementPerformAction(menu, kAXCancelAction)` 是唯一能让 Dock 真正销毁 AXMenu 元素的方式（合成 Esc 只让菜单视觉关，留下 ghost 让 re-scan 画悬空 hint） |
 | 异步操作的"等" | AX / NSWorkspace observer + async/await + timeout 兜底 | 不用固定 sleep 猜时间。OS 通知比经验值早就发了就早走；慢路径一直等到 AX 同步完。silent failure 时超时兜底防 Task 卡死 |
 | Cmd/Ctrl 透传 | 不消费 | 保 Spotlight、Mission Control、screenshot 等系统功能 |
 | Shift/Option | 消费 | 给 hint click action 用（Shift=双击 / Option=右键） |
@@ -174,20 +205,20 @@ NSApplication
 
 1. **键盘布局** —— `KeyCode.swift` 是 ANSI 物理位。非 QWERTY 字母 hint 全错。
    迁移路径：用 `UCKeyTranslate` / `CGEventKeyboardGetUnicodeString` 把 keyCode + flags 映射到字符再匹配。
-2. **Electron / 复杂 web 内容** —— `walk()` 对 web view 的 AX 树兼容性还没系统测过。
-   这是 vs Homerow 的 wedge，必须做对。Chromium 的 NSAccessibility 桥规则统一，但
-   暴露什么完全取决于 app 的 ARIA/HTML 卫生：好的（VS Code、Slack、Discord）AXButton +
-   AXPress 一应俱全，差的（WeChat、各类国产 SaaS）一片 AXGroup 无 action 无 title。
-   长远方向是引入 **OmniParser 视觉路径** 作为 AX 的 **fall-through 兜底**——AX 主，
-   AX 不够时才启动视觉路径，不并行。PoC 已跑通：3K 全屏 detection p50 ~140ms
-   （spec §5 上限是 300ms），WeChat / Wrike 召回明显高于 AX。详见
+2. **Electron / AX-bad app**（vs Homerow 的 wedge）—— **已实现 OmniParser 视觉路径 (P5-P6)**。
+   背景：Chromium 桥暴露什么取决于 app 的 ARIA 卫生，差的（WeChat、国产 SaaS）一片
+   AXGroup 无 action；而且框架 ≠ AX 质量（WeChat 是 native AppKit 但聊天内容自渲染、AX 黑洞）。
+   方案：**OP-default + AX whitelist 路由**——焦点窗口不在 `AppRegistry.AX_FOCUSED_WHITELIST`
+   的 app 走 OP（ScreenCaptureKit 截屏 + CoreML YOLO + baseline 过滤 + OCR click-refine），
+   ~95ms 不比 AX walk 慢。剩余：P7 数据调参（confidence 阈值 / whitelist 增删）、P8 发布打包、
+   per-app 修正层（模板匹配，护城河，P8 后）。详见
    [`specs/omniparser-fallback-design.md`](specs/omniparser-fallback-design.md)。
 3. **App AX cleanup 期的扫描尖峰** —— 关弹框 / 关 sheet 后 sticky rescan 落进目标 app
    的 ~500ms cleanup 窗口里，per-IPC 延迟从 ~0.2ms 涨到 ~40ms。IPC 数已经压到下限
    13（cache + walkMenuBar 双管），优化空间在这条路径上耗尽。事件驱动等 AX 稳定再
    扫的方案没尝试过——通知发出时机不可控，理论 wall-clock 时间可能不降。
-   **跟 OmniParser fallback 是独立问题**——后者只解决 AX 黑洞场景；cleanup 尖峰下
-   AX 仍然能返回候选数（只是慢），fall-through 不会触发视觉路径。详见
+   **跟 OmniParser 路由是独立问题**——OP 只解决 AX 黑洞 app；cleanup 尖峰下
+   AX 仍能返回候选（只是慢），且白名单 app 才走 AX walk。详见
    `specs/hint-discovery.md` §5 + [`specs/omniparser-fallback-design.md`](specs/omniparser-fallback-design.md) §4.5。
 4. **新 modes** —— `Mode` enum 已经留好扩展点：select-text、drag、right-click 命令模式。接入路径见 `specs/modes.md` §8。
 5. **多 hint 来源的标签空间冲突** —— 焦点 app 元素很多时会吃光字母组，menu extras 排到 `lj/lk/ll`。

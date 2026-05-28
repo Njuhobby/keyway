@@ -10,6 +10,7 @@
 
 ```swift
 let mask = (1 << CGEventType.keyDown.rawValue)
+         | (1 << CGEventType.keyUp.rawValue)        // F19 arm resolve + scroll/move stop
          | (1 << CGEventType.flagsChanged.rawValue)
 CGEvent.tapCreate(
     tap: .cgSessionEventTap,
@@ -68,32 +69,53 @@ if event.getIntegerValueField(.eventSourceUserData) == Self.syntheticMarker {
 **所有未来要合成事件的代码必须打这个标记。** Marker 定义在 `HotkeyTap.syntheticMarker`，
 `nonisolated` 暴露出来，任何 actor context 都能用。
 
-### Layer 3：非 keyDown 放行
+### Layer 3：keyUp 处理 + 非 keyDown 放行
 
 ```swift
+if type == .keyUp {
+    // F19 release resolves the arm（见 §3）；其他键的 keyUp 路由给
+    // session（scroll / IJKL move 的 stop）。
+    ...
+}
 guard type == .keyDown else { return passUnretained(event) }
 ```
 
-`flagsChanged` 进入这层就放行 —— mask 里订了它只是为了避免 macOS 在某些组合下不发 keyDown。
-未来需要 modifier-only 触发可以改这里。
+事件 mask 订了 `keyDown` + `keyUp` + `flagsChanged`。keyUp 不再无脑放行——它要 (a) 解析 F19 arm（松手分派），(b) 把 j/k/i/l 等的释放交给 `session.handleKeyUp`（停止连续滚动 / 连续移光标）。`flagsChanged` 仍直接放行（mask 订它只为避免某些组合下 macOS 不发 keyDown）。
 
 ---
 
-## 3. 触发键判定（未激活时）
+## 3. 触发键判定：F19 arm 机制（所有 mode）
+
+F19（= Caps Lock）**不在按下时立即动作**，而是 **arm**（待命），等松手或等 chord。这让一个键兼多职（单击进 TAP / 切 sticky / SCROLL→TAP，按住+jk 进 SCROLL）。完整交互见 `modes.md` §2.1。
 
 ```swift
-if !session.isActive {
-    let modifierMask: CGEventFlags = [.maskShift, .maskControl,
-                                      .maskCommand, .maskAlternate]
-    if keyCode == KeyCode.f19 && flags.intersection(modifierMask).isEmpty {
-        session.enter()
-        return nil                          // 吞掉触发键本身
-    }
-    return passUnretained(event)            // 其他全放行
+// keyDown
+if keyCode == KeyCode.f19 && flags.intersection(modifierMask).isEmpty {
+    f19Armed = true; f19ChordUsed = false
+    return nil                              // 吞掉，先不动作
+}
+if f19Armed && (keyCode == KeyCode.j || keyCode == KeyCode.k) {
+    f19ChordUsed = true
+    session.enterScroll()                   // chord → SCROLL（任何 mode）
+    return nil
+}
+if session.isActive {
+    return session.handle(...) ? nil : passUnretained(event)
+}
+return passUnretained(event)
+
+// keyUp
+if keyCode == KeyCode.f19, f19Armed {
+    let wasChord = f19ChordUsed
+    f19Armed = false; f19ChordUsed = false
+    if !wasChord { session.handleTriggerTap() }   // 松手无 chord → 按 mode 分派
+    return nil
 }
 ```
 
-**bare F19**（无任何修饰键）才触发。F19 不是物理键盘上真实存在的键——靠 `hidutil` 把物理 **Caps Lock** 重映射成 F19，**由 app 在启动时自动调用** `TriggerRemap.applyAtLaunch()`（见 `SPECS.md` §2.1）。用户零配置。
+**arm 覆盖所有 mode，不只 OFF**——这是"TAP 内 Caps Lock+jk 也能进 SCROLL"和"连续 Caps Lock 进 sticky"的根（旧实现 arm 只在 OFF，导致这两个失效，见该 commit）。
+
+**bare F19**（无任何修饰键）才 arm。F19 不是物理键盘上真实存在的键——靠 `hidutil` 把物理 **Caps Lock** 重映射成 F19，**由 app 在启动时自动调用** `TriggerRemap.applyAtLaunch()`（见 `SPECS.md` §2.1）。用户零配置。
 
 为什么不直接监听 Caps Lock：macOS 把 Caps Lock 当**modifier**而不是普通键处理。事件流里 Caps Lock 只发 `flagsChanged` 事件改 `.maskAlphaShift` flag，不发 `keyDown`。CGEventTap 拿到的"按下 Caps Lock"是一个 flag change，**没有 keyCode 可以匹配**，而且 Caps Lock 的 toggle 语义（按一次锁定、再按一次解锁）也不符合"瞬时触发"的需求。
 
@@ -101,7 +123,7 @@ hidutil 重映射改的是 **HID usage code**（在事件进入 macOS 的 modifi
 
 留 modifier mask 检查是给未来用户保留"Shift+F19 / Cmd+F19"绑别的快捷键的空间。F19 本身没有任何 app 用，"Hyper key" 范畴。
 
-触发键命中后**消费**该按键 —— 不下发到下层 app，否则下层会收到一个孤立的 F19 keypress。
+F19 的 keyDown 和 keyUp 都**消费** —— 不下发到下层 app，否则下层会收到孤立的 F19 keypress。
 
 ---
 
