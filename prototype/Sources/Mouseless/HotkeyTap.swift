@@ -78,21 +78,23 @@ final class HotkeyTap {
 
         // ---- keyUp ----
         if type == .keyUp {
-            // F19 release resolves an armed tap: enter TAP iff no scroll
-            // chord (j/k) was used during the hold.
+            // F19 release resolves an armed press. If no j/k chord was
+            // used during the hold, perform the trigger's per-mode
+            // default (OFF→TAP, TAP→sticky toggle, SCROLL→TAP). See
+            // scroll-mode-design.md §2.1 — the arm now spans all modes.
             if keyCode == KeyCode.f19 {
                 if f19Armed {
-                    let enterTap = !f19ChordUsed
+                    let wasChord = f19ChordUsed
                     f19Armed = false
                     f19ChordUsed = false
-                    if enterTap && !session.isActive {
-                        Task { @MainActor [session] in await session.enter() }
+                    if !wasChord {
+                        session.handleTriggerTap()
                     }
                     return nil
                 }
                 return Unmanaged.passUnretained(event)
             }
-            // Other releases route to the session (scroll stop on j/k up).
+            // Other releases route to the session (scroll/move stop).
             if session.isActive, session.handleKeyUp(keyCode: keyCode) {
                 return nil
             }
@@ -102,29 +104,30 @@ final class HotkeyTap {
         guard type == .keyDown else { return Unmanaged.passUnretained(event) }
 
         // ---- keyDown ----
-        if !session.isActive {
-            let modifierMask: CGEventFlags = [.maskShift, .maskControl,
-                                              .maskCommand, .maskAlternate]
-            // Bare F19 (= remapped Caps Lock) → ARM. Don't enter TAP yet:
-            // we wait for keyUp so a j/k chord can divert to SCROLL first.
-            if keyCode == KeyCode.f19 && flags.intersection(modifierMask).isEmpty {
-                f19Armed = true
-                f19ChordUsed = false
-                return nil
-            }
-            // F19 held + j/k → SCROLL chord. enterScroll is async (S3 AX
-            // walk); dispatch fire-and-forget, consume the chord key.
-            if f19Armed && (keyCode == KeyCode.j || keyCode == KeyCode.k) {
-                f19ChordUsed = true
-                Task { @MainActor [session] in await session.enterScroll() }
-                return nil
-            }
-            return Unmanaged.passUnretained(event)
+        // Bare F19 (= remapped Caps Lock) → ARM, in ANY mode. Don't act
+        // yet: wait for keyUp, so a j/k chord can divert to SCROLL first.
+        // Modifier+F19 is left for the user to bind elsewhere.
+        let modifierMask: CGEventFlags = [.maskShift, .maskControl,
+                                          .maskCommand, .maskAlternate]
+        if keyCode == KeyCode.f19 && flags.intersection(modifierMask).isEmpty {
+            f19Armed = true
+            f19ChordUsed = false
+            return nil
+        }
+        // F19 held + j/k → SCROLL chord, from any mode. Synchronous
+        // (cheap AX scroll-area walk); consume the chord key.
+        if f19Armed && (keyCode == KeyCode.j || keyCode == KeyCode.k) {
+            f19ChordUsed = true
+            session.enterScroll()
+            return nil
         }
 
         // In a mode — handler decides whether to consume the event.
-        return session.handle(keyCode: keyCode, flags: flags)
-            ? nil
-            : Unmanaged.passUnretained(event)
+        if session.isActive {
+            return session.handle(keyCode: keyCode, flags: flags)
+                ? nil
+                : Unmanaged.passUnretained(event)
+        }
+        return Unmanaged.passUnretained(event)
     }
 }

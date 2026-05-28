@@ -26,55 +26,85 @@ final class VimSession {
 
     // MARK: - Lifecycle
 
-    /// Chord (Caps Lock + j/k) pressed → enter SCROLL mode. No hint
-    /// scan — scroll is independent of hints. async to match enter()'s
-    /// shape and because S3 will do an AX walk for scroll areas (off the
-    /// event-tap hot path via the caller's Task).
-    /// See `specs/scroll-mode-design.md`.
-    func enterScroll() async {
-        guard mode == nil else { return }
+    /// F19 (Caps Lock) released with no chord → the trigger's default
+    /// action for the current mode. Called from HotkeyTap once the arm
+    /// resolves (see scroll-mode-design.md §2.1 — the F19 arm now spans
+    /// ALL modes, not just OFF, so the chord can divert to SCROLL from
+    /// anywhere and a bare tap does the right per-mode thing):
+    ///   OFF    → enter TAP
+    ///   TAP    → toggle sticky
+    ///   SCROLL → switch to TAP
+    func handleTriggerTap() {
+        // Palette open → F19 closes it, back to the underlying mode
+        // (preserves the pre-arm behavior now that F19 no longer reaches
+        // handlePalette).
+        if paletteBuffer != nil {
+            paletteBuffer = nil
+            renderModeHUD()
+            return
+        }
+        switch mode {
+        case .none:
+            enter()
+        case .tap:
+            sticky.toggle()
+            renderModeHUD()
+        case .scroll:
+            teardownCurrentMode()
+            enter()
+        }
+    }
+
+    /// Chord (Caps Lock + j/k) → enter SCROLL mode from ANY mode. No
+    /// hint scan — scroll is independent of hints. Synchronous: the AX
+    /// scroll-area walk runs inline (cheap, ~few ms). See
+    /// `specs/scroll-mode-design.md`.
+    func enterScroll() {
+        teardownCurrentMode()   // no-op from OFF; tears down TAP/SCROLL
         let controller = ScrollController()
-        controller.enter()   // S2: warp cursor to focused window center
+        controller.enter()      // detect scroll areas, warp, show overlay
         mode = .scroll(controller)
         paletteBuffer = nil
         sticky = false
-        // S3: AX scroll-area detection. S4: numbered-area overlay.
-        HUD.shared.show("SCROLL")
         print("[mouseless] enter SCROLL mode")
     }
 
-    /// Trigger key pressed → enter TAP mode (hints visible).
-    /// async because the OmniParser path (P5+) involves ScreenCaptureKit
-    /// and CoreML inference, both inherently async. Caller (HotkeyTap)
-    /// dispatches via Task — keyboard event handler stays sync.
-    func enter() async {
+    /// Enter TAP mode (hints visible). **Sets `mode` synchronously** so a
+    /// rapid second Caps Lock is recognized as an in-TAP sticky toggle
+    /// rather than racing against an async activation (the old bug where
+    /// double-tapping Caps Lock failed to reach sticky). The hint scan —
+    /// which on the OmniParser path involves ScreenCaptureKit + CoreML —
+    /// runs in a follow-up Task that just fills/redraws the overlay.
+    func enter() {
         guard mode == nil else { return }
-        // The cache survives in memory across Mouseless on/off cycles, but
-        // it has no visibility into what the user did with the mouse while
-        // Mouseless was off (clicks, scrolls, tab switches). Start every
-        // session with an empty cache — first activate scans fresh, then
-        // sticky rescans within the session can reuse.
         HintWindowCache.shared.clear()
         let h = HintMode()
-        guard await h.activate() else {
-            HUD.shared.show("no hints here")
-            return
-        }
-        mode = .tap(h)
+        mode = .tap(h)          // synchronous — no race window
         paletteBuffer = nil
         sticky = false
-        renderModeHUD()
         print("[mouseless] enter TAP mode")
-
-        // P3 debug: log the routing decision (AX whitelist vs OP) for
-        // the focused app.
         logFocusedAppRouting()
 
-        // Diagnostic overlay (/tmp/mouseless-focused.png) is now written
-        // inside OmniParserPath.collect() — only on OP-routed scans, and
-        // includes the model's bounding boxes so you can see what was
-        // detected vs filtered. AX-routed apps don't produce one (no OP
-        // analysis to visualize). See OmniParserPath.saveDebugOverlay.
+        Task { @MainActor in
+            // Guard against the mode changing out from under us during
+            // the async scan (user hit Esc / chorded into SCROLL).
+            guard case .tap(let cur) = self.mode, cur === h else { return }
+            if await h.activate() {
+                self.renderModeHUD()
+            } else {
+                HUD.shared.show("no hints here")
+                self.exit()
+            }
+        }
+    }
+
+    /// Tear down whatever mode is active (stop mover/scroll, deactivate
+    /// hints) and reset to OFF. Used when switching modes.
+    private func teardownCurrentMode() {
+        mover.stop()
+        if case .tap(let h) = mode { h.deactivate() }
+        if case .scroll(let c) = mode { c.teardown() }
+        mode = nil
     }
 
     /// P3 debug: print whether the currently focused app would route
@@ -177,23 +207,11 @@ final class VimSession {
 
     // MARK: - SCROLL mode
 
-    /// SCROLL mode keystrokes. (Esc is handled before handleMode → exits
-    /// to OFF.) j/k drive the ScrollController (continuous on hold);
-    /// Caps Lock switches to TAP. Number-key area switching lands in S4.
+    /// SCROLL mode keystrokes. (Esc exits to OFF; Caps Lock → TAP are
+    /// both handled in HotkeyTap's F19 arm layer, not here.) j/k drive
+    /// the ScrollController (continuous on hold); number keys switch
+    /// the selected area.
     private func handleScroll(controller: ScrollController, keyCode: Int, flags: CGEventFlags) -> Bool {
-        let modMask: CGEventFlags = [.maskShift, .maskControl,
-                                     .maskCommand, .maskAlternate]
-
-        // Caps Lock (F19) → switch to TAP mode (scan + hints). Explicit
-        // rescan; releasing j/k never auto-rescans (design §3.1).
-        if keyCode == KeyCode.f19 && flags.intersection(modMask).isEmpty {
-            controller.teardown()
-            mode = nil            // clear so enter() proceeds
-            HUD.shared.hide()
-            Task { @MainActor in await self.enter() }
-            return true
-        }
-
         // j / k → start continuous scroll down / up. Shift = fast.
         // Held-key OS repeats just refresh direction/speed (idempotent).
         if keyCode == KeyCode.j {
@@ -270,15 +288,11 @@ final class VimSession {
     // MARK: - TAP mode
 
     private func handleTap(hint: HintMode, keyCode: Int, flags: CGEventFlags) -> Bool {
-        // Bare trigger key (Caps Lock → F19) toggles sticky. While sticky
-        // is on, each click re-scans hints instead of exiting.
+        // (Caps Lock → sticky toggle is handled in HotkeyTap's F19 arm
+        // layer — bare F19 release with no chord → handleTriggerTap →
+        // sticky toggle. Not handled here.)
         let modMask: CGEventFlags = [.maskShift, .maskControl,
                                      .maskCommand, .maskAlternate]
-        if keyCode == KeyCode.f19 && flags.intersection(modMask).isEmpty {
-            sticky.toggle()
-            renderModeHUD()
-            return true
-        }
 
         // Bare `x` — single left click at the current cursor position.
         // Combined with the future keyboard mouse-move feature this
