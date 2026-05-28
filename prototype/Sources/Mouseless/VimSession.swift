@@ -20,6 +20,7 @@ final class VimSession {
     private var mode: Mode? = nil
     private var paletteBuffer: String? = nil   // nil = palette closed
     private var sticky: Bool = false           // toggled by trigger key in TAP
+    private let mover = MouseMover()            // Ctrl+hjkl cursor move in TAP
 
     var isActive: Bool { mode != nil }
 
@@ -96,6 +97,7 @@ final class VimSession {
     }
 
     func exit() {
+        mover.stop()
         if case .tap(let h) = mode {
             h.deactivate()
         }
@@ -114,6 +116,22 @@ final class VimSession {
     /// Returns `true` if the event was consumed.
     func handle(keyCode: Int, flags: CGEventFlags) -> Bool {
         guard let m = mode else { return false }
+
+        // Bare i/j/k/l in TAP mode = move the cursor, IJKL inverted-T
+        // (i up, j left, k down, l right — game-style WASD). Shift =
+        // fast. Not Ctrl: power users (e.g. HHKB) often remap Ctrl+hjkl
+        // to arrows at the system level, so Ctrl is unusable here. These
+        // four keys are excluded from the hint-label pool (see
+        // HintMode.alphabet) so a bare press is unambiguously "move".
+        // Pairs with `x` (click at cursor): ijkl to aim, x to click.
+        // Only Shift may accompany (for fast) — Cmd/Ctrl/Option fall
+        // through to the system-shortcut passthrough below.
+        if case .tap = m, paletteBuffer == nil,
+           flags.intersection([.maskCommand, .maskControl, .maskAlternate]).isEmpty,
+           let dir = Self.moveDirection(for: keyCode) {
+            mover.start(direction: dir, fast: flags.contains(.maskShift))
+            return true
+        }
 
         // Cmd / Ctrl held → system shortcut. Pass through so things like
         // Cmd+Shift+4 (screenshot), Cmd+Space (Spotlight), Cmd+Tab, and
@@ -202,12 +220,34 @@ final class VimSession {
     /// continuous scroll. (The chord's own j/k keyUp also lands here and
     /// harmlessly stops a timer that was never started.)
     func handleKeyUp(keyCode: Int) -> Bool {
-        guard case .scroll(let controller) = mode else { return false }
-        if keyCode == KeyCode.j || keyCode == KeyCode.k {
-            controller.stop()
-            return true
+        if case .scroll(let controller) = mode {
+            if keyCode == KeyCode.j || keyCode == KeyCode.k {
+                controller.stop()
+                return true
+            }
+            return false
+        }
+        if case .tap = mode {
+            // i/j/k/l release stops cursor movement. These aren't hint
+            // chars, so always consume their release while in TAP.
+            if keyCode == KeyCode.i || keyCode == KeyCode.j
+                || keyCode == KeyCode.k || keyCode == KeyCode.l {
+                mover.stop()
+                return true
+            }
+            return false
         }
         return false
+    }
+
+    private static func moveDirection(for keyCode: Int) -> MouseMover.Direction? {
+        switch keyCode {
+        case KeyCode.i: return .up
+        case KeyCode.j: return .left
+        case KeyCode.k: return .down
+        case KeyCode.l: return .right
+        default: return nil
+        }
     }
 
     /// US-ANSI digit key codes → 0-9. nil for non-digit keys.
@@ -240,76 +280,35 @@ final class VimSession {
             return true
         }
 
-        // Bare `x` — "click on empty space" gesture. Two stages, both
-        // event-driven (no fixed sleeps):
+        // Bare `x` — single left click at the current cursor position.
+        // Combined with the future keyboard mouse-move feature this
+        // becomes "move the cursor anywhere → x clicks there", which is
+        // why x is defined as a plain click rather than a special
+        // gesture.
         //
-        // 1. Activate Finder. App menu dropdowns / popovers / status
-        //    menus all auto-dismiss when their owning app loses focus.
-        //    Wait for `NSWorkspace.didActivateApplicationNotification`
-        //    before proceeding so the next Esc lands on Finder, not on
-        //    the previously focused app (vim/terminal/dialog).
+        // This replaced an older "dismiss all open menus + rescan"
+        // gesture (AXCancel + focus switch). A plain click can mis-fire
+        // if the cursor happens to sit on a control — accepted. And
+        // until keyboard mouse-move ships, x lands wherever the cursor
+        // already happens to be — an intentional interim state.
         //
-        // 2. Synth Esc. Dock right-click menus run in a modal tracking
-        //    loop inside the Dock process and ignore focus changes —
-        //    only a real outside-click or Esc dismisses them. If a
-        //    Dock menu was open before we started, wait for the AX
-        //    `kAXMenuClosedNotification` on that menu before rescanning,
-        //    otherwise the AX tree still reports the menu items at
-        //    stale positions (visual close and AX-tree update aren't
-        //    synchronized).
-        //
-        // Both waits have a 300ms timeout fallback so silent AX/NSWS
-        // failures don't deadlock the mode — that's defensive only,
-        // should never trigger in normal operation.
+        // After-click behavior mirrors a hint commit: sticky → rescan +
+        // stay in TAP; otherwise → exit to OFF.
         if keyCode == KeyCode.x && flags.intersection(modMask).isEmpty {
             hint.deactivate()
-
-            // Capture the Dock context menu BEFORE dismissal — once
-            // it's cancelled the AX element is gone from the tree.
-            let dockPID = NSRunningApplication.runningApplications(
-                withBundleIdentifier: "com.apple.dock").first?.processIdentifier
-            let openDockMenu = dockPID.flatMap { Self.findOpenDockMenu(pid: $0) }
-            let finder = NSRunningApplication.runningApplications(
-                withBundleIdentifier: "com.apple.finder").first
-
-            Task { @MainActor in
-                // Stage 1a: dismiss the Dock context menu via the
-                // AX-native cancel action. Empirically the only way
-                // that actually works — synthetic Esc (any routing,
-                // including CGEventPostToPid) only closes the menu
-                // *visually* and leaves the AXMenu in Dock's tree,
-                // so the re-scan picks up "ghost" menu items at the
-                // old screen positions. `AXCancel` hits the same
-                // cleanup path that a real mouse click outside the
-                // menu does — Dock destroys the AXMenu element,
-                // re-scan sees a clean tree.
-                if let menu = openDockMenu {
-                    AXUIElementPerformAction(menu, kAXCancelAction as CFString)
+            MouseSynth.click(at: MouseSynth.cursorPosition(), button: .left, count: 1)
+            if sticky {
+                Task { @MainActor in
+                    let next = HintMode()
+                    if await next.activate() {
+                        self.mode = .tap(next)
+                        self.renderModeHUD()
+                    } else {
+                        self.exit()
+                    }
                 }
-
-                // Stage 1b: focus switch — dismisses everything else
-                // (app menu dropdowns, popovers, status menus all
-                // auto-close when their owning app loses focus).
-                if let finder = finder, !finder.isActive {
-                    finder.activate(options: [])
-                    _ = await AXWait.appActivated(
-                        bundleID: "com.apple.finder", timeoutMs: 300
-                    )
-                }
-                guard self.isActive else { return }
-
-                // Stage 2: re-scan. No explicit AX-cleanup wait —
-                // AXCancel is synchronous enough that the tree is
-                // already clean by the time Finder activation
-                // returns. If that ever stops being true, ghosts
-                // would reappear and we'd add a wait back.
-                let next = HintMode()
-                if await next.activate() {
-                    self.mode = .tap(next)
-                    self.renderModeHUD()
-                } else {
-                    self.exit()
-                }
+            } else {
+                exit()
             }
             return true
         }
@@ -440,59 +439,6 @@ final class VimSession {
         HUD.shared.show(label + suffix)
     }
 
-    // MARK: - Dock menu discovery
-
-    /// If the Dock currently has an open context menu (right-click on
-    /// an icon), return its `AXMenu` element. Used by the `x` handler
-    /// to know whether to wait for `kAXMenuClosedNotification` after
-    /// sending Esc — without the handle there's nothing to observe.
-    /// Returns nil when no menu is open.
-    ///
-    /// Dock's AX tree puts context menus **under the specific
-    /// `AXDockItem` that was right-clicked**, not at the app root:
-    ///
-    ///     AXApplication (Dock)
-    ///       AXList
-    ///         AXDockItem ...
-    ///         AXDockItem (right-clicked)
-    ///           AXMenu        ← here
-    ///             AXMenuItem
-    ///             ...
-    ///
-    /// So we walk app → AXList → AXDockItem and check each item's
-    /// children for an AXMenu. Only one item has one at any time.
-    private static func findOpenDockMenu(pid: pid_t) -> AXUIElement? {
-        let app = AXUIElementCreateApplication(pid)
-        guard let lists = childrenOf(app) else { return nil }
-        for list in lists {
-            guard roleOf(list) == "AXList",
-                  let items = childrenOf(list) else { continue }
-            for item in items {
-                guard let candidates = childrenOf(item) else { continue }
-                if let menu = candidates.first(where: { roleOf($0) == "AXMenu" }) {
-                    return menu
-                }
-            }
-        }
-        return nil
-    }
-
-    private static func childrenOf(_ el: AXUIElement) -> [AXUIElement]? {
-        var ref: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(el, "AXChildren" as CFString, &ref) == .success,
-              let arr = ref as? [AXUIElement] else { return nil }
-        return arr
-    }
-
-    private static func roleOf(_ el: AXUIElement) -> String? {
-        var ref: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(el, "AXRole" as CFString, &ref) == .success
-        else { return nil }
-        return ref as? String
-    }
-
-
-
     // MARK: - Key code → character
 
     /// Used while a mode is active (no palette). Accepts homerow letters and
@@ -506,9 +452,11 @@ final class VimSession {
         case KeyCode.f: return "f"
         case KeyCode.g: return "g"
         case KeyCode.h: return "h"
-        case KeyCode.j: return "j"
-        case KeyCode.k: return "k"
-        case KeyCode.l: return "l"
+        // i/j/k/l are IJKL cursor-move keys, not hint chars. e/r/u
+        // backfill the pool (must match HintMode.alphabet).
+        case KeyCode.e: return "e"
+        case KeyCode.r: return "r"
+        case KeyCode.u: return "u"
         case 18: return "1"
         case 19: return "2"
         case 20: return "3"

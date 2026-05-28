@@ -44,7 +44,11 @@ final class HintMode {
     private var typed: String = ""
     private var isActiveFlag = false
 
-    static let alphabet: [Character] = ["a","s","d","f","g","h","j","k","l"]
+    // j/k/l are reserved as IJKL cursor-move keys in TAP mode (with i),
+    // so they can't be hint labels — otherwise a bare j would be
+    // ambiguous (move? or hint?). Dropped j/k/l, kept h, backfilled
+    // e/r/u to keep a 9-key pool (home-row-adjacent, easy reach).
+    static let alphabet: [Character] = ["a","s","d","f","g","h","e","r","u"]
 
     /// Roles we always treat as clickable, even if AXPress isn't advertised.
     private static let clickableRoles: Set<String> = [
@@ -201,8 +205,8 @@ final class HintMode {
         switch target.source {
         case .ax:
             let center = CGPoint(x: target.rect.midX, y: target.rect.midY)
-            Self.synthesizeClick(at: center, button: buttonForAction(action),
-                                 count: countForAction(action))
+            MouseSynth.click(at: center, button: buttonForAction(action),
+                             count: countForAction(action))
         case .omni:
             // OCR refiner needs to re-screencap + OCR (~60-90ms total).
             // Dispatch as a Task so the keyboard event tap callback can
@@ -223,8 +227,8 @@ final class HintMode {
                     boxScreenRect: boxRect,
                     innerBoxes: innerBoxes
                 )
-                Self.synthesizeClick(at: clickPoint, button: buttonForAction(action),
-                                     count: countForAction(action))
+                MouseSynth.click(at: clickPoint, button: buttonForAction(action),
+                                 count: countForAction(action))
             }
         }
 
@@ -907,25 +911,4 @@ final class HintMode {
     /// Synthesize one or more mouse clicks at `point`. `count` lets us send
     /// double-clicks (the OS recognizes the click via the click-state field
     /// being 1, then 2 for the second pair).
-    private static func synthesizeClick(at point: CGPoint,
-                                        button: CGMouseButton,
-                                        count: Int) {
-        let src = CGEventSource(stateID: .privateState)
-        let downType: CGEventType = (button == .left) ? .leftMouseDown : .rightMouseDown
-        let upType: CGEventType = (button == .left) ? .leftMouseUp : .rightMouseUp
-
-        for clickIdx in 1...count {
-            guard
-                let down = CGEvent(mouseEventSource: src, mouseType: downType,
-                                   mouseCursorPosition: point, mouseButton: button),
-                let up = CGEvent(mouseEventSource: src, mouseType: upType,
-                                 mouseCursorPosition: point, mouseButton: button)
-            else { return }
-            for ev in [down, up] {
-                ev.setIntegerValueField(.mouseEventClickState, value: Int64(clickIdx))
-                ev.setIntegerValueField(.eventSourceUserData, value: HotkeyTap.syntheticMarker)
-                ev.post(tap: .cghidEventTap)
-            }
-        }
-    }
 }
