@@ -65,13 +65,28 @@ Caps Lock+j 和 Caps Lock+k **等价**——都只是"进 SCROLL 模式"，**不
 ```
 SCROLL 模式：
     显示 scroll overlay（见 §5）
-    j 按住 → 连续下滚，松开停      （Shift+j 加速）
-    k 按住 → 连续上滚，松开停      （Shift+k 加速）
-    松开 j/k → 停止滚动，**不重扫**，留在 SCROLL
-    数字键 1-9 → 切换选中区域
-    Caps Lock → 切到 TAP 模式（这时才扫描 + 出 hints）
-    Esc → 退出到 OFF
+    j / k 按住 → 连续下/上滚，松开停   （Shift 加速）
+    gg / G     → 跳到选中区域 顶部 / 底部（vim 风格，见 §3.2）
+    s/d/f/e 按住 → 移光标 左/下/右/上   （SDFE 倒 T；Shift 快 / Option 慢，见 §3.3）
+    Enter       → 当前光标位置左键单击，留在 SCROLL（配 SDFE：移→点）
+    数字键 1-9   → 切换选中区域
+    Caps Lock   → 切到 TAP 模式（这时才扫描 + 出 hints）
+    Esc         → 退出到 OFF
 ```
+
+### 3.2 gg / G —— 跳顶 / 跳底
+
+合成一个超大 pixel scroll delta（±200k），app 把它 clamp 在内容边界，效果就是瞬间跳到选中区域的顶/底。`gg` 用 pending-flag 检测连按两个 g（第一个 g 置位，第二个 g 触发；中间按任何别的键则取消——g 单独无操作），`G` = Shift+g 单击即触发。实现见 `ScrollController.jumpToTop/jumpToBottom` + `VimSession.handleScroll` 的 `scrollPendingG`。
+
+### 3.3 SDFE 移光标 + Enter 点击
+
+SCROLL 里也能键盘移光标 + 点击，跟 TAP 的 IJKL+Enter 对称,复用同一套 `MouseMover` / `MouseSynth`。
+
+**移光标键用 SDFE 而非 TAP 的 IJKL**：scroll 里 `j/k` 已是滚动，腾不出 IJKL；SDFE（e 上 / s 左 / d 下 / f 右，倒 T 中心在 d）让左手不离 home row（s/d/f 在无名指/中指/食指 home 位，e 中指上抬），且左手移光标、右手滚动可**双手并行**。三档速度：bare normal / Shift fast / Option slow（精细）。
+
+`Enter` = 当前光标位置左键单击，点完留在 SCROLL（不像 TAP 有 sticky/exit 分派——scroll 里就是连续操作）。
+
+> 两个模式移光标键不同（TAP=IJKL、SCROLL=SDFE）是各自键位约束下的最优（TAP home row 要留给 hint，scroll 不用），暂时接受，日后开放自定义。
 
 ### 3.1 松开 j/k 不自动重扫
 
@@ -153,18 +168,22 @@ scroll?.post(tap: .cghidEventTap)
 | 组件 | 职责 |
 | --- | --- |
 | `HotkeyTap` | F19 armed 状态机 + keyUp + chord 检测；分发到 TAP / SCROLL |
-| `VimSession` | Mode enum 加 `.scroll`；scroll 模式的按键分发 |
+| `VimSession` | Mode enum 加 `.scroll`；scroll 按键分发（j/k 滚、gg/G 跳、SDFE 移、Enter 点、数字切区）|
 | `ScrollAreaDetector` | AX walk 找 AXScrollArea + AXWebArea，返回各自 screen rect |
-| `ScrollOverlay` | 画蓝底数字 label + 高亮边框（类似 HintOverlay 但样式不同）|
-| `ScrollController` | 滚动合成 + 定时器 + 光标 warp + 区域选择状态 |
+| `ScrollOverlay` | 画蓝色光晕边框（Homerow 风）+ 数字 badge 标每个区域 |
+| `ScrollController` | 滚动合成 + 连续定时器 + gg/G 跳顶底 + 光标 warp + 区域选择状态 |
+| `MouseMover` | SDFE 连续移光标（与 TAP 的 IJKL 共用同一套）|
+| `MouseSynth` | Enter 点击合成（与 TAP 共用）|
 
 ## 8. v1 scope
 
-做：
+已做（v1 + 后续迭代）：
 - chord 进入（F19 armed 状态机，TAP 改 keyUp 进入）
 - AXScrollArea + AXWebArea 检测
-- 多区域 overlay（数字 + 边框 + 最近默认）
+- 多区域 overlay（数字 + 光晕边框 + 最近默认）
 - 按住连续滚 + shift 加速
+- **gg / G 跳顶底**（§3.2）
+- **SDFE 移光标**（normal / Shift 快 / Option 慢精细）**+ Enter 点击**（§3.3，复用 TAP 的 MouseMover/MouseSynth）
 - 数字键切区域
 - Caps Lock → TAP，Esc → OFF
 - 松开 j/k 不重扫
@@ -172,7 +191,7 @@ scroll?.post(tap: .cghidEventTap)
 暂不做（defer）：
 - 键盘平移鼠标（认不出区域的兜底）—— 独立大功能，单独做
 - 横向滚动（h/l）—— 用户只要纵向
-- 半页 / 整页 / 顶底跳转（d/u/g/G）—— 先 j/k + shift 加速够用
+- 半页 / 整页（d/u / space）—— 先 j/k + shift + gg/G 够用
 - 平滑动量 / 惯性滚动 —— 先匀速连续
 
 ## 9. 待实现时确认的边角
