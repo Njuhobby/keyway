@@ -157,9 +157,13 @@ final class VimSession {
         // Only Shift may accompany (for fast) — Cmd/Ctrl/Option fall
         // through to the system-shortcut passthrough below.
         if case .tap = m, paletteBuffer == nil,
-           flags.intersection([.maskCommand, .maskControl, .maskAlternate]).isEmpty,
+           flags.intersection([.maskCommand, .maskControl]).isEmpty,
            let dir = Self.moveDirection(for: keyCode) {
-            mover.start(direction: dir, fast: flags.contains(.maskShift))
+            // Shift = fast, Option = slow (precise), bare = normal. Option
+            // is allowed through here (unlike Cmd/Ctrl) because IJKL aren't
+            // hint letters, so Option+IJKL can't collide with the Option =
+            // right-click hint modifier.
+            mover.start(direction: dir, speed: Self.moveSpeed(from: flags))
             return true
         }
 
@@ -232,7 +236,7 @@ final class VimSession {
         // uses IJKL because its home-row a/s/d/f are hint letters; SCROLL
         // has no hints so home row is free.) See modes.md §5.
         if let dir = Self.moveDirectionSDFE(for: keyCode) {
-            mover.start(direction: dir, fast: flags.contains(.maskShift))
+            mover.start(direction: dir, speed: Self.moveSpeed(from: flags))
             return true
         }
 
@@ -263,6 +267,15 @@ final class VimSession {
         case KeyCode.f: return .right
         default: return nil
         }
+    }
+
+    /// Cursor-move speed from modifiers: Option = slow (precise), Shift
+    /// = fast, bare = normal. Option wins if both are held (precision
+    /// intent is stronger). Shared by TAP's IJKL and SCROLL's SDFE.
+    private static func moveSpeed(from flags: CGEventFlags) -> MouseMover.Speed {
+        if flags.contains(.maskAlternate) { return .slow }
+        if flags.contains(.maskShift) { return .fast }
+        return .normal
     }
 
     /// Key release handler — routed from HotkeyTap. j/k release stops the
