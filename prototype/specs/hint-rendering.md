@@ -10,9 +10,9 @@
 
 `HintMode.alphabet`：
 ```swift
-static let alphabet: [Character] = ["a","s","d","f","g","h","e","r","u"]
+static let alphabet: [Character] = ["a","s","d","f","g","e","r","u","i"]
 ```
-9 个字母。**不含 i/j/k/l**——它们在 TAP 里是 IJKL 移光标键，裸按一定是"移动"，不能再当 hint 标签（见 `modes.md` §4）。移除 home row 的 j/k/l 后补 e/r/u 凑回 9 个。
+9 个字母。**不含 h/j/k/l**——它们在 TAP 和 SCROLL 里都是 hjkl 移光标键，裸按一定是"移动"，不能再当 hint 标签（见 `modes.md` §4）。移除 home row 的 h/j/k/l 后补 e/r/u/i 凑回 9 个 → `a s d f g e r u i`。
 
 **字母组**（焦点 app + menu extras 共享），同一次扫描内所有标签**等长**——混长度会前缀冲突（"aa" 是 "aaa" 的前缀，用户输 "aa" 会卡住等第三字符）：
 - count ≤ 9：单字母

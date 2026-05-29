@@ -103,7 +103,7 @@ NSApplication
 
 1. **HotkeyTap** 是唯一事件入口。注册 `CGEvent.tapCreate` 监听 `keyDown` + `keyUp` + `flagsChanged`。
    每个事件先检查 `eventSourceUserData == "MOUS"` —— 我们自己合成的直接放行（避免反馈环）。
-2. **F19（= Caps Lock）走 arm 机制，任何 mode 都适用**：按下不立即动作（arm）；松手时若期间没按 chord → `session.handleTriggerTap()`（按当前 mode 分派：OFF→进 TAP / TAP→切 sticky / SCROLL→切 TAP / palette→关）；arm 期间按 j/k → `session.enterScroll()`。详见 `modes.md` §2.1。
+2. **F19（= Caps Lock）走 arm 机制，任何 mode 都适用**：按下不立即动作（arm）；松手时若期间没按 chord → `session.handleTriggerTap()`（按当前 mode 分派：OFF→进 TAP / TAP→切 sticky / SCROLL→切 TAP / palette→关）；arm 期间按 d → `session.enterScroll()`。详见 `modes.md` §2.1。
 3. **其他键**在已激活时交给 `VimSession.handle()`。返回 `true` = 消费，`false` = 放行（让 Cmd+Space / Cmd+Tab 等系统快捷键继续工作）。
 4. `VimSession` 按 mode（`.tap` / `.scroll`）和 palette 状态分发；mode 内部决定 hint / 移光标 / 滚动 / 退出。
 5. 提交点击**统一合成 mouse event**（AX 语义动作 AXPress/AXShowMenu 已弃用——不可靠，见 `hint-rendering.md` §3）。
@@ -136,7 +136,7 @@ NSApplication
 
 | 文件 | 职责 |
 | --- | --- |
-| `MouseMover.swift` | TAP 内 IJKL 连续移光标（60fps timer 合成 `.mouseMoved`，Shift 加速） |
+| `MouseMover.swift` | hjkl 连续移光标，**TAP + SCROLL 共用**（60fps timer 合成 `.mouseMoved`，Shift 快 / Option 慢） |
 | `ScrollController.swift` | SCROLL 模式滚动合成 + 连续 + 加速 + 区域选择 + 光标 warp |
 | `ScrollAreaDetector.swift` | AX-walk 焦点窗口找 `AXScrollArea`/`AXWebArea`（不依赖 OP 路由）|
 | `ScrollOverlay.swift` | 滚动区域 picker：蓝色光晕边框 + 数字标记 |
@@ -166,8 +166,8 @@ NSApplication
 | 文档 | 内容 |
 | --- | --- |
 | [`specs/event-pipeline.md`](specs/event-pipeline.md) | HotkeyTap 注册、callback 三层 short-circuit、反馈环 `"MOUS"` 标记、修饰键透传策略（Cmd/Ctrl 放行，Shift/Option 消费） |
-| [`specs/modes.md`](specs/modes.md) | Mode 状态机（`.tap`/`.scroll`）、F19 arm 机制、palette、sticky、IJKL 移光标 + x 点击、**所有键位表**、KeyCode 常量、新 mode 接入 |
-| [`specs/scroll-mode-design.md`](specs/scroll-mode-design.md) | **SCROLL 模式完整设计**：chord 进入、AXScrollArea/AXWebArea 检测、多区域 picker、滚动合成、gg/G 跳顶底、SDFE 移光标 + Enter 点击、零-AX Electron 限制 |
+| [`specs/modes.md`](specs/modes.md) | Mode 状态机（`.tap`/`.scroll`）、F19 arm 机制、palette、sticky、hjkl 移光标（TAP+SCROLL 统一）+ Enter 点击、**所有键位表**、KeyCode 常量、新 mode 接入 |
+| [`specs/scroll-mode-design.md`](specs/scroll-mode-design.md) | **SCROLL 模式完整设计**：chord 进入（Caps Lock + d）、AXScrollArea/AXWebArea 检测、多区域 picker、d/u 滚动合成、gg/G 跳顶底、hjkl 移光标 + Enter 点击、零-AX Electron 限制 |
 | [`specs/hint-discovery.md`](specs/hint-discovery.md) | AX 三源（focused / Dock / menu extras）、`walk()` 收录条件、屏幕并集计算、**menu extras 踩坑史 + `MenuExtraCache` 设计**、并发安全 |
 | [`specs/hint-rendering.md`](specs/hint-rendering.md) | 标签生成、typing → commit、**统一合成点击**（AX action 已弃）、`HintOverlay` 多屏窗口、坐标系转换、badge 排版（inside / Dock / 级联）、HUD |
 | [`specs/omniparser-fallback-design.md`](specs/omniparser-fallback-design.md) | **已实现 (P5-P6)**：OP 视觉路径，OP-default + AX whitelist 路由（非 fall-through）；baseline 过滤；OCR click-point refiner（§4.6）；PoC 数据；captioner 搁置 |
@@ -185,8 +185,8 @@ NSApplication
 | Menu bar fast path | AXMenuBar 上读一次 `AXSelectedChildren`；空则不下钻 | 99% 时刻菜单栏没展开，跳过 N×4 个 axMenuIsOpen 探针 |
 | Menu extras 发现 | 后台 PID cache + NSWorkspace 增量 | 触发期 < 30ms；预热成本对用户透明 |
 | 点击实现 | **统一合成 mouse event**（不用 AX 动作） | AX 动作（AXPress/AXShowMenu）在 NSBrowser cell / 自定义 view / Electron 上常静默失败；合成点击行为可预测，跟用户心智一致 |
-| `x` 手势 | 当前光标位置合成左键单击 | 跟 IJKL 移光标配套（移→点闭环）；取代了旧的"关菜单+重扫"手势 |
-| 移光标 / 滚动用裸键不用 Ctrl | IJKL 移光标、jk 滚动 | power user（HHKB）常把 Ctrl+hjkl 系统级映射成方向键，会冲突 |
+| `Enter` 点击 | 当前光标位置合成点击（Shift 双击 / Option 右键） | 跟 hjkl 移光标配套（移→点闭环）；取代了旧的 `x`"关菜单+重扫"手势 |
+| 移光标 / 滚动用裸键不用 Ctrl | hjkl 移光标（TAP+SCROLL 统一）、d/u 滚动 | power user（HHKB）常把 Ctrl+hjkl 系统级映射成方向键，会冲突 |
 | 焦点窗口 hint 路由 | AX whitelist → AX walk；其余 → OmniParser | 框架 ≠ AX 质量（WeChat 是 native 但 AX 黑洞）；OP 对所有 app 都 work 且 ~95ms 不比 AX walk 慢 |
 | 滚动区检测 | 只用 AX（`AXScrollArea`/`AXWebArea`），不用 OP | 滚动区是容器无视觉特征，OP 识别不了；结构 AX 即使内容 AX 烂也可靠 |
 | Overlay 数量 | 每屏一个窗口 | 单窗口跨屏 macOS 渲染不可靠 |

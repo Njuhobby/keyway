@@ -74,7 +74,7 @@ if event.getIntegerValueField(.eventSourceUserData) == Self.syntheticMarker {
 ```swift
 if type == .keyUp {
     // F19 release resolves the arm（见 §3）；其他键的 keyUp 路由给
-    // session（scroll / IJKL move 的 stop）。
+    // session（scroll / hjkl move 的 stop）。
     ...
 }
 guard type == .keyDown else { return passUnretained(event) }
@@ -113,7 +113,7 @@ if keyCode == KeyCode.f19, f19Armed {
 }
 ```
 
-**arm 覆盖所有 mode，不只 OFF**——这是"TAP 内 Caps Lock+jk 也能进 SCROLL"和"连续 Caps Lock 进 sticky"的根（旧实现 arm 只在 OFF，导致这两个失效，见该 commit）。
+**arm 覆盖所有 mode，不只 OFF**——这是"TAP 内 Caps Lock+d 也能进 SCROLL"和"连续 Caps Lock 进 sticky"的根（旧实现 arm 只在 OFF，导致这两个失效，见该 commit）。
 
 **bare F19**（无任何修饰键）才 arm。F19 不是物理键盘上真实存在的键——靠 `hidutil` 把物理 **Caps Lock** 重映射成 F19，**由 app 在启动时自动调用** `TriggerRemap.applyAtLaunch()`（见 `SPECS.md` §2.1）。用户零配置。
 
