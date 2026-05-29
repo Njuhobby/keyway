@@ -44,11 +44,11 @@ final class HintMode {
     private var typed: String = ""
     private var isActiveFlag = false
 
-    // j/k/l are reserved as IJKL cursor-move keys in TAP mode (with i),
-    // so they can't be hint labels — otherwise a bare j would be
-    // ambiguous (move? or hint?). Dropped j/k/l, kept h, backfilled
-    // e/r/u to keep a 9-key pool (home-row-adjacent, easy reach).
-    static let alphabet: [Character] = ["a","s","d","f","g","h","e","r","u"]
+    // h/j/k/l are the unified cursor-move keys (vim hjkl) in TAP *and*
+    // SCROLL, so they can't be hint labels — a bare j would be ambiguous
+    // (move? or hint?). Dropped h/j/k/l; backfilled e/r/u/i for a 9-key
+    // pool (move is unified on hjkl across modes).
+    static let alphabet: [Character] = ["a","s","d","f","g","e","r","u","i"]
 
     /// Roles we always treat as clickable, even if AXPress isn't advertised.
     private static let clickableRoles: Set<String> = [

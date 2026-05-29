@@ -12,14 +12,14 @@ final class HotkeyTap {
     private var tap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
 
-    /// F19 (= remapped Caps Lock) chord/tap disambiguation, used only in
-    /// the OFF state. Bare F19 keyDown *arms* instead of immediately
-    /// entering TAP — we wait for the F19 keyUp. If a j/k arrives while
-    /// armed, it's a scroll chord (Caps Lock + j/k → SCROLL) and we set
-    /// chordUsed so the eventual F19 keyUp does NOT also enter TAP.
-    /// Deferring TAP to keyUp costs ~50ms (the hold duration of a tap,
-    /// imperceptible) but lets the scroll chord skip the TAP scan
-    /// entirely. See `specs/scroll-mode-design.md` §2.1.
+    /// F19 (= remapped Caps Lock) chord/tap disambiguation, in ALL modes.
+    /// Bare F19 keyDown *arms* instead of acting immediately — we wait
+    /// for the F19 keyUp. If a `d` arrives while armed, it's the scroll
+    /// chord (Caps Lock + d → SCROLL) and we set chordUsed so the
+    /// eventual F19 keyUp does NOT also fire the per-mode tap action
+    /// (enter TAP / toggle sticky / SCROLL→TAP). Deferring to keyUp costs
+    /// ~50ms (imperceptible) but lets the chord pre-empt the tap.
+    /// See `specs/scroll-mode-design.md` §2.1.
     private var f19Armed = false
     private var f19ChordUsed = false
 
@@ -114,9 +114,11 @@ final class HotkeyTap {
             f19ChordUsed = false
             return nil
         }
-        // F19 held + j/k → SCROLL chord, from any mode. Synchronous
-        // (cheap AX scroll-area walk); consume the chord key.
-        if f19Armed && (keyCode == KeyCode.j || keyCode == KeyCode.k) {
+        // F19 held + d → SCROLL chord, from any mode. (d as in "down /
+        // scroll"; matches SCROLL's d-to-scroll-down key. Not j/k —
+        // those are unified cursor-move keys now.) Synchronous (cheap AX
+        // scroll-area walk); consume the chord key.
+        if f19Armed && keyCode == KeyCode.d {
             f19ChordUsed = true
             session.enterScroll()
             return nil

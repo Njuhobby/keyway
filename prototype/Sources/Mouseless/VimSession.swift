@@ -20,7 +20,7 @@ final class VimSession {
     private var mode: Mode? = nil
     private var paletteBuffer: String? = nil   // nil = palette closed
     private var sticky: Bool = false           // toggled by trigger key in TAP
-    private let mover = MouseMover()            // Ctrl+hjkl cursor move in TAP
+    private let mover = MouseMover()            // hjkl cursor move (TAP + SCROLL)
     private var rehintGeneration = 0           // supersede in-flight re-hints
     private let focusWatcher = FocusChangeWatcher()  // post-click focus change
     private var scrollPendingG = false         // first 'g' of a gg (SCROLL)
@@ -58,7 +58,7 @@ final class VimSession {
         }
     }
 
-    /// Chord (Caps Lock + j/k) → enter SCROLL mode from ANY mode. No
+    /// Chord (Caps Lock + d) → enter SCROLL mode from ANY mode. No
     /// hint scan — scroll is independent of hints. Synchronous: the AX
     /// scroll-area walk runs inline (cheap, ~few ms). See
     /// `specs/scroll-mode-design.md`.
@@ -193,21 +193,19 @@ final class VimSession {
     func handle(keyCode: Int, flags: CGEventFlags) -> Bool {
         guard let m = mode else { return false }
 
-        // Bare i/j/k/l in TAP mode = move the cursor, IJKL inverted-T
-        // (i up, j left, k down, l right — game-style WASD). Shift =
-        // fast. Not Ctrl: power users (e.g. HHKB) often remap Ctrl+hjkl
-        // to arrows at the system level, so Ctrl is unusable here. These
-        // four keys are excluded from the hint-label pool (see
+        // Bare h/j/k/l in TAP mode = move the cursor, vim hjkl (h left,
+        // j down, k up, l right). Same move keys as SCROLL — unified so
+        // the user doesn't switch mental models between modes. These
+        // four are excluded from the hint-label pool (see
         // HintMode.alphabet) so a bare press is unambiguously "move".
-        // Pairs with `x` (click at cursor): ijkl to aim, x to click.
-        // Only Shift may accompany (for fast) — Cmd/Ctrl/Option fall
-        // through to the system-shortcut passthrough below.
+        // Pairs with Enter (click at cursor): hjkl to aim, Enter to
+        // click. Shift = fast, Option = slow; Cmd/Ctrl fall through to
+        // the system-shortcut passthrough below.
         if case .tap = m, paletteBuffer == nil,
            flags.intersection([.maskCommand, .maskControl]).isEmpty,
            let dir = Self.moveDirection(for: keyCode) {
-            // Shift = fast, Option = slow (precise), bare = normal. Option
-            // is allowed through here (unlike Cmd/Ctrl) because IJKL aren't
-            // hint letters, so Option+IJKL can't collide with the Option =
+            // Option allowed through (unlike Cmd/Ctrl) because hjkl aren't
+            // hint letters, so Option+hjkl can't collide with the Option =
             // right-click hint modifier.
             mover.start(direction: dir, speed: Self.moveSpeed(from: flags))
             return true
@@ -283,38 +281,30 @@ final class VimSession {
             return true
         }
 
-        // j / k → start continuous scroll down / up. Shift = fast.
-        // Held-key OS repeats just refresh direction/speed (idempotent).
-        if keyCode == KeyCode.j {
+        // d / u → start continuous scroll down / up. Shift = fast.
+        // (Not j/k — those are unified cursor-move keys now; SCROLL
+        // scrolls with d/u, the same letters as the Caps Lock+d entry
+        // chord.) Held-key OS repeats just refresh direction/speed.
+        if keyCode == KeyCode.d {
             controller.start(directionDown: true, fast: flags.contains(.maskShift))
             return true
         }
-        if keyCode == KeyCode.k {
+        if keyCode == KeyCode.u {
             controller.start(directionDown: false, fast: flags.contains(.maskShift))
             return true
         }
 
-        // s/d/f/e → move the cursor (Shift = fast). SCROLL uses SDFE
-        // (e up, s left, d down, f right — inverted-T centered on d),
-        // not IJKL: j/k are taken by scrolling here. SDFE keeps the left
-        // hand on home row (s/d/f under ring/middle/index, e is a middle-
-        // finger reach up) — no leftward stretch to 'a' like WASD. Left
-        // hand moves, right hand scrolls — they run in parallel. (TAP
-        // uses IJKL because its home-row a/s/d/f are hint letters; SCROLL
-        // has no hints so home row is free.) See modes.md §5.
-        //
-        // Bare keys deliberately, not arrows: a user who maps Ctrl+hjkl
-        // → arrows at the system level can't reliably add Shift/Option
-        // (the mapping breaks), so arrows fight that setup. Bare SDFE
-        // bypasses any such mapping; Shift/Option read directly here.
-        if let dir = Self.moveDirectionSDFE(for: keyCode) {
+        // h/j/k/l → move the cursor (Shift fast / Option slow) — SAME
+        // keys as TAP (unified, vim hjkl). j/k are free for move here
+        // because SCROLL scrolls with d/u.
+        if let dir = Self.moveDirection(for: keyCode) {
             mover.start(direction: dir, speed: Self.moveSpeed(from: flags))
             return true
         }
 
         // Enter → click at the current cursor position, stay in SCROLL.
         // Modifier picks the kind: bare single-left / Shift double /
-        // Option right. Pairs with SDFE: move the cursor, Enter to click.
+        // Option right. Pairs with hjkl: move the cursor, Enter to click.
         if keyCode == KeyCode.return {
             let (button, count) = Self.clickKind(from: flags)
             MouseSynth.click(at: MouseSynth.cursorPosition(), button: button, count: count)
@@ -332,19 +322,9 @@ final class VimSession {
         return true
     }
 
-    private static func moveDirectionSDFE(for keyCode: Int) -> MouseMover.Direction? {
-        switch keyCode {
-        case KeyCode.e: return .up
-        case KeyCode.s: return .left
-        case KeyCode.d: return .down
-        case KeyCode.f: return .right
-        default: return nil
-        }
-    }
-
     /// Cursor-move speed from modifiers: Option = slow (precise), Shift
     /// = fast, bare = normal. Option wins if both are held (precision
-    /// intent is stronger). Shared by TAP's IJKL and SCROLL's SDFE.
+    /// intent is stronger). Shared by TAP and SCROLL (both use hjkl).
     private static func moveSpeed(from flags: CGEventFlags) -> MouseMover.Speed {
         if flags.contains(.maskAlternate) { return .slow }
         if flags.contains(.maskShift) { return .fast }
@@ -360,26 +340,23 @@ final class VimSession {
         return (.left, 1)                                         // single
     }
 
-    /// Key release handler — routed from HotkeyTap. j/k release stops the
-    /// continuous scroll. (The chord's own j/k keyUp also lands here and
-    /// harmlessly stops a timer that was never started.)
+    /// Key release handler — routed from HotkeyTap.
     func handleKeyUp(keyCode: Int) -> Bool {
         if case .scroll(let controller) = mode {
-            if keyCode == KeyCode.j || keyCode == KeyCode.k {
-                controller.stop()       // stop continuous scroll
+            if keyCode == KeyCode.d || keyCode == KeyCode.u {
+                controller.stop()           // stop continuous scroll
                 return true
             }
-            if Self.moveDirectionSDFE(for: keyCode) != nil {
-                mover.stop()            // stop continuous cursor move
+            if Self.moveDirection(for: keyCode) != nil {
+                mover.stop()                // stop continuous cursor move (hjkl)
                 return true
             }
             return false
         }
         if case .tap = mode {
-            // i/j/k/l release stops cursor movement. These aren't hint
+            // hjkl release stops cursor movement. These aren't hint
             // chars, so always consume their release while in TAP.
-            if keyCode == KeyCode.i || keyCode == KeyCode.j
-                || keyCode == KeyCode.k || keyCode == KeyCode.l {
+            if Self.moveDirection(for: keyCode) != nil {
                 mover.stop()
                 return true
             }
@@ -388,11 +365,12 @@ final class VimSession {
         return false
     }
 
+    /// Unified cursor-move keys (vim hjkl), TAP and SCROLL alike.
     private static func moveDirection(for keyCode: Int) -> MouseMover.Direction? {
         switch keyCode {
-        case KeyCode.i: return .up
-        case KeyCode.j: return .left
-        case KeyCode.k: return .down
+        case KeyCode.h: return .left
+        case KeyCode.j: return .down
+        case KeyCode.k: return .up
         case KeyCode.l: return .right
         default: return nil
         }
@@ -426,7 +404,7 @@ final class VimSession {
 
         // Enter — click at the current cursor position. Modifier picks
         // the click kind, same mapping as hint commits: bare = single
-        // left, Shift = double, Option = right. Pairs with IJKL move:
+        // left, Shift = double, Option = right. Pairs with hjkl move:
         // move the cursor, Enter to click. (Cmd/Ctrl+Enter already
         // passed through up top; palette's Enter is intercepted earlier;
         // hint labels are letters/digits so Enter never collides.)
@@ -583,12 +561,12 @@ final class VimSession {
         case KeyCode.d: return "d"
         case KeyCode.f: return "f"
         case KeyCode.g: return "g"
-        case KeyCode.h: return "h"
-        // i/j/k/l are IJKL cursor-move keys, not hint chars. e/r/u
+        // h/j/k/l are hjkl cursor-move keys, not hint chars. e/r/u/i
         // backfill the pool (must match HintMode.alphabet).
         case KeyCode.e: return "e"
         case KeyCode.r: return "r"
         case KeyCode.u: return "u"
+        case KeyCode.i: return "i"
         case 18: return "1"
         case 19: return "2"
         case 20: return "3"
