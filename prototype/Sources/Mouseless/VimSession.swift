@@ -311,11 +311,12 @@ final class VimSession {
             return true
         }
 
-        // Enter → left click at the current cursor position, stay in
-        // SCROLL. Pairs with SDFE: move the cursor, Enter to click. Bare.
-        if keyCode == KeyCode.return,
-           flags.intersection([.maskShift, .maskControl, .maskCommand, .maskAlternate]).isEmpty {
-            MouseSynth.click(at: MouseSynth.cursorPosition(), button: .left, count: 1)
+        // Enter → click at the current cursor position, stay in SCROLL.
+        // Modifier picks the kind: bare single-left / Shift double /
+        // Option right. Pairs with SDFE: move the cursor, Enter to click.
+        if keyCode == KeyCode.return {
+            let (button, count) = Self.clickKind(from: flags)
+            MouseSynth.click(at: MouseSynth.cursorPosition(), button: button, count: count)
             return true
         }
 
@@ -347,6 +348,15 @@ final class VimSession {
         if flags.contains(.maskAlternate) { return .slow }
         if flags.contains(.maskShift) { return .fast }
         return .normal
+    }
+
+    /// (button, count) for an Enter cursor-click from modifiers — same
+    /// mapping as hint commits: Shift = double-left, Option = right,
+    /// bare = single-left. Shift wins if both held. Shared by TAP/SCROLL.
+    private static func clickKind(from flags: CGEventFlags) -> (CGMouseButton, Int) {
+        if flags.contains(.maskShift) { return (.left, 2) }       // double
+        if flags.contains(.maskAlternate) { return (.right, 1) }  // right
+        return (.left, 1)                                         // single
     }
 
     /// Key release handler — routed from HotkeyTap. j/k release stops the
@@ -413,18 +423,19 @@ final class VimSession {
         let modMask: CGEventFlags = [.maskShift, .maskControl,
                                      .maskCommand, .maskAlternate]
 
-        // Bare Enter — single left click at the current cursor position.
-        // Enter reads as "confirm/click" and pairs with IJKL move: move
-        // the cursor, Enter to click there. (Was `x`; Enter is more
-        // intuitive. Enter is safe to consume here — in palette it means
-        // "run command" but palette intercepts before this, and hint
-        // labels are letters/digits so Enter never collides.)
+        // Enter — click at the current cursor position. Modifier picks
+        // the click kind, same mapping as hint commits: bare = single
+        // left, Shift = double, Option = right. Pairs with IJKL move:
+        // move the cursor, Enter to click. (Cmd/Ctrl+Enter already
+        // passed through up top; palette's Enter is intercepted earlier;
+        // hint labels are letters/digits so Enter never collides.)
         //
         // After-click behavior mirrors a hint commit: sticky → rescan +
         // stay in TAP; otherwise → exit to OFF.
-        if keyCode == KeyCode.return && flags.intersection(modMask).isEmpty {
+        if keyCode == KeyCode.return {
             hint.deactivate()
-            MouseSynth.click(at: MouseSynth.cursorPosition(), button: .left, count: 1)
+            let (button, count) = Self.clickKind(from: flags)
+            MouseSynth.click(at: MouseSynth.cursorPosition(), button: button, count: count)
             if sticky {
                 rehintSticky()
                 scheduleFocusRecheck()
