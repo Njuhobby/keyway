@@ -69,6 +69,7 @@ final class VimSession {
         mode = .scroll(controller)
         paletteBuffer = nil
         sticky = false
+        renderModeHUD()   // show "SCROLL" (was stuck on "TAP" when chorded from TAP)
         print("[mouseless] enter SCROLL mode")
     }
 
