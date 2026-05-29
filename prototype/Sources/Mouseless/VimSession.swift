@@ -301,6 +301,11 @@ final class VimSession {
         // hand moves, right hand scrolls — they run in parallel. (TAP
         // uses IJKL because its home-row a/s/d/f are hint letters; SCROLL
         // has no hints so home row is free.) See modes.md §5.
+        //
+        // Bare keys deliberately, not arrows: a user who maps Ctrl+hjkl
+        // → arrows at the system level can't reliably add Shift/Option
+        // (the mapping breaks), so arrows fight that setup. Bare SDFE
+        // bypasses any such mapping; Shift/Option read directly here.
         if let dir = Self.moveDirectionSDFE(for: keyCode) {
             mover.start(direction: dir, speed: Self.moveSpeed(from: flags))
             return true
