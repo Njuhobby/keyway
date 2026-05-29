@@ -10,14 +10,16 @@
 
 `HintMode.alphabet`：
 ```swift
-static let alphabet: [Character] = ["a","s","d","f","g","e","r","u","i"]
+static let alphabet: [Character] = [
+    "a","s","d","f","g","e","r","u","i","o","p","w","t","n","m","c",
+]
 ```
-9 个字母。**不含 h/j/k/l**——它们在 TAP 和 SCROLL 里都是 hjkl 移光标键，裸按一定是"移动"，不能再当 hint 标签（见 `modes.md` §4）。移除 home row 的 h/j/k/l 后补 e/r/u/i 凑回 9 个 → `a s d f g e r u i`。
+16 个字母。**不含 h/j/k/l**——它们在 TAP 和 SCROLL 里都是 hjkl 移光标键，裸按一定是"移动"，不能再当 hint 标签（见 `modes.md` §4）。除 hjkl 外其它顺手的字母都纳入，**取 16 个让 2 字母 label 封顶**（见下）。顺序按手感前置（左手 home row `a s d f g` 在前），因为单字母 label 用 `prefix` 取前缀、最短 label 最快 commit。
 
 **字母组**（焦点 app + menu extras 共享），同一次扫描内所有标签**等长**——混长度会前缀冲突（"aa" 是 "aaa" 的前缀，用户输 "aa" 会卡住等第三字符）：
-- count ≤ 9：单字母
-- 10–81：两字母（9 × 9）
-- 82+：三字母（9³ = 729，远超 `maxTargets`）
+- count ≤ 16：单字母
+- 17–256：两字母（16 × 16）
+- 257+：三字母——**实际不可达**：`maxTargets` 是 200 < 256，所以任何一次扫描都落在 ≤2 字母。三字母分支只作 pool/cap 变动时的安全网。
 
 **数字组**（Dock 独享）：
 - count ≤ 10：单字符 `0, 1, ..., 9`

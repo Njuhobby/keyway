@@ -22,7 +22,8 @@ final class VimSession {
     private var sticky: Bool = false           // toggled by trigger key in TAP
     private let mover = MouseMover()            // hjkl cursor move (TAP + SCROLL)
     private var rehintGeneration = 0           // supersede in-flight re-hints
-    private let focusWatcher = FocusChangeWatcher()  // post-click focus change
+    private let commitWatcher = PostCommitWatcher()  // post-click focus + content change
+    private var pendingStickyRehint: DispatchWorkItem?  // OP-route delayed re-hint
     private var scrollPendingG = false         // first 'g' of a gg (SCROLL)
 
     var isActive: Bool { mode != nil }
@@ -88,6 +89,7 @@ final class VimSession {
         sticky = false
         print("[mouseless] enter TAP mode")
         logFocusedAppRouting()
+        startAppSwitchFollow()   // acts only while sticky (gated in callback)
 
         Task { @MainActor in
             // Guard against the mode changing out from under us during
@@ -106,7 +108,10 @@ final class VimSession {
     /// hints) and reset to OFF. Used when switching modes.
     private func teardownCurrentMode() {
         mover.stop()
-        focusWatcher.stop()
+        commitWatcher.stop()
+        stopAppSwitchFollow()
+        pendingStickyRehint?.cancel()
+        pendingStickyRehint = nil
         scrollPendingG = false
         if case .tap(let h) = mode { h.deactivate() }
         if case .scroll(let c) = mode { c.teardown() }
@@ -137,17 +142,99 @@ final class VimSession {
         }
     }
 
-    /// A sticky commit's click may open a new window / switch app
-    /// **asynchronously** — the immediate re-hint then scanned the old
-    /// (still-focused) window. Watch for a focused-window change
-    /// (notification-driven, see FocusChangeWatcher); if it fires, re-
-    /// hint again to catch the new window. No change within the timeout
-    /// → the immediate re-hint was already correct (synchronous UI
-    /// update, or a plain click). See discussion in modes.md §4.2.
-    private func scheduleFocusRecheck() {
+    /// Kick off the post-commit sticky re-hint. **Timing depends on the
+    /// route:**
+    ///   - AX-whitelisted app → re-hint immediately. Synchronous UI
+    ///     updates are caught now; async ones by `PostCommitWatcher`
+    ///     (AX change notifications fire for these apps).
+    ///   - OmniParser app (webview / Electron / etc.) → delay ~100ms. The
+    ///     click's effect is async AND these apps emit **no AX change
+    ///     notifications** (that's *why* they're on the OP route), so the
+    ///     watcher can't fire for a same-window content change. Re-hinting
+    ///     immediately would screenshot the pre-click frame. The short
+    ///     delay lets the click land + content settle before we
+    ///     re-capture + re-run OP. Tunable — bump if a slow webview still
+    ///     re-hints stale. A second commit during the wait cancels the
+    ///     pending item (latest click wins).
+    private func scheduleStickyRehint() {
+        pendingStickyRehint?.cancel()
+        pendingStickyRehint = nil
+        guard focusedAppUsesOP() else {
+            rehintSticky()   // AX route — immediate; watcher corrects async
+            return
+        }
+        let item = DispatchWorkItem { [weak self] in
+            guard let self, self.isActive, self.sticky else { return }
+            self.rehintSticky()
+        }
+        pendingStickyRehint = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: item)
+    }
+
+    /// Does the focused app route to OmniParser (vs AX walk)? OP-routed
+    /// apps emit no AX change notifications, so we can't rely on
+    /// `PostCommitWatcher` for their same-window content changes — hence
+    /// the delayed re-hint above. Unknown app → treat as OP (the default
+    /// route).
+    private func focusedAppUsesOP() -> Bool {
+        guard let (_, pid) = FocusedApp.current(),
+              let bundleID = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
+        else { return true }
+        return !AppRegistry.shouldUseAXForFocused(bundleID: bundleID)
+    }
+
+    /// A sticky commit's click can change the UI **asynchronously**, and
+    /// the immediate `rehintSticky()` runs before the click is even
+    /// processed — so it scans the OLD tree. Two flavors of change:
+    ///   - new window / app switch (focus change), and
+    ///   - same-window content (list selection → detail pane reload,
+    ///     disclosure, in-place navigation).
+    /// `PostCommitWatcher` listens (notification-driven) for both; when a
+    /// change settles it re-hints against fresh content. No change within
+    /// the timeout → the immediate re-hint was already correct (static
+    /// content / plain click). See modes.md §4.2.
+    private func schedulePostCommitRecheck() {
         guard let (_, pid) = FocusedApp.current() else { return }
-        focusWatcher.start(pid: pid, timeoutMs: 400) { [weak self] in
-            self?.rehintSticky()   // new window / app → re-scan it
+        commitWatcher.start(pid: pid, timeoutMs: 700) { [weak self] in
+            self?.rehintSticky()   // fresh window OR fresh same-window content
+        }
+    }
+
+    // MARK: - App-switch follow (sticky only)
+
+    /// While in **sticky** TAP, follow app switches: a Cmd+Tab (or any
+    /// click that activates another app) makes the current hint overlay
+    /// stale — it's drawn for the old app at the old coordinates. Re-hint
+    /// the newly-frontmost app so sticky hints follow focus instead of
+    /// leaving a frozen overlay.
+    ///
+    /// App activation is the one focus signal reliable for **all** apps
+    /// (NSWorkspace, AX-independent), so unlike same-app content changes —
+    /// which `PostCommitWatcher` only watches for 700ms post-commit
+    /// because they're noisy — this one runs the whole TAP session. The
+    /// callback gates on `sticky`, so non-sticky TAP (one-shot, no point
+    /// following) is unaffected. Started in `enter()`, stopped in
+    /// `exit()` / `teardownCurrentMode()`.
+    private var appSwitchToken: NSObjectProtocol?
+
+    private func startAppSwitchFollow() {
+        guard appSwitchToken == nil else { return }
+        appSwitchToken = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, case .tap = self.mode, self.sticky else { return }
+                print("[mouseless] app switch in sticky TAP → re-hint new app")
+                self.scheduleStickyRehint()   // routes by the NEW app (AX now / OP +100ms)
+            }
+        }
+    }
+
+    private func stopAppSwitchFollow() {
+        if let token = appSwitchToken {
+            NSWorkspace.shared.notificationCenter.removeObserver(token)
+            appSwitchToken = nil
         }
     }
 
@@ -172,7 +259,10 @@ final class VimSession {
 
     func exit() {
         mover.stop()
-        focusWatcher.stop()
+        commitWatcher.stop()
+        stopAppSwitchFollow()
+        pendingStickyRehint?.cancel()
+        pendingStickyRehint = nil
         scrollPendingG = false
         if case .tap(let h) = mode {
             h.deactivate()
@@ -416,8 +506,8 @@ final class VimSession {
             let (button, count) = Self.clickKind(from: flags)
             MouseSynth.click(at: MouseSynth.cursorPosition(), button: button, count: count)
             if sticky {
-                rehintSticky()
-                scheduleFocusRecheck()
+                scheduleStickyRehint()
+                schedulePostCommitRecheck()
             } else {
                 exit()
             }
@@ -454,11 +544,13 @@ final class VimSession {
             break   // .ignored = misfire, swallowed; stay in TAP
         case .committed:
             if sticky {
-                // Re-scan and stay in TAP. Immediate re-hint covers
-                // synchronous UI updates (most native controls); the
-                // focus recheck catches an async new window / app switch.
-                rehintSticky()
-                scheduleFocusRecheck()
+                // Re-scan and stay in TAP. AX apps re-hint immediately
+                // (watcher corrects async changes); OP apps delay ~100ms
+                // for the click to land (no AX events to wait on). See
+                // scheduleStickyRehint. The post-commit watcher also
+                // catches new-window / app-switch on either route.
+                scheduleStickyRehint()
+                schedulePostCommitRecheck()
             } else {
                 exit()
             }
@@ -561,12 +653,19 @@ final class VimSession {
         case KeyCode.d: return "d"
         case KeyCode.f: return "f"
         case KeyCode.g: return "g"
-        // h/j/k/l are hjkl cursor-move keys, not hint chars. e/r/u/i
-        // backfill the pool (must match HintMode.alphabet).
+        // h/j/k/l are hjkl cursor-move keys, not hint chars. The rest of
+        // the pool backfills around them (must match HintMode.alphabet).
         case KeyCode.e: return "e"
         case KeyCode.r: return "r"
         case KeyCode.u: return "u"
         case KeyCode.i: return "i"
+        case KeyCode.o: return "o"
+        case KeyCode.p: return "p"
+        case KeyCode.w: return "w"
+        case KeyCode.t: return "t"
+        case KeyCode.n: return "n"
+        case KeyCode.m: return "m"
+        case KeyCode.c: return "c"
         case 18: return "1"
         case 19: return "2"
         case 20: return "3"
