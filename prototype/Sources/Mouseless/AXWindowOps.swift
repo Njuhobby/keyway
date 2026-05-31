@@ -41,11 +41,38 @@ enum AXWindowOps {
 
     /// True only if **both** `AXSize` and `AXPosition` are writable on
     /// this window — that's what direct AX resize needs (top/left edge
-    /// expansion changes both). One settable, the other not = no AX
-    /// path. Caller falls back to synth mouse drag in that case.
+    /// expansion changes both).
     static func isResizable(_ window: AXUIElement) -> Bool {
         return isSettable(window, attribute: "AXSize")
             && isSettable(window, attribute: "AXPosition")
+    }
+
+    /// True if the window exposes any of the standard title-bar buttons
+    /// (close / minimize / zoom / fullscreen). Used as the "is this a
+    /// real user window?" gate at WINDOW-mode entry:
+    ///
+    ///   - **Finder Desktop** (when no Finder window is open,
+    ///     `AXFocusedWindow` returns the Desktop) has none of these
+    ///     buttons and isn't user-resizable. Rejected.
+    ///   - **macOS fullscreen** hides the buttons. Fullscreen windows
+    ///     can't be resized anyway. Rejected (correct).
+    ///   - **AX-poor apps** (Electron etc.) typically still expose the
+    ///     buttons because their outer NSWindow chrome is native — the
+    ///     AX black hole is the *content*, not the window frame. Passes.
+    ///
+    /// More reliable than `AXSubrole` for AX-poor apps (those often
+    /// have nil / wrong subrole). Costs up to 4 IPC (short-circuits on
+    /// the first hit), one-time at mode entry.
+    static func hasTitleBarButton(_ window: AXUIElement) -> Bool {
+        for attr in ["AXCloseButton", "AXMinimizeButton",
+                     "AXZoomButton", "AXFullScreenButton"] {
+            var ref: CFTypeRef?
+            if AXUIElementCopyAttributeValue(window, attr as CFString, &ref) == .success,
+               ref != nil {
+                return true
+            }
+        }
+        return false
     }
 
     private static func isSettable(_ element: AXUIElement, attribute: String) -> Bool {

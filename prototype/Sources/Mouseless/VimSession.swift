@@ -88,19 +88,28 @@ final class VimSession {
         print("[mouseless] enter SCROLL mode")
     }
 
-    /// Enter `.window` mode: probe the focused app's frontmost window
-    /// for whether `AXPosition` / `AXSize` are writable, draw the blue
-    /// border + 4 edge chips, and wire the controller to drive resize.
-    /// Triggered by Caps Lock + w chord from any mode (HotkeyTap).
+    /// Enter `.window` mode. Triggered by Caps Lock + w chord (HotkeyTap)
+    /// from any mode. Two gates must both pass — if either fails we
+    /// show a brief HUD note and stay in the current mode:
     ///
-    /// Probe outcome:
-    ///   - both AX attrs writable → controller uses direct AX write
-    ///     (`useAX = true`); instant, no animation, exact.
-    ///   - either not writable → fallback to synth mouse-edge drag
-    ///     (`useAX = false`); reads AX rect back each tick to drive
-    ///     the overlay since the actual change is up to the app.
-    /// If no frontmost window or rect can't be read at all → show a
-    /// brief HUD note and stay in the current mode (don't enter).
+    ///   1. **Has a real title bar** (`hasTitleBarButton`): at least one
+    ///      of `AXCloseButton` / `AXMinimizeButton` / `AXZoomButton` /
+    ///      `AXFullScreenButton`. Rejects the Finder Desktop (which is
+    ///      a Finder AX "window" with no chrome — not user-resizable)
+    ///      and macOS-fullscreen windows (chrome hidden, also
+    ///      unresizable). Robust against AX-poor apps: their outer
+    ///      NSWindow chrome is native so the button query works even
+    ///      when the inner content's AX is broken.
+    ///   2. **AX position+size writable** (`isResizable`): both attrs
+    ///      settable via `AXUIElementIsAttributeSettable`. Resize works
+    ///      by writing them each tick; if either isn't writable the
+    ///      mode is useless, so we refuse rather than silently no-op.
+    ///
+    /// (Earlier prototype kept a synth-mouse-edge-drag fallback for the
+    /// !isResizable case; with the title-bar-button gate handling the
+    /// Desktop and macOS-fullscreen cases, real apps that pass the gate
+    /// almost always allow AX writes — the fallback's complexity wasn't
+    /// earning its keep, so it's gone.)
     func enterWindowMode() {
         if case .drag = mode { return }       // drag mid-flight wins
         if case .window = mode { return }     // already in WINDOW
@@ -110,12 +119,18 @@ final class VimSession {
             HUD.shared.show("WINDOW: no frontmost window")
             return
         }
-        let useAX = AXWindowOps.isResizable(window)
-        if !useAX {
-            print("[mouseless] WINDOW: AX position/size not writable → mouse-edge-drag fallback")
+        guard AXWindowOps.hasTitleBarButton(window) else {
+            HUD.shared.show("WINDOW: no resizable window")
+            print("[mouseless] WINDOW: no title-bar buttons on frontmost window (Desktop / fullscreen / borderless) — refused")
+            return
+        }
+        guard AXWindowOps.isResizable(window) else {
+            HUD.shared.show("WINDOW: can't resize this window")
+            print("[mouseless] WINDOW: AXPosition/AXSize not writable on this window — refused")
+            return
         }
         teardownCurrentMode()   // drop overlays / stop mover from prior mode
-        let controller = WindowController(window: window, useAX: useAX, initialRect: rect)
+        let controller = WindowController(window: window, initialRect: rect)
         WindowOpOverlay.shared.show(rect: rect)
         controller.onRectUpdate = { newRect in
             WindowOpOverlay.shared.update(rect: newRect)
@@ -124,7 +139,7 @@ final class VimSession {
         paletteBuffer = nil
         sticky = false
         renderModeHUD()
-        print("[mouseless] enter WINDOW mode (path=\(controller.path)) at \(Int(rect.minX)),\(Int(rect.minY)) \(Int(rect.width))×\(Int(rect.height))")
+        print("[mouseless] enter WINDOW mode at \(Int(rect.minX)),\(Int(rect.minY)) \(Int(rect.width))×\(Int(rect.height))")
     }
 
     /// Enter `.drag` mode: synthesize `leftMouseDown` at the current
@@ -202,7 +217,7 @@ final class VimSession {
         // explicitly; this catches any path that forgets to.
         if case .drag = mode { MouseSynth.dragUp(at: MouseSynth.cursorPosition()) }
         if case .window(let c) = mode {
-            c.teardown()                // stops timer + releases fallback drag
+            c.teardown()                // stops the resize timer
             WindowOpOverlay.shared.hide()
         }
         mode = nil
@@ -872,7 +887,7 @@ final class VimSession {
         case .tap: label = sticky ? "TAP · sticky" : "TAP"
         case .scroll: label = "SCROLL"
         case .drag: label = "DRAG"
-        case .window(let c): label = "WINDOW · \(c.path)"
+        case .window: label = "WINDOW"
         }
         HUD.shared.show(label + suffix)
     }

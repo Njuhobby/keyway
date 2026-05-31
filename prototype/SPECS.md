@@ -128,7 +128,7 @@ NSApplication
 | `HUD.swift` | 右下角 mode 提示 |
 | `KeyCode.swift` | `kVK_ANSI_*` 物理键码常量（含 `f19=80`；ANSI 布局，非 QWERTY 会出错） |
 | `FocusedApp.swift` | 经 `NSWorkspace.frontmostApplication` 解析前台 app（Electron 上比 AXFocusedApplication 可靠） |
-| `MouseSynth.swift` | 合成 mouse click + drag down / move / up + 取光标位置（hint commit、Enter 点击、DRAG、WINDOW fallback 共用） |
+| `MouseSynth.swift` | 合成 mouse click + drag down/up + 取光标位置（hint commit、Enter 点击、DRAG 共用） |
 | `TriggerRemap.swift` | App 启动 shell-out `hidutil` 把 Caps Lock → F19；退出还原 |
 | `KeyPoster.swift` | 合成键盘事件辅助（主路径未用；留给未来 select-text mode） |
 
@@ -141,9 +141,9 @@ NSApplication
 | `DragController.swift` | DRAG 模式状态容器：`startPoint`（Backspace 取消用来 warp 回 + 起点 mouseUp）+ `preMode`（决定 Enter/Backspace 完成后回哪个模式，见 `modes.md` §6） |
 | `ScrollAreaDetector.swift` | AX-walk 焦点窗口找 `AXScrollArea`/`AXWebArea`（不依赖 OP 路由）|
 | `ScrollOverlay.swift` | 滚动区域 picker：蓝色光晕边框 + 数字标记 |
-| `WindowController.swift` | WINDOW 模式状态机 + 60fps timer：跟踪当前按住的 hjkl 边集合、每 tick 应用 resize delta。两条路：AX 直写 (`AXPosition`/`AXSize`) 或 fallback 合成 mouse 边缘拖拽（边集合变化时 mouseUp/mouseDown 重新 grab）。Shift 现读 `NSEvent.modifierFlags` 决定 expand/shrink。见 `modes.md` §7 |
+| `WindowController.swift` | WINDOW 模式状态机 + 60fps timer：跟踪当前按住的 hjkl 边集合、每 tick 算 resize delta 直接 AX 写焦点窗口（无 fallback 路径——入口 gate 已保证 AX 可写）。Shift 现读 `NSEvent.modifierFlags` 决定 expand/shrink。见 `modes.md` §7 |
 | `WindowOpOverlay.swift` | WINDOW 模式蓝色 border + 4 个边缘 chip（`↑k / ↓j / ←h / →l`）。仿 `HintOverlay` / `ScrollOverlay` 的 per-NSScreen borderless window 模式；chip 算位置时若不全包于当前屏内则跳过不画（用户要求：不画到屏幕外） |
-| `AXWindowOps.swift` | 窗口 AX helper：`frontmostWindow()`、`isResizable()`（`AXUIElementIsAttributeSettable` probe `AXPosition`+`AXSize` 都可写）、`readRect()` / `writeRect()`，被 `WindowController` 用 |
+| `AXWindowOps.swift` | 窗口 AX helper：`frontmostWindow()`、`isResizable()`（`AXUIElementIsAttributeSettable` probe `AXPosition`+`AXSize` 都可写）、`hasTitleBarButton()`（判"真窗口"：至少有 Close/Min/Zoom/FullScreen 一个按钮——`AXSubrole` 对 AX 黑洞 app 不可靠，标题栏按钮对外壳 NSWindow chrome 都查得到）、`readRect()` / `writeRect()` |
 
 **OmniParser 视觉路径**（AX-bad app 的焦点窗口 hint，见 `omniparser-fallback-design.md`）：
 

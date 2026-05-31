@@ -254,35 +254,41 @@ MouseSynth.click(at: MouseSynth.cursorPosition(), button: .left, count: 1)
 
 ## 7. WINDOW mode 键位
 
-整窗口尺寸调整。`WindowController` 持有状态 + 60fps timer，每 tick 算 delta 应用到焦点窗口；按入口时探测的结果走两条路：
-
-- **AX 直写**（native AppKit 等大多数 app）：每 tick 写 `AXPosition` / `AXSize`，瞬时无动画。
-- **Synth 边缘拖拽 fallback**（少数 AX-write 不通的 app，比如某些老 Electron）：合成 `leftMouseDown` 在窗口 border 中点 / 角点 → 每 tick 合成 `.leftMouseDragged` 推光标 → 松开 `leftMouseUp`；hjkl 组合变化（单边 ↔ 角）时 mouseUp + 重新 grab。每 tick 读一次 AX rect 来更新蓝色 border（合成 drag 后实际尺寸由 app 决定，得读出来才准）。
+整窗口尺寸调整。`WindowController` 持有状态 + 60fps timer，每 tick 算 delta 并直接 AX 写焦点窗口的 `AXPosition` / `AXSize`，瞬时无动画。
 
 | 键 | 行为 |
 | --- | --- |
-| **进入：`Caps Lock + w` chord**（任意 mode）| Probe 焦点窗口的 `AXPosition`/`AXSize` 可写性（`AXUIElementIsAttributeSettable`）→ 选 AX 或 fallback 路径 → 画 overlay。无前台窗口时 HUD 提示 `WINDOW: no frontmost window` 并留在原 mode |
+| **进入：`Caps Lock + w` chord**（任意 mode）| 两道 gate 都过才进（见下）。任一不过 → HUD 提示原因、不入 mode |
 | `h` / `j` / `k` / `l` (held) | 把对应 border 往**外**推（`k` 顶上 / `j` 底下 / `h` 左外 / `l` 右外），按住连续；步长 20pt/tick @ 60fps |
 | `Shift + hjkl` | **反向**（往内压 = 缩小）。`tick()` 里现读 `NSEvent.modifierFlags`，所以 Shift 中途按下/松开**即时反向**，不用先松 hjkl |
 | 同时按（如 `h+j`）| 组合 → corner 推拉，4 个角都成立 |
-| 矛盾对（`h+l` 或 `j+k`）| AX 路径：deltas 自然抵消（位置和大小都 +/− 相消，窗口不变）。fallback 路径：保留上一 anchor、本 tick 跳过移动 |
-| `Esc` | exit OFF（teardown：停 timer / 关 overlay / fallback 路径释放 mouseDown） |
+| 矛盾对（`h+l` 或 `j+k`）| deltas 自然抵消（位置和大小都 +/− 相消，窗口不变） |
+| `Esc` | exit OFF（teardown：停 timer / 关 overlay） |
 | 其它键 | 吞掉 |
-| `Caps Lock`（单击 / + d chord / + w chord）| 吞掉，跟 DRAG 一样——drag / 同步 resize 不允许中途切到别的 mode |
+| `Caps Lock`（单击 / + d chord / + w chord）| 吞掉，跟 DRAG 一样——resize 不允许中途切到别的 mode |
 
-**视觉**：蓝色实线 border（3pt）贴窗口外沿；4 个 chip（蓝底白字）贴在每边中点的**外侧**，标 `↑k / ↓j / ←h / →l`。角落**不画**——hjkl 组合是隐含的，不再加 chip。**chip 屏幕外不画**：每个 chip 单独检查是不是全部包含在某个 NSScreen 的 view bounds 内；窗口顶到屏幕顶时，顶部 chip 应该在屏幕外那一块，就**直接不画**（用户明确要求：不画到屏幕外）。
+**入 mode 的两道 gate**（`enterWindowMode`）：
 
-**HUD**：显示 `WINDOW · AX` 或 `WINDOW · synth-drag`，标明走的哪条路。
+1. **`AXWindowOps.hasTitleBarButton(window)`** —— 至少有一个标题栏按钮（`AXCloseButton` / `AXMinimizeButton` / `AXZoomButton` / `AXFullScreenButton`）。这是"是不是真正的用户窗口"的判据：
+   - **Finder Desktop**（没开 Finder 窗口时 `AXFocusedWindow` 落到的那个 desktop "窗口"）：没有任何标题栏按钮 → 拒绝。本来就不是用户可 resize 的东西。
+   - **macOS fullscreen 状态**：标题栏按钮被隐藏 → 拒绝。fullscreen 状态下也 resize 不了。
+   - **AX 黑洞 app**（Electron 等）：外壳 NSWindow chrome 是原生的，标题栏按钮在 AX 树里能查到（AX 黑洞是窗口**内容**那一层）→ 过。
+   - **为什么用这个而非 `AXSubrole == "AXStandardWindow"`**：AX 黑洞 app 的 subrole 经常 nil / 乱写 / 不暴露，严格 subrole 检查会误杀。标题栏按钮直接查 attribute 是否存在，比 subrole 鲁棒；最多 4 次 IPC（短路命中即返），一次性。
+2. **`AXWindowOps.isResizable(window)`** —— `AXPosition` 和 `AXSize` 两个都得 `AXUIElementIsAttributeSettable` 才行。resize 靠每 tick 写这俩属性，任一不通直接没法做。
+
+**视觉**（`WindowOpOverlay`）：蓝色实线 border（3pt）贴窗口外沿；4 个 chip（蓝底白字）贴在每边中点的**外侧**，标 `↑k / ↓j / ←h / →l`。角落**不画**——hjkl 组合是隐含的，不再加 chip。**chip 屏幕外不画**：每个 chip 单独检查是不是全部包含在某个 NSScreen 的 view bounds 内；窗口顶到屏幕顶时，顶部 chip 应该在屏幕外那一块，就**直接不画**（用户明确要求：不画到屏幕外）。
+
+**HUD**：进 mode 时显示 `WINDOW`。
 
 **为什么用 chord 而非 bare `w`**：`w` 在 hint 字母池里（`a s d f g e r u i o p w t n m c`，见 §4）。用 chord 触发，bare `w` 仍可当 hint label。也跟 SCROLL 的 `Caps Lock + d` 一致。
 
-**为什么 fallback 而不是拒绝**：少数 app（某些老 Electron / 非规范 Catalyst）`AXSize` / `AXPosition` 不是 writable，AX 直写无效。Synth 边缘拖拽就是把"用户手动拖窗口边"那套自动化——只要 app 允许鼠标拖边 resize 就 work。代价是带 app 自己的 resize 动画、有一点点延迟，但用户体验上跟 AX 路径很接近。AX 探测一次性 ~2 IPC，可以接受。
+**为什么不留 fallback 合成边缘拖拽路径**：原型最早有一条 fallback——AX 不可写时合成 `mouseDown` 在窗口 border 中点 / 角点、每 tick 合成 `.leftMouseDragged` 推光标。撞到 Finder Desktop 这种"AX 里是窗口、实际不是用户窗口"的 case 时 HUD 标 `WINDOW · synth-drag`，但 fallback 在 Desktop 上同样没效果（没 resize handle 给 OS hit-test），变成迷惑性 UX。加了标题栏按钮 gate 后，能过 gate 的窗口几乎都允许 AX 写——fallback 的复杂度不再值得，删掉。
 
 **实现要点**：
 - 触发：`HotkeyTap` F19 arm 期间按 `w` → `session.enterWindowMode()`，仿 `Caps Lock + d → enterScroll`。
 - 焦点窗口解析：`AXWindowOps.frontmostWindow()` 沿用 `ScreenCapture.focusedWindow()` 的链（`AXFocusedWindow` → `AXMainWindow` → `AXWindows[0]`）。
 - Edge math：`top` expand = `AXPosition.y -= step, AXSize.height += step`；`bottom` expand = `AXSize.height += step`；left/right 对称。shrink 翻号。
-- Fallback anchor：单边 → 边中点（内缩 4pt 让 OS hit-test 命中 resize handle）；两个兼容边 → 对应角点。
+- 软 min size 200×120 防 in-memory rect 跟实际拉得太开（app 自己也会 clamp）。
 
 ---
 

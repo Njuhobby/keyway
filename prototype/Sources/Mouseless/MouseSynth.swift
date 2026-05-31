@@ -45,22 +45,6 @@ enum MouseSynth {
         down.post(tap: .cghidEventTap)
     }
 
-    /// Synthesize a single in-flight drag move (`.leftMouseDragged` /
-    /// `.rightMouseDragged`) at `point`. The event itself carries
-    /// `mouseCursorPosition`, so posting it both moves the cursor and
-    /// notifies whatever the target app installed mouse handlers expects.
-    /// Used by the WINDOW mode's mouse-drag fallback (AX-unwritable
-    /// position/size apps) to drive a held mouseDown across the screen.
-    static func dragMove(to point: CGPoint, button: CGMouseButton = .left) {
-        let src = CGEventSource(stateID: .privateState)
-        let type: CGEventType = (button == .left) ? .leftMouseDragged : .rightMouseDragged
-        guard let ev = CGEvent(mouseEventSource: src, mouseType: type,
-                               mouseCursorPosition: point, mouseButton: button)
-        else { return }
-        ev.setIntegerValueField(.eventSourceUserData, value: HotkeyTap.syntheticMarker)
-        ev.post(tap: .cghidEventTap)
-    }
-
     /// Release a held mouse button at `point` — closes a drag opened by
     /// `dragDown(at:)`. Caller decides the drop point (current cursor for
     /// commit / Esc, or warped back to source for backspace cancel).
