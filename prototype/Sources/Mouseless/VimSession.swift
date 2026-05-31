@@ -184,27 +184,30 @@ final class VimSession {
         print("[mouseless] enter MOVE mode at \(Int(rect.minX)),\(Int(rect.minY))")
     }
 
-    /// Enter `.drag` mode: synthesize `leftMouseDown` at the current
-    /// cursor and switch state. Triggered by bare `v` from TAP or SCROLL
-    /// (the "universal" drag UX — the source is wherever you've already
-    /// hjkl'd the cursor to, no hint pre-selection). The held mouseDown
-    /// is released by Enter (commit), Esc (drop at current + exit), or
-    /// Backspace (warp back + release at source — true cancel).
+    /// Enter `.drag` mode from **any** mode (including OFF), via the
+    /// Caps Lock + v chord (`HotkeyTap`). Synthesizes `leftMouseDown` at
+    /// the wherever-the-cursor-already-is point and stores that as the
+    /// start. Released by Enter (commit drop), Esc (drop at current +
+    /// exit OFF), or Backspace (warp back + release at start — true
+    /// cancel, no drop registered).
     ///
-    /// The pre-drag mode is captured into the controller so Backspace
-    /// can restore it (sticky TAP stays sticky, SCROLL re-detects areas),
-    /// and Enter knows whether to re-hint or exit on completion.
-    /// See `modes.md` §6.
+    /// The pre-drag mode is captured so completion can return to it
+    /// sensibly: sticky TAP stays sticky and re-hints on Enter / cancel;
+    /// SCROLL re-detects on cancel; everything else (OFF / WINDOW /
+    /// MOVE) is `.other` → just exit OFF on completion. See `modes.md`
+    /// §6.
     func enterDrag() {
+        if case .drag = mode { return }   // already here, chord is a no-op
         let pre: DragController.PreMode
         switch mode {
         case .tap: pre = .tap(sticky: sticky)
         case .scroll: pre = .scroll
-        case .drag, .window, .windowMove, .none: return   // already busy / not in a mode
+        case .none, .window, .windowMove: pre = .other
+        case .drag: return   // unreachable
         }
         let cursor = MouseSynth.cursorPosition()
         MouseSynth.dragDown(at: cursor)
-        teardownCurrentMode()   // hides prior overlay; sets mode = nil
+        teardownCurrentMode()   // hides prior overlay / stops timers; sets mode = nil
         let controller = DragController(startPoint: cursor, preMode: pre)
         mode = .drag(controller)
         paletteBuffer = nil
@@ -455,17 +458,11 @@ final class VimSession {
             return true
         }
 
-        // Bare `v` from TAP or SCROLL → enter DRAG mode (vim-visual
-        // analog). `v` isn't a hint letter (not in HintMode.alphabet),
-        // not used by SCROLL, not used by palette — so a bare press is
-        // unambiguous. `v` from DRAG is ignored (already dragging).
-        let isTapOrScroll: Bool = { switch m { case .tap, .scroll: return true; case .drag, .window, .windowMove: return false } }()
-        let modMaskV: CGEventFlags = [.maskCommand, .maskControl, .maskShift, .maskAlternate]
-        if isTapOrScroll, keyCode == KeyCode.v, paletteBuffer == nil,
-           flags.intersection(modMaskV).isEmpty {
-            enterDrag()
-            return true
-        }
+        // (DRAG mode is now entered via the Caps Lock + v chord from
+        // any mode — handled in HotkeyTap, not here. The earlier
+        // bare-v-from-TAP-or-SCROLL trigger was removed: forcing the
+        // user to first enter TAP/SCROLL just to drag was unnecessary
+        // friction.)
 
         // Cmd / Ctrl held → system shortcut. Pass through so things like
         // Cmd+Shift+4 (screenshot), Cmd+Space (Spotlight), Cmd+Tab, and
@@ -634,6 +631,11 @@ final class VimSession {
                 renderModeHUD()
             case .scroll:
                 enterScroll()
+            case .other:
+                // Came from OFF / WINDOW / MOVE — just exit. Rebuilding
+                // those after a drag is complex (WINDOW/MOVE held a
+                // specific window's state) and not worth it.
+                exit()
             }
             return
         }
@@ -652,7 +654,7 @@ final class VimSession {
             } else {
                 exit()
             }
-        case .scroll:
+        case .scroll, .other:
             exit()
         }
     }

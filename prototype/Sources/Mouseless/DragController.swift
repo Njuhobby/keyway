@@ -16,12 +16,16 @@ import Cocoa
 /// just the value type. See `modes.md` §6 for the full state machine.
 @MainActor
 final class DragController {
-    /// What the user was in *before* `v` triggered the drag. Needed by
-    /// Backspace (cancel) — restores the same mode + sticky state — and
-    /// by Enter (commit) to decide sticky re-hint vs exit.
+    /// What the user was in *before* the Caps Lock + v chord triggered
+    /// the drag. Backspace (cancel) restores `.tap` / `.scroll`; `.other`
+    /// (came from OFF / WINDOW / MOVE) just exits OFF on cancel — those
+    /// modes are either irrelevant (OFF) or complex to rebuild after a
+    /// drag (WINDOW/MOVE held a specific window's state). Enter (commit)
+    /// uses the same flag to decide sticky re-hint vs exit.
     enum PreMode {
         case tap(sticky: Bool)
         case scroll
+        case other   // OFF / WINDOW / MOVE — no restore on cancel
     }
 
     /// Where `leftMouseDown` was posted. Backspace warps back here and
