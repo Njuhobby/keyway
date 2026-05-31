@@ -103,12 +103,12 @@ Mouseless 的状态有**三层**，"退出"在哪一层语义不一样：
 | Caps Lock + w | 进 WINDOW | 进 WINDOW | 进 WINDOW | 进 WINDOW | 进 WINDOW | （已在 WINDOW，no-op）| 进 WINDOW | — |
 | Caps Lock + m | 进 MOVE | 进 MOVE | 进 MOVE | 进 MOVE | 进 MOVE | 进 MOVE | （已在 MOVE，no-op）| — |
 | Caps Lock + v | 进 DRAG | 进 DRAG | 进 DRAG | 进 DRAG | （已在 DRAG，no-op）| 进 DRAG | 进 DRAG | — |
-| `Esc` | — | deactivate | deactivate | deactivate | deactivate（drop at cursor）| deactivate | deactivate | deactivate |
+| `Esc` | — | deactivate | deactivate | deactivate | deactivate（dragging 子状态会先 drop at cursor；armed 直接退）| deactivate | deactivate | deactivate |
 | 菜单栏 Quit / Cmd+Q | quit 进程 | quit 进程 | quit 进程 | quit 进程 | quit 进程 | quit 进程 | quit 进程 | quit 进程 |
 
 Caps Lock + Shift/Cmd/Ctrl/Option（修饰键）→ 不 arm，放行给系统/用户。
 
-**Caps Lock 永远响应**：DRAG / WINDOW / MOVE 不"吞" Caps Lock。`teardownCurrentMode()` 在切之前清干净——DRAG 释放 mouseDown 在当前光标位置（drop 副作用不可避免，Esc 也是这逻辑）、WINDOW/MOVE 停 timer + 关 overlay。所以 MOVE 里按 Caps Lock 直接切到 TAP、按 Caps Lock+w 直接切到 WINDOW resize，不需要先 Esc。
+**Caps Lock 永远响应**：DRAG / WINDOW / MOVE 不"吞" Caps Lock。`teardownCurrentMode()` 在切之前清干净——DRAG **dragging** 子状态会释放 mouseDown 在当前光标位置（drop 副作用不可避免，Esc 也是这逻辑）；**armed** 子状态无 mouseDown 直接切；WINDOW/MOVE 停 timer + 关 overlay。所以 MOVE 里按 Caps Lock 直接切到 TAP、按 Caps Lock+w 直接切到 WINDOW resize，不需要先 Esc。
 
 `VimSession.enter()`：**同步**设 `mode = .tap(h)`（消除连按 race，见 §2.1），再异步 `h.activate()` 扫描 + 显示 overlay。三个来源都空时显示 "no hints here" 并退出。
 
@@ -221,20 +221,22 @@ MouseSynth.click(at: MouseSynth.cursorPosition(), button: .left, count: 1)
 
 ## 6. DRAG mode 键位
 
-全键盘拖拽，vim-visual 风格——光标在哪（用 hjkl 先移到位），按 chord 进 drag，hjkl 拖到目标，松开。`DragController` 持有状态、`MouseSynth.dragDown`/`dragUp` 合成按下/松开、`MouseMover` 的 `dragHeld` 标志把每次移动事件类型从 `.mouseMoved` 切到 `.leftMouseDragged`。
+全键盘拖拽，vim-visual 风格。**两段式**：chord 进来先是 armed（不 grab，hjkl 单纯移光标用来 aim），再按 bare `v` 才合成 `mouseDown` 进 dragging 子状态。`DragController` 用 `startPoint: CGPoint?` 区分两态（nil = armed，非 nil = dragging）。
 
-| 键 | 行为 |
-| --- | --- |
-| **进入：`Caps Lock + v` chord**（任意 mode，包括 OFF）| 在当前光标位置合成 `leftMouseDown` → 进 `.drag`（HUD 显示 "DRAG"，原 overlay 隐藏）。pre-drag mode 存进 `DragController.preMode`，决定完成时回哪里 |
-| `h/j/k/l` (bare) | 移光标，事件类型换成 `.leftMouseDragged`（目标 app 看到拖拽轨迹）；按住连续；Shift 加速 / Option 慢 |
-| `Enter` | drop：当前位置 `leftMouseUp`。pre-drag 相关流转见下 |
-| `Esc` | 当前位置 `leftMouseUp`（按钮必须释放）→ exit OFF。cursor 留在原地 |
-| `Backspace` | **真取消**：cursor warp 回 `startPoint` → 在起点 `leftMouseUp`（目标 app 看到的是零位移 click，不触发 drop）→ 回到 pre-drag mode |
-| Caps Lock（单击 / + d / + w / + m chord）| 立即切到对应 mode（TAP / SCROLL / WINDOW / MOVE）。`teardownCurrentMode` 先在当前光标位置 mouseUp 释放 drag（drop 副作用——跟 Esc 同逻辑、不可避免），再切。想"取消 drop"用 Backspace |
-| `Caps Lock + v` chord | 已在 DRAG，no-op |
-| 其它键 | 吞掉（防止按住 mouseDown 时误触发） |
+| 键 | armed 子状态 | dragging 子状态 |
+| --- | --- | --- |
+| **进入：`Caps Lock + v` chord**（任意 mode）| 进 `.drag` armed（**不合成 mouseDown**），原 overlay 隐藏，HUD `DRAG · v to grab` | （已在 DRAG，no-op） |
+| `h/j/k/l` (held) | 移光标，事件类型是 `.mouseMoved`（aim，不 drag）；Shift 加速 / Option 慢 | 移光标，事件类型换成 `.leftMouseDragged`（目标 app 看到拖拽轨迹）；速度同 armed |
+| bare `v` | 在当前光标位置 `leftMouseDown` → 进 dragging；`startPoint` 记下位置（Backspace 用得到）；HUD 更新 `DRAG · holding` | idempotent，no-op |
+| `Enter` | swallow（armed 还没握住，没东西可放）| `leftMouseUp` 在当前位置 → `finishDrag(committed)` |
+| `Backspace` | swallow（armed 没东西可取消，想退用 Esc）| cursor warp 回 `startPoint` → 在起点 `leftMouseUp`（目标 app 看到零位移 click，不触发 drop）→ `finishDrag(cancelled)` |
+| `Esc` | exit OFF（cursor 留原地，armed 状态没东西可释放）| 在当前位置 `leftMouseUp` → exit OFF（drop 副作用不可避免——按钮必须释放） |
+| Caps Lock（单击 / + d / + w / + m chord）| 立即切对应 mode（TAP / SCROLL / WINDOW / MOVE）。armed 无 mouseUp 副作用 | 切之前 `teardownCurrentMode` 在当前位置 mouseUp 释放（drop 副作用，同 Esc）|
+| 其它键 | 吞掉（DRAG 没 hints，不该走到 app）| 吞掉（按住 mouseDown 时更不能让杂键漏过去）|
 
-**`v` 选键说明**：vim visual 的对应。`v` 现在**也在 hint 池里**（见 §4，自从 DRAG 改用 chord 后腾出来）——chord 用 `Caps Lock + v` 触发，HotkeyTap 在 hintChar 之前就拦住了，所以 bare `v` 当 hint label / chord 当 DRAG 触发，两套互不干扰，跟 `w`/`m`/`d` 同样的 chord 模式。
+**为什么两段式（不 chord 后立即 grab）**：早期版本进 mode 时就 `leftMouseDown`，但常常进了之后想再 hjkl 把光标先挪到正确位置——结果中途已经在拖了，路径上把意外的目标也"拖"了一下。两段式给用户一段"还没 grab 的 hjkl"做 aim，按 `v` 才真正按下，跟物理鼠标"先把手放到要拖的东西上、然后按下、再拖"的肌肉记忆一致。armed 状态完全无副作用——Caps Lock + v 不会"误起头一个 drag"。
+
+**`v` 选键说明**：vim visual 的对应。`v` 现在**同时在 hint 池里**（见 §4）—— TAP 里按 v 是 hint commit、DRAG armed 里按 v 是 grab、DRAG dragging 里按 v 是 no-op、`Caps Lock + v` 是 DRAG 入口。各 mode 独立、不冲突。
 
 **完成时的流转**（`finishDrag`），按 `preMode` 分派：
 
@@ -246,18 +248,15 @@ MouseSynth.click(at: MouseSynth.cursorPosition(), button: .left, count: 1)
 | **其它**（OFF / WINDOW / MOVE）| exit OFF | exit OFF（这些 mode 重建复杂，drag 完了直接退）|
 
 **典型用例**：
-- 拖文件：在 Finder 里 hjkl 把光标移到文件图标，`Caps Lock + v` → hjkl 拖到目标文件夹（hover 高亮 + 拖拽指示）→ Enter。
-- 选文字 + 复制：hjkl 到选区起点，`Caps Lock + v` → hjkl 到终点（沿途文本被选中）→ Enter（释放，**选区保留**）→ Cmd+C（passthrough，复制成功）。**Backspace 不行**——零位移 click 会清掉选区。
-- 拖 divider / slider / 时间轴 trim：起点 `Caps Lock + v`，hjkl 拖，Enter 落点。
-
-**为什么用 chord 而非 bare `v`**：早期版本是 bare `v` 在 TAP/SCROLL 里触发——但这逼用户为了拖必须先进 TAP/SCROLL，没必要。`Caps Lock + v` 从任何 mode（含 OFF）都能起，跟其它 mode 用 chord 触发的模式一致。
-
-**为什么这种"全键盘 drag"而非"两次 hint"**：源 / 目标不一定都是可点元素（拖文本选区、拖 divider、拖到空白处）。当前光标 + hjkl 是最通用的模型。
+- 拖文件：`Caps Lock + v`（armed）→ hjkl 把光标精确移到文件图标上 → `v` 握住 → hjkl 拖到目标文件夹（hover 高亮 + 拖拽指示）→ Enter。
+- 选文字 + 复制：`Caps Lock + v` → hjkl 到选区起点 → `v` → hjkl 到终点（沿途文本被选中）→ Enter（释放，**选区保留**）→ Cmd+C 复制。
+- 拖 divider / slider / 时间轴 trim：armed 阶段把 cursor 移到 divider 上 → `v` → hjkl 拖 → Enter。
 
 **实现注意点**：
-- `enterDrag` 之前抓 `preMode`（pre-drag 是哪个模式 + sticky 状态），存进 `DragController`。`finishDrag` 用它决定去向。从 OFF / WINDOW / MOVE 进来时 `preMode = .other`，完成后一律 exit OFF。
-- `teardownCurrentMode` / `exit` 都加了"在 drag 时合成 mouseUp"防御 —— 任何路径都不能留下按住的按钮。
-- DRAG 下 Caps Lock 不再被吞，单击 / +d / +w / +m chord 都立即切对应 mode（同时 teardown 会先 mouseUp 释放 drag）。
+- `enterDrag` 只创建 `DragController(preMode:)`，不合成 mouseDown。`controller.beginDrag(at:)` 才合成 + 设 `startPoint`。
+- 早期 hjkl 拦截每次读 `controller.isDragging` 决定 `dragHeld`（armed = `.mouseMoved`、dragging = `.leftMouseDragged`），单一开关切两种事件类型。
+- `teardownCurrentMode` / `exit` 的"防御性 mouseUp" 只在 `c.isDragging` 时合成（armed 没东西可释放）。
+- DRAG 下 Caps Lock 不再被吞，单击 / +d / +w / +m chord 都立即切对应 mode（dragging 子状态下 teardown 会先 mouseUp 释放 drag，armed 直接切）。
 
 ---
 

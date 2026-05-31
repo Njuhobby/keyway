@@ -138,7 +138,7 @@ NSApplication
 | --- | --- |
 | `MouseMover.swift` | hjkl 连续移光标，**TAP + SCROLL + DRAG 共用**（60fps timer；`dragHeld=true` 时事件类型换成 `.leftMouseDragged`） |
 | `ScrollController.swift` | SCROLL 模式滚动合成 + 连续 + 加速 + 区域选择 + 光标 warp |
-| `DragController.swift` | DRAG 模式状态容器：`startPoint`（Backspace 取消用来 warp 回 + 起点 mouseUp）+ `preMode`（决定 Enter/Backspace 完成后回哪个模式，见 `modes.md` §6） |
+| `DragController.swift` | DRAG 模式状态容器，两段式（armed / dragging）由 `startPoint: CGPoint?` 区分（nil = armed 等待 grab，非 nil = 已 grab）。`beginDrag(at:)` 合成 mouseDown + 设 `startPoint`（bare `v` 触发）；Backspace 取消用 `startPoint` warp 回 + 起点 mouseUp；`preMode` 决定 Enter/Backspace 完成后回哪个模式（见 `modes.md` §6） |
 | `ScrollAreaDetector.swift` | AX-walk 焦点窗口找 `AXScrollArea`/`AXWebArea`（不依赖 OP 路由）|
 | `ScrollOverlay.swift` | 滚动区域 picker：蓝色光晕边框 + 数字标记 |
 | `WindowController.swift` | WINDOW resize 模式状态机 + 60fps timer：跟踪当前按住的 hjkl 边集合、每 tick 算 resize delta 直接 AX 写焦点窗口（无 fallback 路径——入口 gate 已保证 AX 可写）。每 tick 现读 `NSEvent.modifierFlags`：Shift = shrink、Option = 5pt 精细步长、两者正交可组合。见 `modes.md` §7 |
