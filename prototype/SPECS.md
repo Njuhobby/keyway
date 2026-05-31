@@ -128,7 +128,7 @@ NSApplication
 | `HUD.swift` | 右下角 mode 提示 |
 | `KeyCode.swift` | `kVK_ANSI_*` 物理键码常量（含 `f19=80`；ANSI 布局，非 QWERTY 会出错） |
 | `FocusedApp.swift` | 经 `NSWorkspace.frontmostApplication` 解析前台 app（Electron 上比 AXFocusedApplication 可靠） |
-| `MouseSynth.swift` | 合成 mouse click + 取光标位置（hint commit、x、未来移动共用） |
+| `MouseSynth.swift` | 合成 mouse click + drag down/up + 取光标位置（hint commit、Enter 点击、DRAG 共用） |
 | `TriggerRemap.swift` | App 启动 shell-out `hidutil` 把 Caps Lock → F19；退出还原 |
 | `KeyPoster.swift` | 合成键盘事件辅助（主路径未用；留给未来 select-text mode） |
 
@@ -136,8 +136,9 @@ NSApplication
 
 | 文件 | 职责 |
 | --- | --- |
-| `MouseMover.swift` | hjkl 连续移光标，**TAP + SCROLL 共用**（60fps timer 合成 `.mouseMoved`，Shift 快 / Option 慢） |
+| `MouseMover.swift` | hjkl 连续移光标，**TAP + SCROLL + DRAG 共用**（60fps timer；`dragHeld=true` 时事件类型换成 `.leftMouseDragged`） |
 | `ScrollController.swift` | SCROLL 模式滚动合成 + 连续 + 加速 + 区域选择 + 光标 warp |
+| `DragController.swift` | DRAG 模式状态容器：`startPoint`（Backspace 取消用来 warp 回 + 起点 mouseUp）+ `preMode`（决定 Enter/Backspace 完成后回哪个模式，见 `modes.md` §6） |
 | `ScrollAreaDetector.swift` | AX-walk 焦点窗口找 `AXScrollArea`/`AXWebArea`（不依赖 OP 路由）|
 | `ScrollOverlay.swift` | 滚动区域 picker：蓝色光晕边框 + 数字标记 |
 
@@ -220,7 +221,7 @@ NSApplication
    **跟 OmniParser 路由是独立问题**——OP 只解决 AX 黑洞 app；cleanup 尖峰下
    AX 仍能返回候选（只是慢），且白名单 app 才走 AX walk。详见
    `specs/hint-discovery.md` §5 + [`specs/omniparser-fallback-design.md`](specs/omniparser-fallback-design.md) §4.5。
-4. **新 modes** —— `Mode` enum 已经留好扩展点：select-text、drag、right-click 命令模式。接入路径见 `specs/modes.md` §8。
+4. **新 modes** —— `Mode` enum 已经留好扩展点：select-text、right-click 命令模式（DRAG 已实现，见 `specs/modes.md` §6）。接入路径见 `specs/modes.md` §10。
 5. **多 hint 来源的标签空间冲突** —— 焦点 app 元素很多时会吃光字母组，menu extras 排到 `lj/lk/ll`。
    方案候选：menu extras 走单独的前缀（如 `;a`, `;s` …）或单独字母池。
 6. **Dock 分隔符 / Recents 占位过滤** —— 当前 Dock 把所有 `AXDockItem` 都收，包括分隔符。低价值的 hint 浪费标签。

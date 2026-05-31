@@ -214,7 +214,45 @@ MouseSynth.click(at: MouseSynth.cursorPosition(), button: .left, count: 1)
 
 ---
 
-## 6. 命令面板键位
+## 6. DRAG mode 键位
+
+全键盘拖拽，vim-visual 风格——光标已经在哪（用 hjkl 移到位），按一下进 drag，hjkl 拖到目标，松开。`DragController` 持有状态、`MouseSynth.dragDown`/`dragUp` 合成按下/松开、`MouseMover` 的 `dragHeld` 标志把每次移动事件类型从 `.mouseMoved` 切到 `.leftMouseDragged`。
+
+| 键 | 行为 |
+| --- | --- |
+| **进入：bare `v`**（TAP 或 SCROLL 下）| 在当前光标位置合成 `leftMouseDown` → 进 `.drag`（HUD 显示 "DRAG"，原 overlay 隐藏） |
+| `h/j/k/l` (bare) | 移光标，事件类型换成 `.leftMouseDragged`（目标 app 看到拖拽轨迹）；按住连续；Shift 加速 / Option 慢 |
+| `Enter` | drop：当前位置 `leftMouseUp`。sticky-aware 完成（见下） |
+| `Esc` | 当前位置 `leftMouseUp`（按钮必须释放）→ exit OFF。cursor 留在原地 |
+| `Backspace` | **真取消**：cursor warp 回 `startPoint` → 在起点 `leftMouseUp`（目标 app 看到的是零位移 click，不触发 drop）→ 回到 pre-drag mode |
+| Caps Lock（单击 / + d chord）| 吞掉，不响应。必须先 Enter/Esc/Backspace 完成 drag |
+| 其它键 | 吞掉（防止按住 mouseDown 时误触发） |
+
+**`v` 选键说明**：不在 hint 池（`a s d f g e r u i o p w t n m c`，见 §4）、SCROLL 也没用、palette 拦截在前——bare `v` 在 TAP / SCROLL 下都不冲突。vim visual 的对应。
+
+**完成时的 sticky-aware 流转**（`finishDrag`）：
+
+| pre-drag mode | Enter（drop） | Backspace（cancel） |
+| --- | --- | --- |
+| TAP（sticky） | 回 TAP sticky 重扫 hints | 回 TAP sticky（cursor 已 warp 回起点），重扫 |
+| TAP（非 sticky） | exit OFF | 回 TAP 非 sticky，重扫 |
+| SCROLL | exit OFF（drop 后回 SCROLL 不太自然，简化） | 回 SCROLL（重新扫滚动区） |
+
+**典型用例**：
+- 拖文件：在 Finder 里 hjkl 把光标移到文件图标，`v` → hjkl 拖到目标文件夹（hover 高亮 + 拖拽指示）→ Enter。
+- 选文字 + 复制：hjkl 到选区起点，`v` → hjkl 到终点（沿途文本被选中）→ Enter（释放，**选区保留**）→ Cmd+C（passthrough，复制成功）。**Backspace 不行**——零位移 click 会清掉选区。
+- 拖 divider / slider / 时间轴 trim：起点 `v`，hjkl 拖，Enter 落点。
+
+**为什么这种"全键盘 drag"而非"两次 hint"**：源 / 目标不一定都是可点元素（拖文本选区、拖 divider、拖到空白处）。当前光标 + hjkl 是最通用的模型。
+
+**实现注意点**：
+- `enterDrag` 之前抓 `preMode`（pre-drag 是哪个模式 + sticky 状态），存进 `DragController`。`finishDrag` 用它决定去向。
+- `teardownCurrentMode` / `exit` 都加了"在 drag 时合成 mouseUp"防御 —— 任何路径都不能留下按住的按钮。
+- F19 arm 在 drag 下 no-op（`handleTriggerTap` / `enterScroll` 顶上各加一道 guard）。
+
+---
+
+## 7. 命令面板键位
 
 | 键 | 行为 |
 | --- | --- |
@@ -244,7 +282,7 @@ case "dr": switchTo(.drag(...))
 
 ---
 
-## 7. KeyCode 常量
+## 8. KeyCode 常量
 
 `KeyCode.swift` 里的是 `kVK_ANSI_*`，**物理键位**。Dvorak / 国际键盘上字母位会错。
 迁移路径：用 `UCKeyTranslate` 或 `CGEventKeyboardGetUnicodeString` 把 keyCode + flags → 字符再匹配。
@@ -273,7 +311,7 @@ TODO 已经留在 `KeyCode.swift` 头部注释。
 
 ---
 
-## 8. 修饰键策略汇总
+## 9. 修饰键策略汇总
 
 | 修饰键 | 在 TAP mode 内的行为 | 为什么 |
 | --- | --- | --- |
@@ -286,7 +324,7 @@ TODO 已经留在 `KeyCode.swift` 头部注释。
 
 ---
 
-## 9. 新 mode 接入路径
+## 10. 新 mode 接入路径
 
 加一个新 mode（例如 select-text）的最小改动：
 

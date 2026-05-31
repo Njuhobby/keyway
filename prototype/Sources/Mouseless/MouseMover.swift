@@ -26,12 +26,18 @@ final class MouseMover {
     private var dy: CGFloat = 0   // top-left origin: +y = down
     private var speed: Speed = .normal
     private var current: CGPoint = .zero
+    private var dragHeld: Bool = false   // DRAG mode → post .leftMouseDragged
 
     /// Begin (or redirect) continuous movement. Idempotent under OS
     /// key-repeat: while the timer runs, repeated keyDowns only refresh
     /// direction/speed — they don't add extra steps (the timer is the
     /// sole motion driver).
-    func start(direction: Direction, speed: Speed) {
+    ///
+    /// `dragHeld`: caller is inside `.drag` mode (mouseDown is held), so
+    /// each step posts `.leftMouseDragged` instead of `.mouseMoved` —
+    /// the target app needs to see the drag, not a hover. Every call
+    /// re-sets this flag; TAP/SCROLL pass the default `false`.
+    func start(direction: Direction, speed: Speed, dragHeld: Bool = false) {
         switch direction {
         case .left:  dx = -1; dy = 0
         case .right: dx =  1; dy = 0
@@ -39,6 +45,7 @@ final class MouseMover {
         case .down:  dx = 0; dy =  1
         }
         self.speed = speed
+        self.dragHeld = dragHeld
         if timer == nil {
             current = MouseSynth.cursorPosition()
             let t = Timer.scheduledTimer(withTimeInterval: tickInterval, repeats: true) { _ in
@@ -75,8 +82,9 @@ final class MouseMover {
     }
 
     private func move(to p: CGPoint) {
+        let type: CGEventType = dragHeld ? .leftMouseDragged : .mouseMoved
         guard let src = CGEventSource(stateID: .privateState),
-              let ev = CGEvent(mouseEventSource: src, mouseType: .mouseMoved,
+              let ev = CGEvent(mouseEventSource: src, mouseType: type,
                                mouseCursorPosition: p, mouseButton: .left)
         else { return }
         ev.setIntegerValueField(.eventSourceUserData, value: HotkeyTap.syntheticMarker)

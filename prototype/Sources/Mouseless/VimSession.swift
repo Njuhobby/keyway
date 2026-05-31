@@ -14,7 +14,8 @@ final class VimSession {
     enum Mode {
         case tap(HintMode)
         case scroll(ScrollController)
-        // Future: case selectText(...), case drag(...), case rightClick(...)
+        case drag(DragController)
+        // Future: case selectText(...), case rightClick(...)
     }
 
     private var mode: Mode? = nil
@@ -38,6 +39,10 @@ final class VimSession {
     ///   TAP    → toggle sticky
     ///   SCROLL → switch to TAP
     func handleTriggerTap() {
+        // Drag holds a synthesized mouseDown — let it complete via
+        // Enter/Esc/Backspace before any mode switch. Caps Lock is
+        // swallowed.
+        if case .drag = mode { return }
         // Palette open → F19 closes it, back to the underlying mode
         // (preserves the pre-arm behavior now that F19 no longer reaches
         // handlePalette).
@@ -55,6 +60,8 @@ final class VimSession {
         case .scroll:
             teardownCurrentMode()
             enter()
+        case .drag:
+            break   // unreachable — guarded above
         }
     }
 
@@ -63,6 +70,9 @@ final class VimSession {
     /// scroll-area walk runs inline (cheap, ~few ms). See
     /// `specs/scroll-mode-design.md`.
     func enterScroll() {
+        // Same reason as handleTriggerTap: don't divert mid-drag — Caps
+        // Lock + d chord is swallowed until the drag completes.
+        if case .drag = mode { return }
         teardownCurrentMode()   // no-op from OFF; tears down TAP/SCROLL
         let controller = ScrollController()
         controller.enter()      // detect scroll areas, warp, show overlay
@@ -71,6 +81,35 @@ final class VimSession {
         sticky = false
         renderModeHUD()   // show "SCROLL" (was stuck on "TAP" when chorded from TAP)
         print("[mouseless] enter SCROLL mode")
+    }
+
+    /// Enter `.drag` mode: synthesize `leftMouseDown` at the current
+    /// cursor and switch state. Triggered by bare `v` from TAP or SCROLL
+    /// (the "universal" drag UX — the source is wherever you've already
+    /// hjkl'd the cursor to, no hint pre-selection). The held mouseDown
+    /// is released by Enter (commit), Esc (drop at current + exit), or
+    /// Backspace (warp back + release at source — true cancel).
+    ///
+    /// The pre-drag mode is captured into the controller so Backspace
+    /// can restore it (sticky TAP stays sticky, SCROLL re-detects areas),
+    /// and Enter knows whether to re-hint or exit on completion.
+    /// See `modes.md` §6.
+    func enterDrag() {
+        let pre: DragController.PreMode
+        switch mode {
+        case .tap: pre = .tap(sticky: sticky)
+        case .scroll: pre = .scroll
+        case .drag, .none: return   // already dragging / not in a mode
+        }
+        let cursor = MouseSynth.cursorPosition()
+        MouseSynth.dragDown(at: cursor)
+        teardownCurrentMode()   // hides prior overlay; sets mode = nil
+        let controller = DragController(startPoint: cursor, preMode: pre)
+        mode = .drag(controller)
+        paletteBuffer = nil
+        sticky = false   // sticky is captured in preMode; .drag has no sticky of its own
+        renderModeHUD()
+        print("[mouseless] enter DRAG mode at \(Int(cursor.x)),\(Int(cursor.y))")
     }
 
     /// Enter TAP mode (hints visible). **Sets `mode` synchronously** so a
@@ -113,6 +152,11 @@ final class VimSession {
         scrollPendingG = false
         if case .tap(let h) = mode { h.deactivate() }
         if case .scroll(let c) = mode { c.teardown() }
+        // Drag has a held mouseDown — release it before tearing down so
+        // we never leave the system in a stuck-button state. Defensive:
+        // the normal completion paths (Enter/Esc/Backspace) release
+        // explicitly; this catches any path that forgets to.
+        if case .drag = mode { MouseSynth.dragUp(at: MouseSynth.cursorPosition()) }
         mode = nil
     }
 
@@ -241,6 +285,13 @@ final class VimSession {
         if case .scroll(let controller) = mode {
             controller.teardown()   // stop scrolling + hide area overlay
         }
+        // Drag: Esc semantic per design — release the held mouseDown at
+        // wherever the cursor currently is, then exit to OFF. The drop
+        // is unavoidable (we can't leave the button stuck); the cursor
+        // stays put (per user spec: "cursor 在哪就在哪，不动").
+        if case .drag = mode {
+            MouseSynth.dragUp(at: MouseSynth.cursorPosition())
+        }
         mode = nil
         paletteBuffer = nil
         sticky = false
@@ -254,21 +305,46 @@ final class VimSession {
     func handle(keyCode: Int, flags: CGEventFlags) -> Bool {
         guard let m = mode else { return false }
 
-        // Bare h/j/k/l in TAP mode = move the cursor, vim hjkl (h left,
-        // j down, k up, l right). Same move keys as SCROLL — unified so
-        // the user doesn't switch mental models between modes. These
-        // four are excluded from the hint-label pool (see
+        // Bare h/j/k/l in TAP or DRAG = move the cursor, vim hjkl (h
+        // left, j down, k up, l right). Same move keys as SCROLL —
+        // unified so the user doesn't switch mental models between modes.
+        // These four are excluded from the hint-label pool (see
         // HintMode.alphabet) so a bare press is unambiguously "move".
-        // Pairs with Enter (click at cursor): hjkl to aim, Enter to
-        // click. Shift = fast, Option = slow; Cmd/Ctrl fall through to
+        // Pairs with Enter (click/drop at cursor): hjkl to aim, Enter to
+        // commit. Shift = fast, Option = slow; Cmd/Ctrl fall through to
         // the system-shortcut passthrough below.
-        if case .tap = m, paletteBuffer == nil,
+        //
+        // In DRAG mode the held mouseDown means each step needs to be
+        // posted as `.leftMouseDragged` (not `.mouseMoved`) so the target
+        // app sees the drag — MouseMover.start's `dragHeld` flag switches
+        // the event type. SCROLL has its own hjkl handler inside
+        // handleScroll (gg-pending interaction), not here.
+        let allowsMoveHere: Bool
+        let dragHeld: Bool
+        switch m {
+        case .tap:    allowsMoveHere = true;  dragHeld = false
+        case .drag:   allowsMoveHere = true;  dragHeld = true
+        case .scroll: allowsMoveHere = false; dragHeld = false
+        }
+        if allowsMoveHere, paletteBuffer == nil,
            flags.intersection([.maskCommand, .maskControl]).isEmpty,
            let dir = Self.moveDirection(for: keyCode) {
             // Option allowed through (unlike Cmd/Ctrl) because hjkl aren't
             // hint letters, so Option+hjkl can't collide with the Option =
             // right-click hint modifier.
-            mover.start(direction: dir, speed: Self.moveSpeed(from: flags))
+            mover.start(direction: dir, speed: Self.moveSpeed(from: flags), dragHeld: dragHeld)
+            return true
+        }
+
+        // Bare `v` from TAP or SCROLL → enter DRAG mode (vim-visual
+        // analog). `v` isn't a hint letter (not in HintMode.alphabet),
+        // not used by SCROLL, not used by palette — so a bare press is
+        // unambiguous. `v` from DRAG is ignored (already dragging).
+        let isTapOrScroll: Bool = { switch m { case .tap, .scroll: return true; case .drag: return false } }()
+        let modMaskV: CGEventFlags = [.maskCommand, .maskControl, .maskShift, .maskAlternate]
+        if isTapOrScroll, keyCode == KeyCode.v, paletteBuffer == nil,
+           flags.intersection(modMaskV).isEmpty {
+            enterDrag()
             return true
         }
 
@@ -311,6 +387,93 @@ final class VimSession {
             return handleTap(hint: hint, keyCode: keyCode, flags: flags)
         case .scroll(let controller):
             return handleScroll(controller: controller, keyCode: keyCode, flags: flags)
+        case .drag(let controller):
+            return handleDrag(controller: controller, keyCode: keyCode, flags: flags)
+        }
+    }
+
+    // MARK: - DRAG mode
+
+    /// `.drag` keystrokes. Esc is already handled in `handle()` above
+    /// (calls `exit()`, which releases the mouseDown at the current
+    /// cursor — that's the "exit, drop wherever" semantic). hjkl is
+    /// handled by the early intercept (with `dragHeld: true` so
+    /// MouseMover posts `.leftMouseDragged`). Here we handle the two
+    /// drag-specific completions:
+    ///
+    ///   Enter      → commit: `mouseUp` at current cursor; if pre-drag
+    ///                was sticky TAP, re-hint with sticky preserved;
+    ///                else exit to OFF.
+    ///   Backspace  → cancel: warp back to `startPoint`, `mouseUp` there
+    ///                (target app sees a click with zero drag distance —
+    ///                no drop registered). Return to the pre-drag mode
+    ///                (sticky TAP stays sticky, SCROLL re-detects areas).
+    ///
+    /// Any other key is swallowed (return true) to prevent stray side
+    /// effects mid-drag — we don't want a stray letter or chord to
+    /// trigger something while a mouseDown is held.
+    private func handleDrag(controller: DragController, keyCode: Int, flags: CGEventFlags) -> Bool {
+        if keyCode == KeyCode.return {
+            MouseSynth.dragUp(at: MouseSynth.cursorPosition())
+            finishDrag(controller: controller, cancelled: false)
+            return true
+        }
+
+        let modMask: CGEventFlags = [.maskCommand, .maskControl, .maskShift, .maskAlternate]
+        if keyCode == KeyCode.delete && flags.intersection(modMask).isEmpty {
+            CGWarpMouseCursorPosition(controller.startPoint)
+            MouseSynth.dragUp(at: controller.startPoint)
+            finishDrag(controller: controller, cancelled: true)
+            return true
+        }
+
+        // Anything else: swallow. Don't let stray keys hit the focused
+        // app while a synthesized mouseDown is held.
+        return true
+    }
+
+    /// After Enter/Backspace, tear down `.drag` and restore the pre-drag
+    /// mode appropriately.
+    ///   - **Backspace (cancelled)** → re-enter the pre-drag mode (TAP
+    ///     with original sticky / SCROLL re-detecting areas). The user
+    ///     bailed out, so we put them back where they started.
+    ///   - **Enter (committed)** → sticky-aware:
+    ///       * pre = TAP sticky → re-hint TAP (sticky preserved).
+    ///       * pre = TAP non-sticky → exit (drag was the one action).
+    ///       * pre = SCROLL → exit (drop ends the SCROLL session;
+    ///         restoring SCROLL after a drag is unusual and we keep
+    ///         the rule simple).
+    private func finishDrag(controller: DragController, cancelled: Bool) {
+        mover.stop()
+        mode = nil
+        if cancelled {
+            switch controller.preMode {
+            case .tap(let wasSticky):
+                enter()
+                sticky = wasSticky
+                renderModeHUD()
+            case .scroll:
+                enterScroll()
+            }
+            return
+        }
+        // Committed drop.
+        switch controller.preMode {
+        case .tap(let wasSticky):
+            if wasSticky {
+                // Re-enter TAP, restore sticky. enter()'s own async scan
+                // gives us fresh hints reflecting the post-drop UI — no
+                // need to also call scheduleStickyRehint, that would just
+                // double up. (Yes, the OP scan may catch the UI mid-
+                // settle — same trade as a regular sticky click.)
+                enter()
+                sticky = wasSticky
+                renderModeHUD()
+            } else {
+                exit()
+            }
+        case .scroll:
+            exit()
         }
     }
 
@@ -417,6 +580,16 @@ final class VimSession {
         if case .tap = mode {
             // hjkl release stops cursor movement. These aren't hint
             // chars, so always consume their release while in TAP.
+            if Self.moveDirection(for: keyCode) != nil {
+                mover.stop()
+                return true
+            }
+            return false
+        }
+        if case .drag = mode {
+            // Same as TAP: hjkl release stops the (drag-mode) cursor move.
+            // Stopping just kills the timer — the held mouseDown stays
+            // held until Enter/Esc/Backspace explicitly releases it.
             if Self.moveDirection(for: keyCode) != nil {
                 mover.stop()
                 return true
@@ -604,6 +777,7 @@ final class VimSession {
         switch m {
         case .tap: label = sticky ? "TAP · sticky" : "TAP"
         case .scroll: label = "SCROLL"
+        case .drag: label = "DRAG"
         }
         HUD.shared.show(label + suffix)
     }
