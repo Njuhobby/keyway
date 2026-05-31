@@ -16,6 +16,7 @@ final class VimSession {
         case scroll(ScrollController)
         case drag(DragController)
         case window(WindowController)
+        case windowMove(WindowMoveController)
         // Future: case selectText(...), case rightClick(...)
     }
 
@@ -46,6 +47,7 @@ final class VimSession {
         // interrupted by an accidental Caps Lock tap).
         if case .drag = mode { return }
         if case .window = mode { return }
+        if case .windowMove = mode { return }
         // Palette open → F19 closes it, back to the underlying mode
         // (preserves the pre-arm behavior now that F19 no longer reaches
         // handlePalette).
@@ -63,7 +65,7 @@ final class VimSession {
         case .scroll:
             teardownCurrentMode()
             enter()
-        case .drag, .window:
+        case .drag, .window, .windowMove:
             break   // unreachable — guarded above
         }
     }
@@ -75,9 +77,10 @@ final class VimSession {
     func enterScroll() {
         // Same reason as handleTriggerTap: don't divert mid-drag — Caps
         // Lock + d chord is swallowed until the drag completes. Same
-        // for WINDOW.
+        // for WINDOW / windowMove.
         if case .drag = mode { return }
         if case .window = mode { return }
+        if case .windowMove = mode { return }
         teardownCurrentMode()   // no-op from OFF; tears down TAP/SCROLL
         let controller = ScrollController()
         controller.enter()      // detect scroll areas, warp, show overlay
@@ -113,6 +116,7 @@ final class VimSession {
     func enterWindowMode() {
         if case .drag = mode { return }       // drag mid-flight wins
         if case .window = mode { return }     // already in WINDOW
+        if case .windowMove = mode { return } // exit MOVE first
         guard let window = AXWindowOps.frontmostWindow(),
               let rect = AXWindowOps.readRect(window)
         else {
@@ -142,6 +146,46 @@ final class VimSession {
         print("[mouseless] enter WINDOW mode at \(Int(rect.minX)),\(Int(rect.minY)) \(Int(rect.width))×\(Int(rect.height))")
     }
 
+    /// Enter `.windowMove` mode. Caps Lock + m chord (HotkeyTap). Same
+    /// two-gate logic as WINDOW resize but with `isMovable` (just
+    /// `AXPosition` settable — looser than `isResizable` which also
+    /// requires `AXSize` settable). Overlay is the same blue border
+    /// but **without** the edge chips: hjkl here means "move the
+    /// window in that direction", not "pull that border", so
+    /// border-anchored chips would mislead.
+    func enterWindowMove() {
+        if case .drag = mode { return }
+        if case .window = mode { return }
+        if case .windowMove = mode { return }
+        guard let window = AXWindowOps.frontmostWindow(),
+              let rect = AXWindowOps.readRect(window)
+        else {
+            HUD.shared.show("MOVE: no frontmost window")
+            return
+        }
+        guard AXWindowOps.hasTitleBarButton(window) else {
+            HUD.shared.show("MOVE: no movable window")
+            print("[mouseless] MOVE: no title-bar buttons on frontmost window — refused")
+            return
+        }
+        guard AXWindowOps.isMovable(window) else {
+            HUD.shared.show("MOVE: can't move this window")
+            print("[mouseless] MOVE: AXPosition not writable — refused")
+            return
+        }
+        teardownCurrentMode()
+        let controller = WindowMoveController(window: window, initialRect: rect)
+        WindowOpOverlay.shared.show(rect: rect, withChips: false)
+        controller.onRectUpdate = { newRect in
+            WindowOpOverlay.shared.update(rect: newRect)
+        }
+        mode = .windowMove(controller)
+        paletteBuffer = nil
+        sticky = false
+        renderModeHUD()
+        print("[mouseless] enter MOVE mode at \(Int(rect.minX)),\(Int(rect.minY))")
+    }
+
     /// Enter `.drag` mode: synthesize `leftMouseDown` at the current
     /// cursor and switch state. Triggered by bare `v` from TAP or SCROLL
     /// (the "universal" drag UX — the source is wherever you've already
@@ -158,7 +202,7 @@ final class VimSession {
         switch mode {
         case .tap: pre = .tap(sticky: sticky)
         case .scroll: pre = .scroll
-        case .drag, .window, .none: return   // already busy / not in a mode
+        case .drag, .window, .windowMove, .none: return   // already busy / not in a mode
         }
         let cursor = MouseSynth.cursorPosition()
         MouseSynth.dragDown(at: cursor)
@@ -218,6 +262,10 @@ final class VimSession {
         if case .drag = mode { MouseSynth.dragUp(at: MouseSynth.cursorPosition()) }
         if case .window(let c) = mode {
             c.teardown()                // stops the resize timer
+            WindowOpOverlay.shared.hide()
+        }
+        if case .windowMove(let c) = mode {
+            c.teardown()                // stops the move timer
             WindowOpOverlay.shared.hide()
         }
         mode = nil
@@ -359,6 +407,10 @@ final class VimSession {
             c.teardown()
             WindowOpOverlay.shared.hide()
         }
+        if case .windowMove(let c) = mode {
+            c.teardown()
+            WindowOpOverlay.shared.hide()
+        }
         mode = nil
         paletteBuffer = nil
         sticky = false
@@ -393,6 +445,7 @@ final class VimSession {
         case .drag:   allowsMoveHere = true;  dragHeld = true
         case .scroll: allowsMoveHere = false; dragHeld = false
         case .window: allowsMoveHere = false; dragHeld = false   // hjkl resizes, handled in handleWindow
+        case .windowMove: allowsMoveHere = false; dragHeld = false   // hjkl translates, handled in handleWindowMove
         }
         if allowsMoveHere, paletteBuffer == nil,
            flags.intersection([.maskCommand, .maskControl]).isEmpty,
@@ -408,7 +461,7 @@ final class VimSession {
         // analog). `v` isn't a hint letter (not in HintMode.alphabet),
         // not used by SCROLL, not used by palette — so a bare press is
         // unambiguous. `v` from DRAG is ignored (already dragging).
-        let isTapOrScroll: Bool = { switch m { case .tap, .scroll: return true; case .drag, .window: return false } }()
+        let isTapOrScroll: Bool = { switch m { case .tap, .scroll: return true; case .drag, .window, .windowMove: return false } }()
         let modMaskV: CGEventFlags = [.maskCommand, .maskControl, .maskShift, .maskAlternate]
         if isTapOrScroll, keyCode == KeyCode.v, paletteBuffer == nil,
            flags.intersection(modMaskV).isEmpty {
@@ -459,6 +512,37 @@ final class VimSession {
             return handleDrag(controller: controller, keyCode: keyCode, flags: flags)
         case .window(let controller):
             return handleWindow(controller: controller, keyCode: keyCode, flags: flags)
+        case .windowMove(let controller):
+            return handleWindowMove(controller: controller, keyCode: keyCode, flags: flags)
+        }
+    }
+
+    // MARK: - windowMove (WINDOW translate)
+
+    /// `.windowMove` keystrokes. hjkl start a direction (controller
+    /// adds to its active set + ensures the 60fps timer). Shift is
+    /// sampled live each tick (fast vs normal speed), no need to
+    /// thread the modifier. Esc handled in `handle()`. Other keys
+    /// swallowed.
+    private func handleWindowMove(controller: WindowMoveController, keyCode: Int, flags: CGEventFlags) -> Bool {
+        if let dir = Self.windowMoveDirection(for: keyCode) {
+            controller.startDirection(dir)
+            return true
+        }
+        return true
+    }
+
+    /// h/j/k/l → which direction the window moves. Same encoding as
+    /// MouseMover (cursor) / SCROLL / WINDOW resize (where j means
+    /// "bottom border" which moves "down") — consistent vim layout
+    /// across all of Mouseless.
+    private static func windowMoveDirection(for keyCode: Int) -> WindowMoveController.Direction? {
+        switch keyCode {
+        case KeyCode.h: return .left
+        case KeyCode.j: return .down
+        case KeyCode.k: return .up
+        case KeyCode.l: return .right
+        default: return nil
         }
     }
 
@@ -695,12 +779,16 @@ final class VimSession {
             return false
         }
         if case .window(let controller) = mode {
-            // hjkl release stops the corresponding edge resize. When
-            // the last edge is released, the controller stops the
-            // timer and (in fallback path) releases its synthesized
-            // mouseDown.
+            // hjkl release stops the corresponding edge resize.
             if let edge = Self.windowEdge(for: keyCode) {
                 controller.stopEdge(edge)
+                return true
+            }
+            return false
+        }
+        if case .windowMove(let controller) = mode {
+            if let dir = Self.windowMoveDirection(for: keyCode) {
+                controller.stopDirection(dir)
                 return true
             }
             return false
@@ -888,6 +976,7 @@ final class VimSession {
         case .scroll: label = "SCROLL"
         case .drag: label = "DRAG"
         case .window: label = "WINDOW"
+        case .windowMove: label = "MOVE"
         }
         HUD.shared.show(label + suffix)
     }

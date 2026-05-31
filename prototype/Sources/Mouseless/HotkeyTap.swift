@@ -123,13 +123,21 @@ final class HotkeyTap {
             session.enterScroll()
             return nil
         }
-        // F19 held + w → WINDOW chord, from any mode. (w for "window".)
-        // Like SCROLL: VimSession probes the focused window's AX
-        // settability and either uses direct AX writes or the synth
-        // mouse-drag fallback.
+        // F19 held + w → WINDOW (resize) chord, from any mode. (w for
+        // "window".) VimSession probes hasTitleBarButton + isResizable
+        // and refuses with a HUD note if either fails.
         if f19Armed && keyCode == KeyCode.w {
             f19ChordUsed = true
             session.enterWindowMode()
+            return nil
+        }
+        // F19 held + m → MOVE chord, from any mode. (m for "move".)
+        // Mirror of WINDOW: same hasTitleBarButton gate, but the
+        // second gate is the looser isMovable (just AXPosition
+        // settable — translation doesn't change size).
+        if f19Armed && keyCode == KeyCode.m {
+            f19ChordUsed = true
+            session.enterWindowMove()
             return nil
         }
 

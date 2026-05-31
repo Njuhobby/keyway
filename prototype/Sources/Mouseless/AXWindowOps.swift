@@ -47,6 +47,14 @@ enum AXWindowOps {
             && isSettable(window, attribute: "AXPosition")
     }
 
+    /// True if `AXPosition` alone is writable — looser than
+    /// `isResizable` because translating a window only writes the
+    /// origin. Some apps allow move but not resize (rare); checked
+    /// separately so MOVE mode can accept them.
+    static func isMovable(_ window: AXUIElement) -> Bool {
+        return isSettable(window, attribute: "AXPosition")
+    }
+
     /// True if the window exposes any of the standard title-bar buttons
     /// (close / minimize / zoom / fullscreen). Used as the "is this a
     /// real user window?" gate at WINDOW-mode entry:
@@ -97,6 +105,15 @@ enum AXWindowOps {
               AXValueGetValue(s as! AXValue, .cgSize, &size)
         else { return nil }
         return CGRect(origin: origin, size: size)
+    }
+
+    /// Write just the window's origin (for MOVE — translating without
+    /// resizing). One IPC vs `writeRect`'s two.
+    @discardableResult
+    static func writePosition(_ window: AXUIElement, origin: CGPoint) -> Bool {
+        var origin = origin
+        guard let value = AXValueCreate(.cgPoint, &origin) else { return false }
+        return AXUIElementSetAttributeValue(window, "AXPosition" as CFString, value) == .success
     }
 
     /// Write the window's rect. Two IPC writes. Returns false on any

@@ -22,10 +22,15 @@ final class WindowOpOverlay {
 
     private var windows: [NSWindow] = []
 
-    func show(rect: CGRect) {
+    /// `withChips: true` (default, for WINDOW resize): draws the four
+    /// edge labels `↑k / ↓j / ←h / →l`. `false` (for WINDOW MOVE):
+    /// just the blue border — hjkl in MOVE means "move the window in
+    /// that direction", which doesn't bind to a specific edge, so
+    /// border-anchored chips would suggest the wrong mental model.
+    func show(rect: CGRect, withChips: Bool = true) {
         ensureWindows()
         for w in windows {
-            (w.contentView as? WindowOpOverlayView)?.update(rect: rect)
+            (w.contentView as? WindowOpOverlayView)?.update(rect: rect, withChips: withChips)
             w.orderFrontRegardless()
         }
     }
@@ -61,9 +66,14 @@ final class WindowOpOverlay {
 @MainActor
 final class WindowOpOverlayView: NSView {
     private var axRect: CGRect = .zero
+    private var showChips: Bool = true
 
-    func update(rect: CGRect) {
+    /// `withChips: nil` keeps the previous setting (used by tick-update
+    /// from `show(rect:)` without `withChips:`). Pass `true`/`false`
+    /// explicitly only when switching modes (show entry).
+    func update(rect: CGRect, withChips: Bool? = nil) {
         axRect = rect
+        if let withChips = withChips { showChips = withChips }
         needsDisplay = true
     }
 
@@ -94,10 +104,13 @@ final class WindowOpOverlayView: NSView {
         path.stroke()
 
         // Four edge chips (skip any that don't fit fully on this screen).
-        drawChip(text: "↑k", side: .top,    of: viewRect, blue: blue)
-        drawChip(text: "↓j", side: .bottom, of: viewRect, blue: blue)
-        drawChip(text: "←h", side: .left,   of: viewRect, blue: blue)
-        drawChip(text: "→l", side: .right,  of: viewRect, blue: blue)
+        // MOVE mode passes `withChips: false` — border only.
+        if showChips {
+            drawChip(text: "↑k", side: .top,    of: viewRect, blue: blue)
+            drawChip(text: "↓j", side: .bottom, of: viewRect, blue: blue)
+            drawChip(text: "←h", side: .left,   of: viewRect, blue: blue)
+            drawChip(text: "→l", side: .right,  of: viewRect, blue: blue)
+        }
     }
 
     private enum Side { case top, bottom, left, right }
