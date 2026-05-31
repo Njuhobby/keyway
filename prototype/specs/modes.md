@@ -437,14 +437,15 @@ TODO 已经留在 `KeyCode.swift` 头部注释。
 
 ## 11. 修饰键策略汇总
 
-| 修饰键 | 在 TAP mode 内的行为 | 为什么 |
+| 键 / 修饰键 | 在任何 mode 内的行为 | 为什么 |
 | --- | --- | --- |
 | `Cmd` | 整个事件放行 | 保 Spotlight / Cmd+Tab / 截屏 / 关窗口等 |
 | `Ctrl` | 整个事件放行 | 保 Mission Control / Ctrl+↑ 等；也因为 power user 把 Ctrl+hjkl 当方向键 |
+| `↑ / ↓ / ← / →`（任意 mode、任意修饰键组合）| 整个事件放行 | Mouseless 用 hjkl 做自己的光标 / 滚动 / 窗口移动；箭头键让位给焦点 app 的原生导航（滚列表、移文本 caret、走菜单等）。如果不放行，sticky TAP 里就没法用箭头翻页 |
 | `Shift` | 消费 —— hint 末位字符 / Enter = 双击；移光标键(hjkl) = 加速 | 高频动作配顺手修饰键 |
 | `Option` | 消费 —— hint 末位字符 / Enter = 右键；移光标键 = 精细慢速 | 移光标键非 hint 字母，Option 不冲突 |
 
-放行 vs 消费在 `VimSession.handle()` 顶部判断（`flags.intersection([.maskCommand, .maskControl]).isEmpty`）；hjkl 移动额外要求不含 Cmd/Ctrl/Option（只允许 Shift 加速）。
+放行 vs 消费在 `VimSession.handle()` 顶部判断：先 `flags.intersection([.maskCommand, .maskControl]).isEmpty` 排掉系统快捷键，再独立判一次 keyCode 是不是箭头键（任意修饰组合都放行）。hjkl 移动额外要求不含 Cmd/Ctrl/Option（只允许 Shift 加速）。
 
 ---
 

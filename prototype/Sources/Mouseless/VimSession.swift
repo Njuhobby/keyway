@@ -496,6 +496,19 @@ final class VimSession {
             return false
         }
 
+        // ↑↓←→ arrow keys → always pass through, in any mode and with
+        // any modifier combo. Mouseless uses hjkl for its own cursor /
+        // scroll / window motion; the arrow keys are left for the
+        // focused app's native navigation (scroll a list, move the
+        // text caret, walk a menu, etc.). Without this, the active
+        // mode would swallow them — the user couldn't, say, page
+        // through a list while sticky TAP keeps hints up. Symmetric
+        // with the Cmd/Ctrl passthrough above.
+        if keyCode == KeyCode.arrowLeft || keyCode == KeyCode.arrowRight
+            || keyCode == KeyCode.arrowUp || keyCode == KeyCode.arrowDown {
+            return false
+        }
+
         // Palette open? It intercepts everything until closed.
         if let buffer = paletteBuffer {
             return handlePalette(buffer: buffer, keyCode: keyCode, flags: flags)
