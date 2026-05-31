@@ -112,8 +112,8 @@ final class HintMode {
     var isActive: Bool { isActiveFlag }
 
     @discardableResult
-    func activate() async -> Bool {
-        let collected = await Self.collectAll()
+    func activate(isolateApp: Bool = false) async -> Bool {
+        let collected = await Self.collectAll(isolateApp: isolateApp)
         if collected.focused.isEmpty
             && collected.focusedOmni.isEmpty
             && collected.dock.isEmpty
@@ -327,7 +327,7 @@ final class HintMode {
         let children: [AXUIElement]
     }
 
-    private static func collectAll() async -> CollectedElements {
+    private static func collectAll(isolateApp: Bool = false) async -> CollectedElements {
         let screenSpan = Self.totalScreenSpan()
 
         // 1. Focused app. Two sub-sources:
@@ -414,7 +414,7 @@ final class HintMode {
                 // Default path: skip the focused-app window AX walk,
                 // call OmniParser visual path instead. P4 stub returns
                 // []; real implementation in P5/P6.
-                focusedOmniOut = await OmniParserPath.collect()
+                focusedOmniOut = await OmniParserPath.collect(isolateApp: isolateApp)
                 // No cache to populate — OP candidates are ephemeral.
             }
 

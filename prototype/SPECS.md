@@ -123,7 +123,6 @@ NSApplication
 | `VimSession.swift` | Mode 状态机（`.tap`/`.scroll`）、arm 分派（`handleTriggerTap`/`enterScroll`）、palette、按键路由 |
 | `HintMode.swift` | 收集 4 来源（焦点窗口 AX **或** OP / Dock / menubar / extras）→ 生成标签 → typing → commit（合成点击）|
 | `HintWindowCache.swift` | 焦点 app 的 per-`AXWindow` 缓存。sticky rescan 复用没动过的 window 子树 |
-| `PostCommitWatcher.swift` | sticky 点击后 700ms 内监听**同 app** 的 AX 窗口/内容变化（debounce 合并）重扫；只对 AX 白名单 app 有效。切 app 由 `VimSession` 的 always-on app-switch follow 处理，OP app 同窗口变化由 ~100ms 延后重扫处理（见 `modes.md` §4.2）|
 | `MenuExtraCache.swift` | 后台维护"哪些 PID 有 menu extras"的 PID 集合 |
 | `HintOverlay.swift` | 每屏一个无边框透明窗口，绘制 hint 标签（大 rect 用 inside 放置） |
 | `HUD.swift` | 右下角 mode 提示 |

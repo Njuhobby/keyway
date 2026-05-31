@@ -595,6 +595,8 @@ PoC v2 的 throwaway spike 在 `~/Desktop/mouseless-omniparser-coreml-spike/`，
 
 **决策：焦点窗口**。理由——AX 路径在 Dock / menu bar / menu extras 上**永远好用**（这些苹果原生 AX 100% 覆盖），不需要 OmniParser 重复识别。OmniParser **精确**地补 AX 黑洞问题——**焦点窗口内部的子元素**——所以截图范围跟 AX 路径互补、不重叠。
 
+> **注：下面的实现块已过时。** 实际 `ScreenCapture.captureFocusedWindow` 用的是"截整个 display 再按窗口 rect crop"（读已合成 framebuffer，比 `desktopIndependentWindow` 的强制重渲染快），不再用 `_AXUIElementGetWindow` / CGWindowID。另外它带一个 `isolateApp` 开关：sticky 切 app 后的重扫用 `SCContentFilter(display:excludingApplications:[dockApp])` **排除 Dock 进程**，把 Cmd+Tab 切换器 HUD（Dock 拥有的窗口）从截图里去掉——否则 OP 会把切换器上的 app 图标识别成 hint。详见 `modes.md` §4.2。
+
 #### AXFocusedWindow 在 AX-bad app 上也能拿吗？✅ 能
 
 AX 树有两层：

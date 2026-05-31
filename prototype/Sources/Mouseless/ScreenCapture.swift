@@ -42,9 +42,22 @@ enum ScreenCapture {
     /// Reading the already-composited display framebuffer is much
     /// faster (~20-30ms) since no recomposition is required.
     /// See `omniparser-fallback-design.md` §6.4.
-    static func captureFocusedWindow() async -> Captured? {
+    /// `isolateApp`: exclude the **Dock** process from the capture (only
+    /// used for the post-app-switch re-hint). The Cmd+Tab switcher HUD is
+    /// a Dock-owned window — a normal full-display capture taken right
+    /// after a switch catches the still-fading HUD and OmniParser turns
+    /// its app icons into bogus hints. Dropping the Dock removes the HUD
+    /// (and the Dock itself, which OP doesn't need) regardless of
+    /// whether/when the HUD dismisses — no timing guess. Costs a fresh
+    /// `SCShareableContent` query (apps list isn't cached) + re-
+    /// composition; only paid on the infrequent app-switch path. (Tried
+    /// `including:[focusedApp]` first for tighter isolation, but its
+    /// canvas-anchoring semantics aren't clearly documented and produced
+    /// misaligned crops in testing. `excludingApplications:[dock]` is a
+    /// display-based filter — predictable canvas, predictable crop.)
+    static func captureFocusedWindow(isolateApp: Bool = false) async -> Captured? {
         let tStart = Date()
-        guard let (windowEl, _) = focusedWindow() else {
+        guard let (windowEl, pid) = focusedWindow() else {
             print("[mouseless] ScreenCapture: no focused window (AX chain returned nil)")
             return nil
         }
@@ -65,25 +78,58 @@ enum ScreenCapture {
         }
 
         do {
-            let displays = try await cachedDisplays()
-            let tEnum = Date()
-
             // Find the SCDisplay whose frame contains the focused window.
             // SCDisplay.frame is in the same global display coordinate
             // space as AX (top-left origin, points). For multi-display
             // setups the window's display origin can be non-zero — we
             // subtract it below when computing crop offset.
-            guard let display = displays.first(where: {
-                $0.frame.intersects(windowRectInAX)
-            }) else {
-                print("[mouseless] ScreenCapture: no SCDisplay contains the focused window")
-                return nil
+            let display: SCDisplay
+            let filter: SCContentFilter
+            if isolateApp {
+                // App-switch path: exclude the Dock process entirely.
+                // The Cmd+Tab switcher HUD is a Dock-owned window, so
+                // dropping the Dock app drops the HUD (and the Dock at
+                // screen edge, which OP doesn't hint anyway). Keeps a
+                // display-sized canvas (contentRect == display.frame),
+                // so the crop math is predictable — unlike the earlier
+                // `including:[focusedApp]` attempt whose contentRect
+                // quirks produced a partial image with a black gutter.
+                // Tradeoff: doesn't drop other-app overlays (notification
+                // banners etc.) — separate problem, defer.
+                let content = try await SCShareableContent.excludingDesktopWindows(
+                    false, onScreenWindowsOnly: true
+                )
+                guard let d = content.displays.first(where: {
+                    $0.frame.intersects(windowRectInAX)
+                }) else {
+                    print("[mouseless] ScreenCapture: no SCDisplay contains the focused window")
+                    return nil
+                }
+                display = d
+                if let dockApp = content.applications.first(where: {
+                    $0.bundleIdentifier == "com.apple.dock"
+                }) {
+                    filter = SCContentFilter(display: d, excludingApplications: [dockApp], exceptingWindows: [])
+                } else {
+                    print("[mouseless] ScreenCapture: Dock app not found — full-display fallback")
+                    filter = SCContentFilter(display: d, excludingWindows: [])
+                }
+            } else {
+                let displays = try await cachedDisplays()
+                guard let d = displays.first(where: {
+                    $0.frame.intersects(windowRectInAX)
+                }) else {
+                    print("[mouseless] ScreenCapture: no SCDisplay contains the focused window")
+                    return nil
+                }
+                display = d
+                // Capture the full display. Empty excludingWindows means
+                // "everything on screen". This reads the already-composited
+                // framebuffer instead of forcing per-window re-render.
+                filter = SCContentFilter(display: d, excludingWindows: [])
             }
+            let tEnum = Date()
 
-            // Capture the full display. Empty excludingWindows means
-            // "everything on screen". This reads the already-composited
-            // framebuffer instead of forcing per-window re-render.
-            let filter = SCContentFilter(display: display, excludingWindows: [])
             let scale = CGFloat(filter.pointPixelScale)
             let config = SCStreamConfiguration()
             config.width = Int(filter.contentRect.width * scale)
@@ -98,22 +144,28 @@ enum ScreenCapture {
             )
             let tCap = Date()
 
-            // Crop to the focused window's rect inside the display.
-            // Coordinate math: windowRectInAX and display.frame are both
-            // in points, AX/global-display top-left origin. Convert to
-            // pixel-space relative to the display's top-left.
-            let displayOrigin = display.frame.origin
+            // Crop to the focused window's rect inside the captured
+            // canvas. The captured image's coordinate space matches
+            // `filter.contentRect` (in global-display points). For the
+            // standard display filter that's `display.frame`. For
+            // `including:[app]` it's the app windows' bounding box —
+            // origin shifted, may be smaller than the display. We anchor
+            // the crop math to `filter.contentRect` so it's correct
+            // either way (without this, the include-app capture had a
+            // big black region where the crop fell off the canvas).
+            let captureOrigin = filter.contentRect.origin
             let cropInPoints = windowRectInAX.offsetBy(
-                dx: -displayOrigin.x,
-                dy: -displayOrigin.y
+                dx: -captureOrigin.x,
+                dy: -captureOrigin.y
             )
-            // Clamp to the display's bounds (in case window is partially
-            // off-screen) — cropping(to:) returns nil for out-of-bounds.
-            let displayBoundsInPoints = CGRect(
+            // Clamp to the canvas (cropping(to:) returns nil if fully
+            // out of bounds, ragged image if partially).
+            let captureBoundsInPoints = CGRect(
                 x: 0, y: 0,
-                width: display.frame.width, height: display.frame.height
+                width: filter.contentRect.width,
+                height: filter.contentRect.height
             )
-            let clampedInPoints = cropInPoints.intersection(displayBoundsInPoints)
+            let clampedInPoints = cropInPoints.intersection(captureBoundsInPoints)
             let cropInPixels = CGRect(
                 x: floor(clampedInPoints.minX * scale),
                 y: floor(clampedInPoints.minY * scale),
@@ -127,7 +179,7 @@ enum ScreenCapture {
             let tCrop = Date()
 
             let ms = { (a: Date, b: Date) in Int(b.timeIntervalSince(a) * 1000) }
-            print("[mouseless] ScreenCapture timings: ax=\(ms(tStart, tAX))ms enum=\(ms(tAX, tEnum))ms filter=\(ms(tEnum, tFilter))ms capture=\(ms(tFilter, tCap))ms crop=\(ms(tCap, tCrop))ms total=\(ms(tStart, tCrop))ms display=\(displayImage.width)×\(displayImage.height) crop=\(cropped.width)×\(cropped.height)")
+            print("[mouseless] ScreenCapture timings: ax=\(ms(tStart, tAX))ms enum=\(ms(tAX, tEnum))ms filter=\(ms(tEnum, tFilter))ms capture=\(ms(tFilter, tCap))ms crop=\(ms(tCap, tCrop))ms total=\(ms(tStart, tCrop))ms isolateApp=\(isolateApp) display=\(displayImage.width)×\(displayImage.height) crop=\(cropped.width)×\(cropped.height)")
             return Captured(image: cropped, screenRect: windowRectInAX)
         } catch {
             print("[mouseless] ScreenCapture failed: \(error.localizedDescription)")

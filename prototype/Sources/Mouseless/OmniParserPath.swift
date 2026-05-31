@@ -42,10 +42,10 @@ enum OmniParserPath {
     /// model load failure, etc.). The caller treats this as "no OP
     /// candidates this scan" and continues with the AX sources that
     /// run regardless (dock / menubar / extras).
-    static func collect() async -> [OmniCandidate] {
+    static func collect(isolateApp: Bool = false) async -> [OmniCandidate] {
         let tStart = Date()
 
-        guard let captured = await ScreenCapture.captureFocusedWindow() else {
+        guard let captured = await ScreenCapture.captureFocusedWindow(isolateApp: isolateApp) else {
             print("[mouseless] OP: ScreenCapture returned nil — skipping inference")
             return []
         }
