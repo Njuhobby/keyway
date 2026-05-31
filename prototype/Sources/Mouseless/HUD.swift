@@ -4,11 +4,17 @@ import Cocoa
 final class HUD {
     static let shared = HUD()
 
+    static let font = NSFont.monospacedSystemFont(ofSize: 14, weight: .semibold)
+    private static let height: CGFloat = 44
+    private static let horizontalPadding: CGFloat = 16   // each side, inside the rounded rect
+    private static let minWidth: CGFloat = 100
+
     private var window: NSWindow?
 
     func show(_ text: String) {
         ensureWindow()
         (window?.contentView as? HUDView)?.text = text
+        repositionAndResize(forText: text)
         window?.orderFrontRegardless()  // never makeKeyAndOrderFront — that steals focus
     }
 
@@ -20,7 +26,7 @@ final class HUD {
         if window != nil { return }
 
         let w = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 160, height: 44),
+            contentRect: NSRect(x: 0, y: 0, width: Self.minWidth, height: Self.height),
             styleMask: .borderless,
             backing: .buffered,
             defer: false
@@ -33,13 +39,28 @@ final class HUD {
         w.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
 
         let view = HUDView(frame: w.contentView!.bounds)
+        view.autoresizingMask = [.width, .height]
         w.contentView = view
+        window = w
+    }
 
+    /// Sizes the HUD window to fit `text` (plus padding) and re-centers
+    /// it at the bottom-middle of the main screen. Called on every
+    /// `show(_:)` so longer messages (e.g. `WINDOW: no resizable
+    /// window`) don't truncate. A minimum width keeps short labels
+    /// like `TAP` from looking jarringly small.
+    private func repositionAndResize(forText text: String) {
+        guard let w = window else { return }
+        let textWidth = (text as NSString).size(withAttributes: [.font: Self.font]).width
+        let newWidth = max(Self.minWidth, ceil(textWidth + 2 * Self.horizontalPadding))
         if let screen = NSScreen.main {
             let f = screen.visibleFrame
-            w.setFrameOrigin(NSPoint(x: f.midX - 80, y: f.minY + 80))
+            w.setFrame(NSRect(x: f.midX - newWidth / 2,
+                              y: f.minY + 80,
+                              width: newWidth,
+                              height: Self.height),
+                       display: true)
         }
-        window = w
     }
 }
 
@@ -55,7 +76,7 @@ final class HUDView: NSView {
         path.fill()
 
         let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedSystemFont(ofSize: 14, weight: .semibold),
+            .font: HUD.font,
             .foregroundColor: NSColor.white,
         ]
         let s = text as NSString
