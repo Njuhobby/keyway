@@ -123,6 +123,15 @@ final class HotkeyTap {
             session.enterScroll()
             return nil
         }
+        // F19 held + w → WINDOW chord, from any mode. (w for "window".)
+        // Like SCROLL: VimSession probes the focused window's AX
+        // settability and either uses direct AX writes or the synth
+        // mouse-drag fallback.
+        if f19Armed && keyCode == KeyCode.w {
+            f19ChordUsed = true
+            session.enterWindowMode()
+            return nil
+        }
 
         // In a mode — handler decides whether to consume the event.
         if session.isActive {
