@@ -5,7 +5,7 @@
 **读这一份**：项目定位、怎么跑、顶层架构、文件职责、关键权衡。
 **子文档**：具体 subsystem 的实现细节和踩坑记录，见 [§ 5 文档地图](#5-文档地图)。
 
-差异点（vs Homerow）：Electron 支持 + 多 mode 架构（未来 select-text、drag）是 wedge。
+差异点（vs Homerow）：Electron 支持 + 多 mode / 子状态架构（DRAG + `/`-搜索 + SCROLL + WINDOW resize/move 已落；未来 select-text）是 wedge。
 hint mode 本身只是 MVP 基线。详见 `memory/competitor_homerow.md`、`memory/feedback_priorities.md`。
 
 ---
@@ -136,9 +136,10 @@ NSApplication
 
 | 文件 | 职责 |
 | --- | --- |
-| `MouseMover.swift` | hjkl 连续移光标，**TAP + SCROLL + DRAG 共用**（60fps timer；`dragHeld=true` 时事件类型换成 `.leftMouseDragged`） |
+| `MouseMover.swift` | hjkl 连续移光标，**TAP + SCROLL 共用**（60fps timer；TAP 的 dragging 子状态下 `dragHeld=true` 时事件类型换成 `.leftMouseDragged`） |
 | `ScrollController.swift` | SCROLL 模式滚动合成 + 连续 + 加速 + 区域选择 + 光标 warp |
-| `DragController.swift` | DRAG 模式状态容器，两段式（armed / dragging）由 `startPoint: CGPoint?` 区分（nil = armed 等待 grab，非 nil = 已 grab）。`beginDrag(at:)` 合成 mouseDown + 设 `startPoint`（bare `v` 触发）；Backspace 取消用 `startPoint` warp 回 + 起点 mouseUp；`preMode` 决定 Enter/Backspace 完成后回哪个模式（见 `modes.md` §6） |
+| `DragController.swift` | DRAG 子状态（TAP 内）状态容器，单段：`init(at: CGPoint)` 立刻合成 mouseDown 并记 `startPoint`（bare `v` 在 TAP normal 触发）；Backspace 取消用 `startPoint` warp 回 + 起点 mouseUp；不持有 "preMode"——drop / cancel 都回 TAP normal 由 `VimSession.tapSub` 收敛（见 `modes.md` §6） |
+| `SearchOverlay.swift` | TAP `/`-搜索子状态的可视层：per-NSScreen borderless 透明 NSWindow，画黄色高亮框 + label chip（label 池复用 `HintMode.alphabet`，chip 在文本左侧）；按 `typed` 动态 dim 不匹配的 label。见 `modes.md` §6.5 |
 | `ScrollAreaDetector.swift` | AX-walk 焦点窗口找 `AXScrollArea`/`AXWebArea`（不依赖 OP 路由）|
 | `ScrollOverlay.swift` | 滚动区域 picker：蓝色光晕边框 + 数字标记 |
 | `WindowController.swift` | WINDOW resize 模式状态机 + 60fps timer：跟踪当前按住的 hjkl 边集合、每 tick 算 resize delta 直接 AX 写焦点窗口（无 fallback 路径——入口 gate 已保证 AX 可写）。每 tick 现读 `NSEvent.modifierFlags`：Shift = shrink、Option = 5pt 精细步长、两者正交可组合。见 `modes.md` §7 |
@@ -154,7 +155,7 @@ NSApplication
 | `ScreenCapture.swift` | ScreenCaptureKit 截焦点窗口（display capture + crop，display 缓存）|
 | `OmniParserModel.swift` | CoreML YOLO 检测器（icon_detect.mlpackage，启动预加载）|
 | `OmniParserPath.swift` | 截图 → 推理 → §5.1 baseline 过滤 → 屏幕坐标候选；debug overlay |
-| `OCRRefiner.swift` | OP 点击精度：center 落进 inner box 时用 Vision OCR 重定位（含 CJK）|
+| `OCRRefiner.swift` | OP 点击精度：center 落进 inner box 时用 Vision OCR 重定位（含 CJK）。也对外暴露 `recognizeText(in:)` helper 给 TAP `/`-搜索子状态用（同 `.accurate` + zh/en config）|
 
 **脚本**：
 
@@ -225,7 +226,7 @@ NSApplication
    **跟 OmniParser 路由是独立问题**——OP 只解决 AX 黑洞 app；cleanup 尖峰下
    AX 仍能返回候选（只是慢），且白名单 app 才走 AX walk。详见
    `specs/hint-discovery.md` §5 + [`specs/omniparser-fallback-design.md`](specs/omniparser-fallback-design.md) §4.5。
-4. **新 modes** —— `Mode` enum 已经留好扩展点：select-text、right-click 命令模式（DRAG `specs/modes.md` §6 / WINDOW resize §7 / WINDOW MOVE §8 都已实现）。接入路径见 `specs/modes.md` §12。
+4. **新 modes / 子状态** —— `Mode` enum 已经留好扩展点：select-text、right-click 命令模式（WINDOW resize `specs/modes.md` §7 / WINDOW MOVE §8 已实现；TAP 内部子状态 DRAG `specs/modes.md` §6 / `/`-搜索 §6.5 已实现）。接入路径见 `specs/modes.md` §12。
 5. **多 hint 来源的标签空间冲突** —— 焦点 app 元素很多时会吃光字母组，menu extras 排到 `lj/lk/ll`。
    方案候选：menu extras 走单独的前缀（如 `;a`, `;s` …）或单独字母池。
 6. **Dock 分隔符 / Recents 占位过滤** —— 当前 Dock 把所有 `AXDockItem` 都收，包括分隔符。低价值的 hint 浪费标签。

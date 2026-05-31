@@ -140,16 +140,9 @@ final class HotkeyTap {
             session.enterWindowMove()
             return nil
         }
-        // F19 held + v → DRAG chord, from any mode. (v matches the
-        // earlier bare-v trigger / vim-visual mnemonic.) Synthesizes
-        // leftMouseDown at the current cursor and switches to .drag;
-        // independent of TAP/SCROLL so the user doesn't have to enter
-        // a mode just to drag.
-        if f19Armed && keyCode == KeyCode.v {
-            f19ChordUsed = true
-            session.enterDrag()
-            return nil
-        }
+        // (DRAG is no longer a separate mode. It's a TAP sub-state
+        // entered by bare `v` from TAP — handled in VimSession, not
+        // here. No `Caps Lock + v` chord.)
 
         // In a mode — handler decides whether to consume the event.
         if session.isActive {

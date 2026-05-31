@@ -48,7 +48,7 @@ final class HintMode {
     // SCROLL, so they can't be hint labels — a bare j would be ambiguous
     // (move? or hint?). Everything else ergonomic is fair game.
     //
-    // 17 letters → 2-char labels cover 17² = 289 targets, past
+    // 16 letters → 2-char labels cover 16² = 256 targets, past
     // `maxTargets` (200), so a scan **never needs 3-char labels** (the
     // 3-char tier in `generateLabels` is now effectively dead). Bigger
     // pool also means more targets get fast 1-char labels.
@@ -56,11 +56,11 @@ final class HintMode {
     // Front-loaded by typing comfort: left home row (a s d f g) first,
     // then the strong inner/right keys. 1-char labels use `prefix()` and
     // short labels commit fastest, so the easiest keys must come first.
-    // `v` is at the tail — it's only available because DRAG mode moved
-    // from bare `v` to the Caps Lock + v chord, freeing it up; bottom-
-    // row left index is fine but not as quick as home row.
+    // `v` is intentionally **not** here — bare `v` in TAP starts the
+    // drag sub-state (mouseDown at cursor), so it can't double as a
+    // hint label without ambiguity.
     static let alphabet: [Character] = [
-        "a","s","d","f","g","e","r","u","i","o","p","w","t","n","m","c","v",
+        "a","s","d","f","g","e","r","u","i","o","p","w","t","n","m","c",
     ]
 
     /// Roles we always treat as clickable, even if AXPress isn't advertised.
@@ -177,6 +177,18 @@ final class HintMode {
         typed = ""
         isActiveFlag = false
         HintOverlay.shared.hide()
+    }
+
+    /// Temporarily hide the hint overlay without clearing `targets` —
+    /// used by TAP sub-states (drag, search) that take over the screen
+    /// real estate. `showOverlay()` re-draws the same cached targets.
+    func hideOverlay() {
+        HintOverlay.shared.hide()
+    }
+
+    func showOverlay() {
+        guard isActiveFlag else { return }
+        HintOverlay.shared.show(targets: targets, typed: typed)
     }
 
     func handle(char: Character, action: ClickAction = .left) -> HintResult {
@@ -939,14 +951,16 @@ final class HintMode {
         return rect.intersects(span)
     }
 
-    private static func generateLabels(count: Int) -> [String] {
+    /// `internal` (was private) so the TAP `/`-search sub-state can
+    /// reuse the same label pool + algorithm for its match labels.
+    static func generateLabels(count: Int) -> [String] {
         // CRITICAL: all returned labels must be the same length within
         // a single call's output. Mixing lengths creates prefix
         // collisions (e.g. "aa" is a prefix of "aaa"): user types
         // "a a" and the system can't tell if they want to commit "aa"
         // or are still building "aaa". Picking the shortest tier that
         // fits avoids this entirely.
-        let n = alphabet.count   // 17
+        let n = alphabet.count   // 16
         var out: [String] = []
         out.reserveCapacity(count)
 
@@ -958,7 +972,7 @@ final class HintMode {
             return out
         }
         if count <= n * n {
-            // 2-letter labels — n² = 289 covers every scan (maxTargets
+            // 2-letter labels — n² = 256 covers every scan (maxTargets
             // is 200), so this is the tier dense scans land in.
             for first in alphabet {
                 for second in alphabet {
@@ -968,7 +982,7 @@ final class HintMode {
             }
             return out
         }
-        // 3-letter labels — unreachable with n=17 (289 > maxTargets 200),
+        // 3-letter labels — unreachable with n=16 (256 > maxTargets 200),
         // kept only as a safety net if the pool or cap ever change.
         for first in alphabet {
             for second in alphabet {

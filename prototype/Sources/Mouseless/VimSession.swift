@@ -1,4 +1,5 @@
 import Cocoa
+import Vision   // VNRecognizedTextObservation, for the TAP /-search sub-state
 
 /// Owns the active interaction mode + an optional command-palette overlay.
 ///
@@ -14,13 +15,33 @@ final class VimSession {
     enum Mode {
         case tap(HintMode)
         case scroll(ScrollController)
-        case drag(DragController)
         case window(WindowController)
         case windowMove(WindowMoveController)
         // Future: case selectText(...), case rightClick(...)
     }
 
+    /// TAP-only sub-state. DRAG and `/`-search are **features inside
+    /// TAP**, not separate modes — they're available only when the user
+    /// is already in TAP (or sticky TAP). Only meaningful when
+    /// `mode == .tap`; reset to `.normal` whenever the top-level mode
+    /// changes (see `teardownCurrentMode` / `exit`).
+    enum TapSub {
+        case normal
+        case dragging(DragController)
+        case searchTyping(buffer: String)
+        case searchSearching   // transient: OCR in flight after Enter
+        case searchPicking(matches: [SearchMatch], typed: String)
+    }
+
+    /// One text match from the search OCR pass.
+    struct SearchMatch {
+        let label: String   // hint-style label (e.g. "a", "as", …)
+        let rect: CGRect    // screen rect (AX coords, top-left origin) of the matched substring
+        let text: String    // the matched substring (for debug logging)
+    }
+
     private var mode: Mode? = nil
+    private var tapSub: TapSub = .normal       // only meaningful when mode == .tap
     private var paletteBuffer: String? = nil   // nil = palette closed
     private var sticky: Bool = false           // toggled by trigger key in TAP
     private let mover = MouseMover()            // hjkl cursor move (TAP + SCROLL)
@@ -53,16 +74,23 @@ final class VimSession {
         case .none:
             enter()
         case .tap:
-            sticky.toggle()
-            renderModeHUD()
-        case .scroll, .drag, .window, .windowMove:
+            // In TAP, a Caps Lock tap toggles sticky — but only when
+            // we're in the normal sub-state. While a drag is held or
+            // a search is running, the chord still works as a "switch
+            // mode" trigger (uniform with other modes); teardown
+            // releases the held mouseDown / clears search.
+            if case .normal = tapSub {
+                sticky.toggle()
+                renderModeHUD()
+            } else {
+                teardownCurrentMode()
+                enter()
+            }
+        case .scroll, .window, .windowMove:
             // Caps Lock single tap from any of these → switch to TAP.
-            // teardownCurrentMode handles the cleanup uniformly: drag
-            // releases its held mouseDown at the current cursor (so the
-            // button never stays stuck), window/windowMove stop their
-            // timer + hide the blue overlay, scroll hides its picker.
-            // The drag's drop side-effect is unavoidable — a chord that
-            // switches modes can't leave a button held.
+            // teardownCurrentMode handles the cleanup uniformly:
+            // window/windowMove stop their timer + hide the blue
+            // overlay, scroll hides its picker.
             teardownCurrentMode()
             enter()
         }
@@ -184,40 +212,6 @@ final class VimSession {
         print("[mouseless] enter MOVE mode at \(Int(rect.minX)),\(Int(rect.minY))")
     }
 
-    /// Enter `.drag` mode (armed sub-state) from **any** mode, via the
-    /// Caps Lock + v chord (`HotkeyTap`). **Does NOT synthesize
-    /// mouseDown** — that waits for the user to press bare `v` to
-    /// commit the grab (so they have a chance to hjkl-aim the cursor
-    /// first without making a drag yet).
-    ///
-    /// State transitions inside `.drag`:
-    ///   armed → bare `v` → dragging (mouseDown at cursor)
-    ///   dragging → Enter → commit drop
-    ///   dragging → Backspace → cancel (warp back + release at start)
-    ///   any → Esc → exit OFF (mouseUp at cursor if was dragging)
-    ///   any → Caps Lock chord → switch mode (teardown handles mouseUp)
-    ///
-    /// `preMode` is captured for completion: sticky TAP stays sticky
-    /// and re-hints on Enter / cancel; SCROLL re-detects on cancel;
-    /// `.other` (OFF / WINDOW / MOVE) just exits OFF. See `modes.md` §6.
-    func enterDrag() {
-        if case .drag = mode { return }   // already here, chord is a no-op
-        let pre: DragController.PreMode
-        switch mode {
-        case .tap: pre = .tap(sticky: sticky)
-        case .scroll: pre = .scroll
-        case .none, .window, .windowMove: pre = .other
-        case .drag: return   // unreachable
-        }
-        teardownCurrentMode()   // hides prior overlay / stops timers; sets mode = nil
-        let controller = DragController(preMode: pre)
-        mode = .drag(controller)
-        paletteBuffer = nil
-        sticky = false   // sticky is captured in preMode; .drag has no sticky of its own
-        renderModeHUD()
-        print("[mouseless] enter DRAG mode (armed — press v to grab)")
-    }
-
     /// Enter TAP mode (hints visible). **Sets `mode` synchronously** so a
     /// rapid second Caps Lock is recognized as an in-TAP sticky toggle
     /// rather than racing against an async activation (the old bug where
@@ -258,13 +252,6 @@ final class VimSession {
         scrollPendingG = false
         if case .tap(let h) = mode { h.deactivate() }
         if case .scroll(let c) = mode { c.teardown() }
-        // Drag has a held mouseDown only in the dragging sub-state
-        // (armed has nothing to release). Defensive: the normal
-        // completion paths (Enter/Esc/Backspace) release explicitly;
-        // this catches any path that forgets to.
-        if case .drag(let c) = mode, c.isDragging {
-            MouseSynth.dragUp(at: MouseSynth.cursorPosition())
-        }
         if case .window(let c) = mode {
             c.teardown()                // stops the resize timer
             WindowOpOverlay.shared.hide()
@@ -273,7 +260,33 @@ final class VimSession {
             c.teardown()                // stops the move timer
             WindowOpOverlay.shared.hide()
         }
+        // TAP sub-state cleanup. Drag has a held mouseDown that must
+        // be released so we don't leave a stuck button across mode
+        // switches; search has an overlay to hide. Done BEFORE
+        // setting mode = nil so the resync paths see the right state.
+        cleanupTapSub()
         mode = nil
+    }
+
+    /// Reset TAP sub-state to .normal, performing any cleanup the
+    /// current sub-state needs (release held mouseDown, hide search
+    /// overlay). Used both on exit and on intra-TAP transitions
+    /// (e.g. drag → normal after Enter drop).
+    private func cleanupTapSub() {
+        switch tapSub {
+        case .normal:
+            break
+        case .dragging:
+            // Release the held mouseDown wherever the cursor is — same
+            // unavoidable "drop side-effect" as Esc-during-drag. The
+            // normal completion paths (Enter / Backspace) release
+            // explicitly before calling this; the catch-all here is
+            // for mode-switch chords mid-drag.
+            MouseSynth.dragUp(at: MouseSynth.cursorPosition())
+        case .searchTyping, .searchSearching, .searchPicking:
+            SearchOverlay.shared.hide()
+        }
+        tapSub = .normal
     }
 
     // MARK: - Sticky re-hint (+ async-focus recheck)
@@ -401,14 +414,6 @@ final class VimSession {
         if case .scroll(let controller) = mode {
             controller.teardown()   // stop scrolling + hide area overlay
         }
-        // Drag: Esc semantic per design — if dragging, release the held
-        // mouseDown wherever the cursor currently is (the drop is
-        // unavoidable; we can't leave the button stuck). Armed state
-        // has nothing to release. Either way exit to OFF; cursor stays
-        // (per user spec: "cursor 在哪就在哪，不动").
-        if case .drag(let c) = mode, c.isDragging {
-            MouseSynth.dragUp(at: MouseSynth.cursorPosition())
-        }
         if case .window(let c) = mode {
             c.teardown()
             WindowOpOverlay.shared.hide()
@@ -417,6 +422,8 @@ final class VimSession {
             c.teardown()
             WindowOpOverlay.shared.hide()
         }
+        // TAP sub-state cleanup (mouseUp held drag, hide search overlay).
+        cleanupTapSub()
         mode = nil
         paletteBuffer = nil
         sticky = false
@@ -447,8 +454,19 @@ final class VimSession {
         let allowsMoveHere: Bool
         let dragHeld: Bool
         switch m {
-        case .tap:    allowsMoveHere = true;  dragHeld = false
-        case .drag(let c): allowsMoveHere = true; dragHeld = c.isDragging   // armed = mouseMoved, dragging = leftMouseDragged
+        case .tap:
+            // In TAP normal / dragging hjkl moves the cursor (drag flips
+            // event type via dragHeld). In search sub-states hjkl is
+            // suppressed — let handleTap route it instead so search
+            // can swallow it cleanly (no stray cursor motion mid-type).
+            switch tapSub {
+            case .normal:
+                allowsMoveHere = true; dragHeld = false
+            case .dragging:
+                allowsMoveHere = true; dragHeld = true   // mover posts .leftMouseDragged
+            case .searchTyping, .searchSearching, .searchPicking:
+                allowsMoveHere = false; dragHeld = false
+            }
         case .scroll: allowsMoveHere = false; dragHeld = false
         case .window: allowsMoveHere = false; dragHeld = false   // hjkl resizes, handled in handleWindow
         case .windowMove: allowsMoveHere = false; dragHeld = false   // hjkl translates, handled in handleWindowMove
@@ -487,8 +505,19 @@ final class VimSession {
         // keeps running (M● in menu bar, Caps Lock still remapped). To
         // fully quit, use the menu bar Quit item (which reverts the
         // Caps Lock remap on its way out). See SPECS §2.1.
+        //
+        // Exception: in TAP's **search** sub-states Esc cancels the
+        // search (back to TAP normal with the hint overlay re-shown),
+        // rather than exiting all the way out. Drag sub-state still
+        // exits — that matches the existing "Esc-in-drag = drop at
+        // cursor + exit" semantic.
         if keyCode == KeyCode.escape {
-            exit()
+            switch tapSub {
+            case .searchTyping, .searchSearching, .searchPicking:
+                cancelSearch()
+            default:
+                exit()
+            }
             return true
         }
         // Shift+; (= ":") — open the command palette over the current mode.
@@ -508,8 +537,6 @@ final class VimSession {
             return handleTap(hint: hint, keyCode: keyCode, flags: flags)
         case .scroll(let controller):
             return handleScroll(controller: controller, keyCode: keyCode, flags: flags)
-        case .drag(let controller):
-            return handleDrag(controller: controller, keyCode: keyCode, flags: flags)
         case .window(let controller):
             return handleWindow(controller: controller, keyCode: keyCode, flags: flags)
         case .windowMove(let controller):
@@ -574,106 +601,323 @@ final class VimSession {
         }
     }
 
-    // MARK: - DRAG mode
+    // MARK: - TAP sub-state: drag
 
-    /// `.drag` keystrokes. Two sub-states (armed / dragging) gated by
-    /// `controller.isDragging`. hjkl is handled by the early intercept
-    /// (with `dragHeld` synced to `controller.isDragging`, so the same
-    /// keys are `.mouseMoved` in armed and `.leftMouseDragged` in
-    /// dragging). Esc is handled in `handle()` above (exits OFF;
-    /// `exit()` mouseUp's only when dragging).
-    ///
-    ///   bare `v`   → armed: synth `mouseDown` at current cursor →
-    ///                dragging. Dragging: idempotent no-op.
-    ///   Enter      → dragging only: `mouseUp` at current cursor +
-    ///                commit. Armed: swallow (nothing to drop yet).
-    ///   Backspace  → dragging only: warp to `startPoint` + `mouseUp`
-    ///                there + cancel (target app sees a zero-distance
-    ///                click, no drop). Armed: swallow.
-    ///   any other  → swallow (don't let stray keys hit the focused
-    ///                app, especially while a mouseDown is held).
-    private func handleDrag(controller: DragController, keyCode: Int, flags: CGEventFlags) -> Bool {
-        let modMask: CGEventFlags = [.maskCommand, .maskControl, .maskShift, .maskAlternate]
+    /// Start dragging from TAP normal. Synth `mouseDown` at the current
+    /// cursor and switch to `.dragging`. Bare `v` in TAP normal calls
+    /// this (handled in `handleTap`).
+    private func startDragFromTap() {
+        guard case .tap = mode, case .normal = tapSub else { return }
+        // Cancel any pending re-hint (e.g. from a recent click commit
+        // or search-match commit) so it doesn't fire mid-drag and
+        // replace the hidden overlay with a fresh scan.
+        pendingStickyRehint?.cancel()
+        pendingStickyRehint = nil
+        let cursor = MouseSynth.cursorPosition()
+        tapSub = .dragging(DragController(at: cursor))
+        // Hide the TAP hint overlay while dragging — the labels would
+        // distract; user is focused on dragging.
+        if case .tap(let h) = mode { h.hideOverlay() }
+        renderModeHUD()
+        print("[mouseless] DRAG (TAP sub-state) start at \(Int(cursor.x)),\(Int(cursor.y))")
+    }
+
+    /// Drag committed (Enter). MouseUp at the current cursor; sticky-
+    /// aware exit (sticky → schedule a re-hint; non-sticky → exit OFF
+    /// — same shape as a normal hint commit).
+    private func dragDrop() {
+        guard case .dragging = tapSub else { return }
+        mover.stop()
+        MouseSynth.dragUp(at: MouseSynth.cursorPosition())
+        tapSub = .normal
+        if sticky {
+            // Re-scan: the drop probably changed the UI (selection
+            // moved, list reloaded, etc.). schedulesStickyRehint
+            // handles the timing.
+            scheduleStickyRehint()
+        } else {
+            exit()
+        }
+    }
+
+    /// Drag cancelled (Backspace). Warp cursor back to the drag's
+    /// startPoint and release mouseUp there — the target app sees a
+    /// zero-distance click and registers no drop. Return to TAP
+    /// normal: cursor is back where we started, so the existing hints
+    /// (still cached in HintMode) are still valid → just re-show them
+    /// instead of re-scanning.
+    private func dragCancel() {
+        guard case .dragging(let c) = tapSub else { return }
+        mover.stop()
+        CGWarpMouseCursorPosition(c.startPoint)
+        MouseSynth.dragUp(at: c.startPoint)
+        tapSub = .normal
+        if case .tap(let h) = mode { h.showOverlay() }
+        renderModeHUD()
+    }
+
+    // MARK: - TAP sub-state: search (`/`)
+
+    /// Bare `/` in TAP normal → enter the search-typing sub-state.
+    /// Hide the TAP hint overlay (the label pool is about to be
+    /// reused for search matches; visual collision otherwise).
+    private func startSearch(hint: HintMode) {
+        guard case .tap = mode, case .normal = tapSub else { return }
+        // Same reason as startDragFromTap: any pending re-hint from a
+        // prior click/search-commit would fire mid-search and surface
+        // the hint overlay we just hid.
+        pendingStickyRehint?.cancel()
+        pendingStickyRehint = nil
+        hint.hideOverlay()
+        tapSub = .searchTyping(buffer: "")
+        renderModeHUD()
+    }
+
+    /// `.searchTyping` keystrokes. Letter chars (a-z) append to the
+    /// buffer; Backspace removes the last (empty buffer + Backspace =
+    /// cancel back to TAP normal); Enter kicks off OCR; Esc cancels
+    /// (handled in `handle()`'s Esc branch via cancelSearch).
+    private func handleTapSearchTyping(buffer: String, keyCode: Int, flags: CGEventFlags) -> Bool {
+        let modMask: CGEventFlags = [.maskCommand, .maskControl,
+                                     .maskShift, .maskAlternate]
         let bareModifiers = flags.intersection(modMask).isEmpty
 
-        // bare v → grab (armed → dragging). Note: in dragging state
-        // bare v is also "still v", just idempotent.
-        if keyCode == KeyCode.v && bareModifiers {
-            if !controller.isDragging {
-                controller.beginDrag(at: MouseSynth.cursorPosition())
-                renderModeHUD()   // HUD label flips to "DRAG · holding"
-                print("[mouseless] DRAG grabbed at \(Int(controller.startPoint!.x)),\(Int(controller.startPoint!.y))")
+        if keyCode == KeyCode.return {
+            // Kick off OCR (asynchronous) on the focused window.
+            // Trim — empty buffer = no-op (don't fire OCR on nothing).
+            let trimmed = buffer.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty else { return true }
+            kickoffSearch(query: trimmed)
+            return true
+        }
+        if keyCode == KeyCode.delete && bareModifiers {
+            if buffer.isEmpty {
+                cancelSearch()
+            } else {
+                var next = buffer
+                next.removeLast()
+                tapSub = .searchTyping(buffer: next)
+                renderModeHUD()
             }
             return true
         }
-
-        if keyCode == KeyCode.return, controller.isDragging {
-            MouseSynth.dragUp(at: MouseSynth.cursorPosition())
-            finishDrag(controller: controller, cancelled: false)
+        // Letter / digit / common punctuation goes into the buffer.
+        // Reuse palette's letterChar mapping (covers a-z) + accept
+        // digits and a few more glyphs via direct keycode mapping.
+        if bareModifiers, let ch = Self.searchTypingChar(for: keyCode) {
+            tapSub = .searchTyping(buffer: buffer + String(ch))
+            renderModeHUD()
             return true
         }
-
-        if keyCode == KeyCode.delete && bareModifiers, controller.isDragging,
-           let start = controller.startPoint {
-            CGWarpMouseCursorPosition(start)
-            MouseSynth.dragUp(at: start)
-            finishDrag(controller: controller, cancelled: true)
-            return true
-        }
-
-        // Anything else: swallow. Don't let stray keys hit the focused
-        // app while we're hovering / holding mouseDown.
+        // Anything else: swallow (don't leak typing into the focused app).
         return true
     }
 
-    /// After Enter/Backspace, tear down `.drag` and restore the pre-drag
-    /// mode appropriately.
-    ///   - **Backspace (cancelled)** → re-enter the pre-drag mode (TAP
-    ///     with original sticky / SCROLL re-detecting areas). The user
-    ///     bailed out, so we put them back where they started.
-    ///   - **Enter (committed)** → sticky-aware:
-    ///       * pre = TAP sticky → re-hint TAP (sticky preserved).
-    ///       * pre = TAP non-sticky → exit (drag was the one action).
-    ///       * pre = SCROLL → exit (drop ends the SCROLL session;
-    ///         restoring SCROLL after a drag is unusual and we keep
-    ///         the rule simple).
-    private func finishDrag(controller: DragController, cancelled: Bool) {
-        mover.stop()
-        mode = nil
-        if cancelled {
-            switch controller.preMode {
-            case .tap(let wasSticky):
-                enter()
-                sticky = wasSticky
-                renderModeHUD()
-            case .scroll:
-                enterScroll()
-            case .other:
-                // Came from OFF / WINDOW / MOVE — just exit. Rebuilding
-                // those after a drag is complex (WINDOW/MOVE held a
-                // specific window's state) and not worth it.
-                exit()
-            }
-            return
+    /// Whitelisted keys for search buffer input: a-z + digits. Symbols
+    /// (`-` `.` `/` ...) intentionally excluded for v1 — the buffer is
+    /// matched as a literal substring, so users searching exact symbols
+    /// are rare and we avoid edge cases with weird keycodes.
+    private static func searchTypingChar(for keyCode: Int) -> Character? {
+        if let ch = letterChar(for: keyCode) { return ch }
+        switch keyCode {
+        case 18: return "1"; case 19: return "2"; case 20: return "3"
+        case 21: return "4"; case 23: return "5"; case 22: return "6"
+        case 26: return "7"; case 28: return "8"; case 25: return "9"
+        case 29: return "0"
+        case KeyCode.space: return " "
+        default: return nil
         }
-        // Committed drop.
-        switch controller.preMode {
-        case .tap(let wasSticky):
-            if wasSticky {
-                // Re-enter TAP, restore sticky. enter()'s own async scan
-                // gives us fresh hints reflecting the post-drop UI — no
-                // need to also call scheduleStickyRehint, that would just
-                // double up. (Yes, the OP scan may catch the UI mid-
-                // settle — same trade as a regular sticky click.)
-                enter()
-                sticky = wasSticky
+    }
+
+    /// Trigger OCR + match discovery. Switches to `.searchSearching`
+    /// transient state, kicks off an async Task that captures the
+    /// focused window, runs Vision OCR, finds substring matches, and
+    /// transitions to `.searchPicking` (or back to `.normal` if no
+    /// matches).
+    private func kickoffSearch(query: String) {
+        tapSub = .searchSearching
+        renderModeHUD()
+        print("[mouseless] search: query=\"\(query)\" — capturing + OCR'ing focused window")
+        Task { @MainActor in
+            let tStart = Date()
+            guard let captured = await ScreenCapture.captureFocusedWindow() else {
+                searchFailed(reason: "no focused window")
+                return
+            }
+            // Guard against the user cancelling / mode-switching while
+            // OCR is in flight.
+            guard case .searchSearching = tapSub else {
+                print("[mouseless] search: cancelled during capture")
+                return
+            }
+            let observations = OCRRefiner.recognizeText(in: captured.image)
+            guard case .searchSearching = tapSub else {
+                print("[mouseless] search: cancelled during OCR")
+                return
+            }
+            let matches = Self.findMatches(query: query,
+                                           observations: observations,
+                                           windowRect: captured.screenRect)
+            let tEnd = Date()
+            let ms = Int(tEnd.timeIntervalSince(tStart) * 1000)
+            print("[mouseless] search: \(observations.count) obs → \(matches.count) matches in \(ms)ms")
+            if matches.isEmpty {
+                searchFailed(reason: "no matches for \"\(query)\"")
+                return
+            }
+            // Cap to alphabet² so labels stay ≤2 chars even on huge results.
+            let cap = HintMode.alphabet.count * HintMode.alphabet.count
+            let capped = Array(matches.prefix(cap))
+            let labels = HintMode.generateLabels(count: capped.count)
+            let labeled = zip(labels, capped).map { (label, m) in
+                SearchMatch(label: label, rect: m.rect, text: m.text)
+            }
+            tapSub = .searchPicking(matches: labeled, typed: "")
+            let overlayMatches = labeled.map { SearchOverlay.Match(label: $0.label, rect: $0.rect) }
+            SearchOverlay.shared.show(matches: overlayMatches, typed: "")
+            renderModeHUD()
+        }
+    }
+
+    /// OCR returned nothing usable. Show a brief HUD note, then return
+    /// to TAP normal with the hint overlay re-shown.
+    private func searchFailed(reason: String) {
+        print("[mouseless] search failed: \(reason)")
+        cancelSearch()
+        HUD.shared.show("no matches")
+    }
+
+    /// One raw OCR-derived match before label assignment.
+    private struct RawMatch {
+        let text: String
+        let rect: CGRect    // AX screen coords
+    }
+
+    /// Substring-search across all OCR observations. Case-insensitive.
+    /// For each observation we look up every occurrence of `query` (so
+    /// the same line with multiple matches gets multiple labels), and
+    /// use Vision's `boundingBox(for: range)` to get the substring's
+    /// normalized rect inside the captured image. Convert to screen
+    /// coords using the window's rect.
+    private static func findMatches(query: String,
+                                    observations: [VNRecognizedTextObservation],
+                                    windowRect: CGRect) -> [RawMatch] {
+        var out: [RawMatch] = []
+        let needle = query.lowercased()
+        for obs in observations {
+            guard let candidate = obs.topCandidates(1).first else { continue }
+            let haystack = candidate.string
+            let haystackLC = haystack.lowercased()
+            var searchStart = haystackLC.startIndex
+            while searchStart < haystackLC.endIndex,
+                  let range = haystackLC.range(of: needle, range: searchStart..<haystackLC.endIndex) {
+                // Map the lowercased range back to the original string
+                // by offsets (the lowercased string has the same length
+                // for our supported scripts).
+                let lo = haystackLC.distance(from: haystackLC.startIndex, to: range.lowerBound)
+                let hi = haystackLC.distance(from: haystackLC.startIndex, to: range.upperBound)
+                if let origLo = haystack.index(haystack.startIndex, offsetBy: lo, limitedBy: haystack.endIndex),
+                   let origHi = haystack.index(haystack.startIndex, offsetBy: hi, limitedBy: haystack.endIndex),
+                   let box = try? candidate.boundingBox(for: origLo..<origHi) {
+                    // box.boundingBox is normalized in image-space,
+                    // BOTTOM-LEFT origin (Vision quirk). Convert to
+                    // screen-space top-left coords.
+                    let bb = box.boundingBox
+                    let cropW = windowRect.width
+                    let cropH = windowRect.height
+                    let x = windowRect.origin.x + bb.minX * cropW
+                    let yFromTop = windowRect.origin.y + (1.0 - bb.maxY) * cropH
+                    let rect = CGRect(x: x, y: yFromTop,
+                                      width: bb.width * cropW,
+                                      height: bb.height * cropH)
+                    out.append(RawMatch(text: String(haystack[origLo..<origHi]),
+                                        rect: rect))
+                }
+                // Advance past this occurrence to find the next.
+                searchStart = range.upperBound
+            }
+        }
+        return out
+    }
+
+    /// `.searchPicking` keystrokes. Letter (a-z) extends `typed`; if
+    /// uniquely identifies a label, commit (warp cursor + return to
+    /// TAP normal). Backspace removes last `typed` char, or goes back
+    /// to `.searchTyping` if empty (re-edit query). Enter swallowed
+    /// (commit happens by typing the full label).
+    private func handleTapSearchPicking(matches: [SearchMatch], typed: String,
+                                        keyCode: Int, flags: CGEventFlags) -> Bool {
+        let modMask: CGEventFlags = [.maskCommand, .maskControl,
+                                     .maskShift, .maskAlternate]
+        let bareModifiers = flags.intersection(modMask).isEmpty
+
+        if keyCode == KeyCode.delete && bareModifiers {
+            if typed.isEmpty {
+                // Step back to typing the query (preserve buffer so the
+                // user can edit it). For simplicity v1: just clear buffer
+                // and go back; storing buffer across the OCR call would
+                // require more state.
+                tapSub = .searchTyping(buffer: "")
+                SearchOverlay.shared.hide()
                 renderModeHUD()
             } else {
-                exit()
+                var next = typed
+                next.removeLast()
+                tapSub = .searchPicking(matches: matches, typed: next)
+                SearchOverlay.shared.updateTyped(next)
+                renderModeHUD()
             }
-        case .scroll, .other:
-            exit()
+            return true
         }
+        guard bareModifiers,
+              let ch = Self.hintChar(for: keyCode)
+        else {
+            // Enter / Shift+letter / etc.: swallow.
+            return true
+        }
+        let next = typed + String(ch)
+        let candidates = matches.filter { $0.label.hasPrefix(next) }
+        if candidates.isEmpty {
+            // No label matches that prefix — misfire, swallow (preserve
+            // current typed). Same UX as hint commit's .ignored case.
+            return true
+        }
+        if candidates.count == 1, candidates[0].label == next {
+            commitSearchMatch(candidates[0])
+            return true
+        }
+        tapSub = .searchPicking(matches: matches, typed: next)
+        SearchOverlay.shared.updateTyped(next)
+        renderModeHUD()
+        return true
+    }
+
+    /// User picked a match — warp cursor to the match's left edge
+    /// (vertical midpoint) and return to TAP normal with a fresh hint
+    /// re-scan (cursor moved → hover state may have changed; existing
+    /// hint targets may no longer be exactly where they were).
+    private func commitSearchMatch(_ match: SearchMatch) {
+        let landing = CGPoint(x: match.rect.minX, y: match.rect.midY)
+        print("[mouseless] search commit: label=\(match.label) text=\"\(match.text.prefix(40))\" → cursor (\(Int(landing.x)),\(Int(landing.y)))")
+        SearchOverlay.shared.hide()
+        CGWarpMouseCursorPosition(landing)
+        tapSub = .normal
+        // Re-hint so the user can interact with whatever's now under
+        // the new cursor position (sticky-aware: same logic as a hint
+        // commit). Even non-sticky re-scans here — the user just did
+        // a search, presumably they want to keep going (maybe drag
+        // the text with bare v next).
+        scheduleStickyRehint()
+    }
+
+    /// Esc inside search or empty-buffer Backspace → cancel back to
+    /// TAP normal with the hint overlay restored.
+    private func cancelSearch() {
+        guard case .tap(let h) = mode else { return }
+        SearchOverlay.shared.hide()
+        tapSub = .normal
+        h.showOverlay()
+        renderModeHUD()
     }
 
     // MARK: - SCROLL mode
@@ -778,17 +1022,10 @@ final class VimSession {
         }
         if case .tap = mode {
             // hjkl release stops cursor movement. These aren't hint
-            // chars, so always consume their release while in TAP.
-            if Self.moveDirection(for: keyCode) != nil {
-                mover.stop()
-                return true
-            }
-            return false
-        }
-        if case .drag = mode {
-            // Same as TAP: hjkl release stops the (drag-mode) cursor move.
-            // Stopping just kills the timer — the held mouseDown stays
-            // held until Enter/Esc/Backspace explicitly releases it.
+            // chars, so always consume their release while in TAP —
+            // including the dragging sub-state (the timer is the
+            // mover; the held mouseDown stays held until Enter / Esc /
+            // Backspace releases it explicitly).
             if Self.moveDirection(for: keyCode) != nil {
                 mover.stop()
                 return true
@@ -844,11 +1081,41 @@ final class VimSession {
     // MARK: - TAP mode
 
     private func handleTap(hint: HintMode, keyCode: Int, flags: CGEventFlags) -> Bool {
-        // (Caps Lock → sticky toggle is handled in HotkeyTap's F19 arm
-        // layer — bare F19 release with no chord → handleTriggerTap →
-        // sticky toggle. Not handled here.)
+        // TAP routes keys based on the active sub-state. Esc / Caps Lock
+        // chord / hjkl are all intercepted earlier in handle(), so we
+        // see letters / digits / Enter / Backspace / `/` / `v` here.
+        switch tapSub {
+        case .normal:
+            return handleTapNormal(hint: hint, keyCode: keyCode, flags: flags)
+        case .dragging:
+            return handleTapDragging(keyCode: keyCode, flags: flags)
+        case .searchTyping(let buffer):
+            return handleTapSearchTyping(buffer: buffer, keyCode: keyCode, flags: flags)
+        case .searchSearching:
+            return true   // transient — OCR in flight, swallow input
+        case .searchPicking(let matches, let typed):
+            return handleTapSearchPicking(matches: matches, typed: typed,
+                                          keyCode: keyCode, flags: flags)
+        }
+    }
+
+    private func handleTapNormal(hint: HintMode, keyCode: Int, flags: CGEventFlags) -> Bool {
         let modMask: CGEventFlags = [.maskShift, .maskControl,
                                      .maskCommand, .maskAlternate]
+        let bareModifiers = flags.intersection(modMask).isEmpty
+
+        // bare `v` → start drag at current cursor. (v is no longer in
+        // the hint pool, so this doesn't collide with a hint commit.)
+        if keyCode == KeyCode.v && bareModifiers {
+            startDragFromTap()
+            return true
+        }
+
+        // bare `/` → enter search-typing sub-state.
+        if keyCode == KeyCode.slash && bareModifiers {
+            startSearch(hint: hint)
+            return true
+        }
 
         // Enter — click at the current cursor position. Modifier picks
         // the click kind, same mapping as hint commits: bare = single
@@ -874,7 +1141,7 @@ final class VimSession {
         // Backspace — undo the last typed hint character (e.g. pressed a
         // wrong first letter). Empty typed → no-op (don't exit; Esc does
         // that). Works in sticky too.
-        if keyCode == KeyCode.delete && flags.intersection(modMask).isEmpty {
+        if keyCode == KeyCode.delete && bareModifiers {
             hint.backspace()
             return true
         }
@@ -909,6 +1176,28 @@ final class VimSession {
                 exit()
             }
         }
+        return true
+    }
+
+    /// `.dragging` keystrokes. hjkl is handled by the early intercept
+    /// (with dragHeld true so MouseMover posts `.leftMouseDragged`).
+    /// Here we handle the two completion paths; everything else is
+    /// swallowed to keep stray keys out of the focused app while a
+    /// mouseDown is held.
+    private func handleTapDragging(keyCode: Int, flags: CGEventFlags) -> Bool {
+        let modMask: CGEventFlags = [.maskShift, .maskControl,
+                                     .maskCommand, .maskAlternate]
+        let bareModifiers = flags.intersection(modMask).isEmpty
+
+        if keyCode == KeyCode.return {
+            dragDrop()
+            return true
+        }
+        if keyCode == KeyCode.delete && bareModifiers {
+            dragCancel()
+            return true
+        }
+        // bare `v` while dragging: idempotent no-op (already grabbed).
         return true
     }
 
@@ -989,9 +1278,23 @@ final class VimSession {
         guard let m = mode else { return }
         let label: String
         switch m {
-        case .tap: label = sticky ? "TAP · sticky" : "TAP"
+        case .tap:
+            // TAP label depends on the active sub-state.
+            switch tapSub {
+            case .normal:
+                label = sticky ? "TAP · sticky" : "TAP"
+            case .dragging:
+                label = sticky ? "TAP · sticky · dragging" : "TAP · dragging"
+            case .searchTyping(let buffer):
+                // Search HUD shows the buffer prefixed with `/` (vim-style).
+                // Skip the suffix — the slash + buffer IS the HUD content.
+                label = "/" + buffer
+            case .searchSearching:
+                label = "/ … searching"
+            case .searchPicking(_, let typed):
+                label = typed.isEmpty ? "/ pick label" : "/ pick: \(typed)"
+            }
         case .scroll: label = "SCROLL"
-        case .drag(let c): label = c.isDragging ? "DRAG · holding" : "DRAG · v to grab"
         case .window: label = "WINDOW"
         case .windowMove: label = "MOVE"
         }
@@ -1023,7 +1326,6 @@ final class VimSession {
         case KeyCode.n: return "n"
         case KeyCode.m: return "m"
         case KeyCode.c: return "c"
-        case KeyCode.v: return "v"
         case 18: return "1"
         case 19: return "2"
         case 20: return "3"

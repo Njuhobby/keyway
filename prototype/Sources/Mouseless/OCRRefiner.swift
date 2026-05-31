@@ -25,6 +25,30 @@ import Vision
 /// design including failure-mode analysis.
 @MainActor
 enum OCRRefiner {
+    /// Run Vision text recognition on `image` with the standard config
+    /// (`.accurate` recognition level + zh-Hans / zh-Hant / en-US
+    /// languages + no language correction — UI text isn't sentences).
+    /// Returns the observations as-is so the caller can run substring
+    /// matching against `topCandidates(1)[0].string` and pull
+    /// character-level rects via `boundingBox(for:)`. Used by both the
+    /// OP click-refiner (small box) and the TAP `/`-search sub-state
+    /// (full focused window).
+    static func recognizeText(in image: CGImage) -> [VNRecognizedTextObservation] {
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.recognitionLanguages = ["zh-Hans", "zh-Hant", "en-US"]
+        request.usesLanguageCorrection = false
+
+        let handler = VNImageRequestHandler(cgImage: image, options: [:])
+        do {
+            try handler.perform([request])
+        } catch {
+            print("[mouseless] OCR recognizeText failed: \(error)")
+            return []
+        }
+        return (request.results ?? []) as [VNRecognizedTextObservation]
+    }
+
     /// Refine the click point for an OP-sourced hint target.
     ///
     /// - Parameters:
