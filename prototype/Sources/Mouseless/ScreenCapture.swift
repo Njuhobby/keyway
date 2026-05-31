@@ -144,28 +144,36 @@ enum ScreenCapture {
             )
             let tCap = Date()
 
-            // Crop to the focused window's rect inside the captured
-            // canvas. The captured image's coordinate space matches
-            // `filter.contentRect` (in global-display points). For the
-            // standard display filter that's `display.frame`. For
-            // `including:[app]` it's the app windows' bounding box —
-            // origin shifted, may be smaller than the display. We anchor
-            // the crop math to `filter.contentRect` so it's correct
-            // either way (without this, the include-app capture had a
-            // big black region where the crop fell off the canvas).
-            let captureOrigin = filter.contentRect.origin
+            // Crop to the focused window inside the captured display.
+            // AXPosition is in the AX/global coordinate space (top-left
+            // origin, points), whereas the captured image's pixel (0,0)
+            // is at the captured display's **local** top-left — so we
+            // subtract `display.frame.origin` (the display's global
+            // origin) to convert. Crucial for multi-display setups
+            // where the secondary display sits at a non-zero global
+            // origin (e.g. (2992, 0)).
+            //
+            // (Earlier we tried `filter.contentRect.origin` thinking
+            // it was the global origin. For display-based filters it's
+            // actually (0,0) local — equal to display.frame.origin on
+            // the primary, but not on secondaries — which silently
+            // produced empty crops there. Both current filter types
+            // are display-based, so `display.frame` is the right
+            // reference.)
+            let displayOrigin = display.frame.origin
             let cropInPoints = windowRectInAX.offsetBy(
-                dx: -captureOrigin.x,
-                dy: -captureOrigin.y
+                dx: -displayOrigin.x,
+                dy: -displayOrigin.y
             )
-            // Clamp to the canvas (cropping(to:) returns nil if fully
-            // out of bounds, ragged image if partially).
-            let captureBoundsInPoints = CGRect(
+            // Clamp to the display bounds in local coords (cropping(to:)
+            // returns nil if fully out of bounds, ragged image if
+            // partially).
+            let displayBoundsInPoints = CGRect(
                 x: 0, y: 0,
-                width: filter.contentRect.width,
-                height: filter.contentRect.height
+                width: display.frame.width,
+                height: display.frame.height
             )
-            let clampedInPoints = cropInPoints.intersection(captureBoundsInPoints)
+            let clampedInPoints = cropInPoints.intersection(displayBoundsInPoints)
             let cropInPixels = CGRect(
                 x: floor(clampedInPoints.minX * scale),
                 y: floor(clampedInPoints.minY * scale),
