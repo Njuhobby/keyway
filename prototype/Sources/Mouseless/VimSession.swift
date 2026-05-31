@@ -1006,6 +1006,7 @@ final class VimSession {
         case KeyCode.n: return "n"
         case KeyCode.m: return "m"
         case KeyCode.c: return "c"
+        case KeyCode.v: return "v"
         case 18: return "1"
         case 19: return "2"
         case 20: return "3"
