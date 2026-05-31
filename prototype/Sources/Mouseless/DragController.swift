@@ -1,19 +1,23 @@
 import Cocoa
 
-/// State for a `.drag` mode session. Created when the user presses `v`
-/// in TAP/SCROLL — `VimSession` synthesizes a `leftMouseDown` at the
-/// current cursor position and stores the state needed to:
+/// State for a `.drag` mode session. Two sub-states distinguished by
+/// `startPoint`:
 ///
-///   1. Tell the in-mode `MouseMover` to post `.leftMouseDragged` events
-///      (held in `MouseMover.dragHeld`, not here — this controller's
-///      sole state is the bookkeeping for completion).
-///   2. Restore the pre-drag mode on a Backspace cancel (`startPoint`
-///      to warp back to + release at, `preMode` to re-enter).
-///   3. Re-hint with the correct sticky flag on Enter commit when
-///      the pre-drag mode was sticky TAP.
+///   - **armed** (`startPoint == nil`): just entered via the Caps Lock
+///     + v chord. No `leftMouseDown` has been synthesized yet — the
+///     user moves the cursor with hjkl (regular `.mouseMoved` events)
+///     to aim, then presses bare `v` to commit the grab.
+///   - **dragging** (`startPoint != nil`): bare `v` was pressed,
+///     `MouseSynth.dragDown` posted at the cursor (saved as
+///     `startPoint`), and hjkl now generates `.leftMouseDragged`
+///     events. Enter releases the button; Backspace warps back to
+///     `startPoint` and releases there (zero-distance click → no
+///     drop registered, true cancel).
 ///
-/// Logic (entry / dispatch / completion) lives in `VimSession`. This is
-/// just the value type. See `modes.md` §6 for the full state machine.
+/// The two-state design lets the user position the cursor first
+/// without committing to a drag — Caps Lock + v alone is harmless.
+/// Logic (entry / dispatch / completion) lives in `VimSession`. See
+/// `modes.md` §6 for the full state machine.
 @MainActor
 final class DragController {
     /// What the user was in *before* the Caps Lock + v chord triggered
@@ -28,15 +32,26 @@ final class DragController {
         case other   // OFF / WINDOW / MOVE — no restore on cancel
     }
 
-    /// Where `leftMouseDown` was posted. Backspace warps back here and
-    /// posts `leftMouseUp` at the same point: the target app sees a
-    /// stationary press+release (a click with zero drag distance), so
-    /// no drop is registered.
-    let startPoint: CGPoint
     let preMode: PreMode
 
-    init(startPoint: CGPoint, preMode: PreMode) {
-        self.startPoint = startPoint
+    /// Set by `beginDrag(at:)` when the user presses bare `v`. nil while
+    /// the controller is still in the armed sub-state.
+    private(set) var startPoint: CGPoint?
+
+    /// True iff we've synthesized `leftMouseDown` — i.e., the user has
+    /// pressed bare `v` to commit the grab.
+    var isDragging: Bool { startPoint != nil }
+
+    init(preMode: PreMode) {
         self.preMode = preMode
+    }
+
+    /// Transition armed → dragging: synthesize `leftMouseDown` at
+    /// `point` and remember it as the start (for Backspace cancel
+    /// warp-back). Idempotent — a second bare-`v` press does nothing.
+    func beginDrag(at point: CGPoint) {
+        guard startPoint == nil else { return }
+        MouseSynth.dragDown(at: point)
+        startPoint = point
     }
 }
