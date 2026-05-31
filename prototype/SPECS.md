@@ -125,7 +125,7 @@ NSApplication
 | `HintWindowCache.swift` | 焦点 app 的 per-`AXWindow` 缓存。sticky rescan 复用没动过的 window 子树 |
 | `MenuExtraCache.swift` | 后台维护"哪些 PID 有 menu extras"的 PID 集合 |
 | `HintOverlay.swift` | 每屏一个无边框透明窗口，绘制 hint 标签（大 rect 用 inside 放置） |
-| `HUD.swift` | 右下角 mode 提示 |
+| `HUD.swift` | 屏幕底部居中的 mode 提示。窗口宽度按文本自适应（min 100pt，文字两边各 16pt padding），每次 `show()` 重算尺寸 + 重新居中——避免 `WINDOW: no resizable window` 这种长一点的 HUD 文本被裁掉 |
 | `KeyCode.swift` | `kVK_ANSI_*` 物理键码常量（含 `f19=80`；ANSI 布局，非 QWERTY 会出错） |
 | `FocusedApp.swift` | 经 `NSWorkspace.frontmostApplication` 解析前台 app（Electron 上比 AXFocusedApplication 可靠） |
 | `MouseSynth.swift` | 合成 mouse click + drag down/up + 取光标位置（hint commit、Enter 点击、DRAG 共用） |
