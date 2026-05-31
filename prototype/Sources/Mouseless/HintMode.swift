@@ -399,7 +399,8 @@ final class HintMode {
                     } else {
                         var fresh: [ElementCandidate] = []
                         walk(element: window, depth: 0, into: &fresh,
-                             screenSpan: screenSpan, ipcCount: &focusedIPC,
+                             screenSpan: screenSpan, windowBounds: nil,
+                             ipcCount: &focusedIPC,
                              sourceWindow: window)
                         let stored = fresh.map {
                             HintWindowCache.StoredTarget(element: $0.element,
@@ -440,7 +441,8 @@ final class HintMode {
         var dockIPC = 0
         if let dock = applicationElement(forBundleID: "com.apple.dock") {
             walk(element: dock, depth: 0, into: &dockOut,
-                 screenSpan: screenSpan, ipcCount: &dockIPC,
+                 screenSpan: screenSpan, windowBounds: nil,
+                 ipcCount: &dockIPC,
                  sourceWindow: nil)
         }
         let t2 = Date()
@@ -599,7 +601,8 @@ final class HintMode {
 
         if menuIsOpen {
             walk(element: menubar, depth: 0, into: &out,
-                 screenSpan: screenSpan, ipcCount: &ipcCount,
+                 screenSpan: screenSpan, windowBounds: nil,
+                 ipcCount: &ipcCount,
                  sourceWindow: nil)
             return
         }
@@ -630,6 +633,7 @@ final class HintMode {
         depth: Int,
         into out: inout [ElementCandidate],
         screenSpan: CGRect?,
+        windowBounds: CGRect?,
         ipcCount: inout Int,
         sourceWindow: AXUIElement?
     ) {
@@ -638,6 +642,29 @@ final class HintMode {
 
         guard let attrs = batchFetch(element, ipcCount: &ipcCount) else { return }
         let role = attrs.role ?? ""
+
+        // At the root of a focused-app window walk, capture this element's
+        // rect as the bound for the entire subtree. AX rows that are
+        // scrolled outside the window's viewport sometimes still report
+        // rects within the global display geometry (just *below* the
+        // visible window) — `onScreen` accepts them, but they aren't
+        // actually visible to the user and the hint label would land on
+        // whatever's underneath (the window behind). Clamping subsequent
+        // candidacy to this window's bounds drops those phantom rows.
+        // Dock / menu bar / menu extras walks pass `sourceWindow: nil` so
+        // they skip this — they don't have a single "window" container.
+        let effectiveBounds: CGRect?
+        if depth == 0, sourceWindow != nil, windowBounds == nil {
+            effectiveBounds = attrs.rect
+        } else {
+            effectiveBounds = windowBounds
+        }
+
+        // Snapshot the candidate count so the source-list `AXRow`
+        // fallback at the end of this function can detect "this row
+        // contributed nothing" (no clickable descendant). See the
+        // comment on that fallback.
+        let countAtStart = out.count
 
         // Candidacy: cheap filters first (everything below comes from the
         // batched attrs, no extra IPC). `isClickable` for unknown roles
@@ -648,6 +675,7 @@ final class HintMode {
            let rect = attrs.rect,
            rect.width >= 8, rect.height >= 8,
            onScreen(rect, screenSpan: screenSpan),
+           withinWindow(rect, bounds: effectiveBounds),
            hasMeaningfulLabel(role: role, attrs: attrs),
            isClickable(element, role: role, ipcCount: &ipcCount) {
             out.append(ElementCandidate(element: element, rect: rect, role: role,
@@ -680,12 +708,57 @@ final class HintMode {
            !rect.intersects(span) {
             return
         }
+        // Same culling against the window bound — drop entire subtrees
+        // that AX puts outside this window's viewport (scrolled-off
+        // table sections etc.).
+        if let rect = attrs.rect, !rect.isEmpty, let bounds = effectiveBounds,
+           !rect.intersects(bounds) {
+            return
+        }
 
         for child in attrs.children {
             walk(element: child, depth: depth + 1, into: &out,
-                 screenSpan: screenSpan, ipcCount: &ipcCount,
-                 sourceWindow: sourceWindow)
+                 screenSpan: screenSpan, windowBounds: effectiveBounds,
+                 ipcCount: &ipcCount, sourceWindow: sourceWindow)
         }
+
+        // Source-list fallback. Apple's NSOutlineView source list
+        // (Finder / Mail / Notes / Music / System Settings / Calendar
+        // sidebars) makes the **row** the click target: clicking selects
+        // it (the app writes `AXSelectedRows`), but the row neither
+        // sits in `clickableRoles` nor exposes `AXPress` / `AXOpen`, so
+        // the candidacy check above didn't add it. If our walk found
+        // **no clickable descendant** inside the row (`out.count`
+        // unchanged from before we considered this element), the row is
+        // the click target — synth-clicking its center selects the
+        // item, which is the user-visible effect they want. If a
+        // descendant IS clickable (Finder's *main* list rows have an
+        // `AXImage` child with `AXOpen` → the icon was already hinted),
+        // we prefer that and skip the row to avoid duplicate hints.
+        //
+        // Costs nothing extra: no IPC, just a count comparison.
+        if role == "AXRow",
+           out.count == countAtStart,
+           attrs.enabled,
+           let rect = attrs.rect,
+           rect.width >= 8, rect.height >= 8,
+           onScreen(rect, screenSpan: screenSpan),
+           withinWindow(rect, bounds: effectiveBounds),
+           hasMeaningfulLabel(role: role, attrs: attrs) {
+            out.append(ElementCandidate(element: element, rect: rect, role: role,
+                                        sourceWindow: sourceWindow))
+        }
+    }
+
+    /// True if `rect` intersects the source window's bounds (or there's
+    /// no window bound to compare against). Used to exclude AX elements
+    /// whose reported rect falls outside the visible window viewport —
+    /// commonly scrolled-off rows in long sidebars/tables, which AX
+    /// still puts in the tree with a "virtual" position below the
+    /// viewport.
+    nonisolated private static func withinWindow(_ rect: CGRect, bounds: CGRect?) -> Bool {
+        guard let bounds = bounds else { return true }
+        return rect.intersects(bounds)
     }
 
     /// Returns true if this AXMenu's parent is an AXMenuBarItem that

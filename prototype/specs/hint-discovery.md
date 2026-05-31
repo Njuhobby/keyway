@@ -74,13 +74,23 @@ AX 树就是几千次跨进程 RPC（焦点 app 扫描 ~840ms）；改批量后
 1. `AXEnabled == true`（或属性缺失 —— 多数 control 不显式标）。
 2. 矩形 ≥ 8×8（伪元素过滤）。
 3. 矩形与屏幕并集相交（`onScreen`）。
-4. **有可识别标签**（`hasMeaningfulLabel`）：`AXTitle / AXDescription /
+4. **矩形落在源窗口内**（`withinWindow`，焦点 app walk 才生效）。
+   walk 入口（`depth == 0` 且 `sourceWindow != nil`）抓住窗口自己的
+   rect 当作 `effectiveBounds`，递归一路传下去，每个 candidate 都得跟它
+   相交。**为什么需要这条**：AX 偶尔会把"滚出 viewport 的 row"（典型：
+   Finder 侧栏底下 Tags 段、长表格的下半截）也报出来，rect 在屏幕几何
+   范围内但其实在窗口下方——`onScreen` 过不了它，hint 标签就贴到后面
+   那个窗口的内容上去了（实测踩到：Finder 在前 + Chrome 在后，Tags 段
+   的虚拟 row 把 hint 撒到了 Chrome 的页面上）。Dock / menubar / extras
+   走的路 `sourceWindow == nil`，跳过这条（它们不在某个"窗口"里）。
+   零额外 IPC：bound 直接复用 root 调用本来就要做的 `batchFetch`。
+5. **有可识别标签**（`hasMeaningfulLabel`）：`AXTitle / AXDescription /
    AXHelp / AXValue / AXSubrole` 任一非空。
    - 例外：`AXDockItem / AXMenuBarItem / AXMenuExtra` 跳过这条
      （它们靠位置和 role 本身就能识别）。
    - 没有这条过滤的话，AX 会报很多"幻影"元素 —— 标签全空、app 实际
      没画 —— 导致 hint 出现在空白处。
-5. **role 在 `clickableRoles`**：
+6. **role 在 `clickableRoles`**：
    ```
    AXButton, AXLink, AXMenuItem, AXMenuBarItem, AXMenuButton,
    AXCheckBox, AXRadioButton, AXPopUpButton, AXTab,
@@ -89,6 +99,25 @@ AX 树就是几千次跨进程 RPC（焦点 app 扫描 ~840ms）；改批量后
    或 `AXUIElementCopyActionNames` 返回包含 `AXPress` / `AXOpen`。
    `AXOpen` 是 Finder 桌面 `AXImage` 实际暴露的动作（替代 `AXPress`），
    不收就没法点桌面文件 / 文件夹。
+
+#### Source-list `AXRow` fallback
+
+Apple 的 NSOutlineView source list（Finder / Mail / Notes / Music /
+System Settings / Calendar 等侧栏）有个特点：**整个 row 是 click target**
+（点击触发选中，app 写 `AXSelectedRows`），但 row 本身既不在
+`clickableRoles` 里，也不暴露 `AXPress` / `AXOpen`——所以条件 6 通不过，
+walk 默认会**漏掉整列侧栏项**（Finder 早期就这样：sidebar 完全没 hint）。
+
+修法：在 `walk()` 递归完一个元素的子树后，**如果 role 是 `AXRow`、且
+子树里没人成为 candidate**（用 `out.count` 在进入子树前后做差），就把
+row 自己作为 candidate 加进去——synth click 到它中心就能选中那项。
+
+为什么"子树有可点后代时不补 row"？避免双 hint：Finder **主**文件列表里
+每行的 `AXImage` 子元素有 `AXOpen`，会通过条件 6 进 candidate；这种情况
+`out.count` 已经涨了，fallback 跳过 row，整行只留图标那一个 hint。
+
+零额外 IPC：纯 `out.count` 对比 + 一次条件 4-5 复查（cheap）。一改全顺，
+所有上面提到的 source-list app 侧栏一起亮起来。
 
 ### 2.3 屏幕并集计算
 
