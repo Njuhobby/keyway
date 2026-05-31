@@ -691,9 +691,16 @@ final class VimSession {
     /// cancel back to TAP normal); Enter kicks off OCR; Esc cancels
     /// (handled in `handle()`'s Esc branch via cancelSearch).
     private func handleTapSearchTyping(buffer: String, keyCode: Int, flags: CGEventFlags) -> Bool {
-        let modMask: CGEventFlags = [.maskCommand, .maskControl,
-                                     .maskShift, .maskAlternate]
-        let bareModifiers = flags.intersection(modMask).isEmpty
+        // Two modifier masks:
+        //   bareModifiers — strict, no modifiers at all (used by Backspace).
+        //   typingMods    — allow Shift (for uppercase letters), block
+        //                   Cmd/Ctrl/Option (those are system / future
+        //                   actions, not buffer content).
+        let strictMask: CGEventFlags = [.maskCommand, .maskControl,
+                                        .maskShift, .maskAlternate]
+        let bareModifiers = flags.intersection(strictMask).isEmpty
+        let typingBlockMask: CGEventFlags = [.maskCommand, .maskControl, .maskAlternate]
+        let typingModsOK = flags.intersection(typingBlockMask).isEmpty
 
         if keyCode == KeyCode.return {
             // Kick off OCR (asynchronous) on the focused window.
@@ -714,11 +721,19 @@ final class VimSession {
             }
             return true
         }
-        // Letter / digit / common punctuation goes into the buffer.
-        // Reuse palette's letterChar mapping (covers a-z) + accept
-        // digits and a few more glyphs via direct keycode mapping.
-        if bareModifiers, let ch = Self.searchTypingChar(for: keyCode) {
-            tapSub = .searchTyping(buffer: buffer + String(ch))
+        // Letter / digit / space goes into the buffer. Shift+letter →
+        // uppercase letter (so the user can type "Google" and see "G"
+        // in the HUD); findMatches lowercases both sides for matching,
+        // so case is purely a visual-feedback affordance — the user
+        // gets to type as they would in any normal search box.
+        if typingModsOK, let ch = Self.searchTypingChar(for: keyCode) {
+            let actual: Character
+            if flags.contains(.maskShift) && ch.isLetter {
+                actual = Character(ch.uppercased())
+            } else {
+                actual = ch
+            }
+            tapSub = .searchTyping(buffer: buffer + String(actual))
             renderModeHUD()
             return true
         }
@@ -905,13 +920,31 @@ final class VimSession {
         return true
     }
 
-    /// User picked a match — warp cursor to the match's left edge
-    /// (vertical midpoint) and return to TAP normal with a fresh hint
-    /// re-scan (cursor moved → hover state may have changed; existing
-    /// hint targets may no longer be exactly where they were).
+    /// User picked a match — warp cursor to a point just inside the
+    /// matched text's glyph area, then return to TAP normal with a
+    /// fresh hint re-scan (cursor moved → hover state may have
+    /// changed; existing hint targets may no longer be exactly
+    /// where they were).
+    ///
+    /// **Inset choice** (`x += 2`, `y` at 60% down from rect top):
+    /// the OCR rect is a coarse pixel box around the substring's
+    /// glyphs — its edges don't necessarily map to caret positions
+    /// the text view considers "inside this line". Landing exactly
+    /// on `(minX, midY)` sometimes hit-tests to the line above (left
+    /// padding) or the gap between lines (vertical center between
+    /// inter-line spacing). Pushing 2pt right past the leading
+    /// padding and dropping 10% below mid (so y biases toward the
+    /// glyph baseline, away from upper line spacing) keeps the
+    /// click inside the visible text. Empirically tuned for Mail's
+    /// rich-text content where the bug was first seen; small enough
+    /// that the caret still lands at the **start** of the matched
+    /// text (between the first and second character at worst).
     private func commitSearchMatch(_ match: SearchMatch) {
-        let landing = CGPoint(x: match.rect.minX, y: match.rect.midY)
-        print("[mouseless] search commit: label=\(match.label) text=\"\(match.text.prefix(40))\" → cursor (\(Int(landing.x)),\(Int(landing.y)))")
+        let landing = CGPoint(
+            x: match.rect.minX + 2,
+            y: match.rect.minY + match.rect.height * 0.6
+        )
+        print("[mouseless] search commit: label=\(match.label) text=\"\(match.text.prefix(40))\" rect=(\(Int(match.rect.minX)),\(Int(match.rect.minY)),\(Int(match.rect.width))x\(Int(match.rect.height))) → cursor (\(Int(landing.x)),\(Int(landing.y)))")
         SearchOverlay.shared.hide()
         CGWarpMouseCursorPosition(landing)
         tapSub = .normal
