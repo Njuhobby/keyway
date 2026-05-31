@@ -128,7 +128,7 @@ NSApplication
 | `HUD.swift` | 屏幕底部居中的 mode 提示。窗口宽度按文本自适应（min 100pt，文字两边各 16pt padding），每次 `show()` 重算尺寸 + 重新居中——避免 `WINDOW: no resizable window` 这种长一点的 HUD 文本被裁掉 |
 | `KeyCode.swift` | `kVK_ANSI_*` 物理键码常量（含 `f19=80`；ANSI 布局，非 QWERTY 会出错） |
 | `FocusedApp.swift` | 经 `NSWorkspace.frontmostApplication` 解析前台 app（Electron 上比 AXFocusedApplication 可靠） |
-| `MouseSynth.swift` | 合成 mouse click + drag down/up + 取光标位置（hint commit、Enter 点击、DRAG 共用） |
+| `MouseSynth.swift` | 合成 mouse click + drag down/up + 取光标位置（hint commit、bare `c` 点击、DRAG 共用） |
 | `TriggerRemap.swift` | App 启动 shell-out `hidutil` 把 Caps Lock → F19；退出还原 |
 | `KeyPoster.swift` | 合成键盘事件辅助（主路径未用；留给未来 select-text mode） |
 
@@ -172,8 +172,8 @@ NSApplication
 | 文档 | 内容 |
 | --- | --- |
 | [`specs/event-pipeline.md`](specs/event-pipeline.md) | HotkeyTap 注册、callback 三层 short-circuit、反馈环 `"MOUS"` 标记、修饰键透传策略（Cmd/Ctrl 放行，Shift/Option 消费） |
-| [`specs/modes.md`](specs/modes.md) | Mode 状态机（`.tap`/`.scroll`）、F19 arm 机制、palette、sticky、hjkl 移光标（TAP+SCROLL 统一）+ Enter 点击、**所有键位表**、KeyCode 常量、新 mode 接入 |
-| [`specs/scroll-mode-design.md`](specs/scroll-mode-design.md) | **SCROLL 模式完整设计**：chord 进入（Caps Lock + d）、AXScrollArea/AXWebArea 检测、多区域 picker、d/u 滚动合成、gg/G 跳顶底、hjkl 移光标 + Enter 点击、零-AX Electron 限制 |
+| [`specs/modes.md`](specs/modes.md) | Mode 状态机（`.tap`/`.scroll`）、F19 arm 机制、palette、sticky、hjkl 移光标（TAP+SCROLL 统一）+ bare `c` 点击（Enter 放行给 app）、**所有键位表**、KeyCode 常量、新 mode 接入 |
+| [`specs/scroll-mode-design.md`](specs/scroll-mode-design.md) | **SCROLL 模式完整设计**：chord 进入（Caps Lock + d）、AXScrollArea/AXWebArea 检测、多区域 picker、d/u 滚动合成、gg/G 跳顶底、hjkl 移光标 + bare `c` 点击、零-AX Electron 限制 |
 | [`specs/hint-discovery.md`](specs/hint-discovery.md) | AX 三源（focused / Dock / menu extras）、`walk()` 收录条件、屏幕并集计算、**menu extras 踩坑史 + `MenuExtraCache` 设计**、并发安全 |
 | [`specs/hint-rendering.md`](specs/hint-rendering.md) | 标签生成、typing → commit、**统一合成点击**（AX action 已弃）、`HintOverlay` 多屏窗口、坐标系转换、badge 排版（inside / Dock / 级联）、HUD |
 | [`specs/omniparser-fallback-design.md`](specs/omniparser-fallback-design.md) | **已实现 (P5-P6)**：OP 视觉路径，OP-default + AX whitelist 路由（非 fall-through）；baseline 过滤；OCR click-point refiner（§4.6）；PoC 数据；captioner 搁置 |
@@ -191,7 +191,7 @@ NSApplication
 | Menu bar fast path | AXMenuBar 上读一次 `AXSelectedChildren`；空则不下钻 | 99% 时刻菜单栏没展开，跳过 N×4 个 axMenuIsOpen 探针 |
 | Menu extras 发现 | 后台 PID cache + NSWorkspace 增量 | 触发期 < 30ms；预热成本对用户透明 |
 | 点击实现 | **统一合成 mouse event**（不用 AX 动作） | AX 动作（AXPress/AXShowMenu）在 NSBrowser cell / 自定义 view / Electron 上常静默失败；合成点击行为可预测，跟用户心智一致 |
-| `Enter` 点击 | 当前光标位置合成点击（Shift 双击 / Option 右键） | 跟 hjkl 移光标配套（移→点闭环）；取代了旧的 `x`"关菜单+重扫"手势 |
+| bare `c` 点击 | 当前光标位置合成点击（Shift 双击 / Option 右键） | 跟 hjkl 移光标配套（移→点闭环）；取代旧的 Enter-as-click，把 Enter 放行给 app（菜单确认、表单提交保留 app 语义） |
 | 移光标 / 滚动用裸键不用 Ctrl | hjkl 移光标（TAP+SCROLL 统一）、d/u 滚动 | power user（HHKB）常把 Ctrl+hjkl 系统级映射成方向键，会冲突 |
 | 焦点窗口 hint 路由 | AX whitelist → AX walk；其余 → OmniParser | 框架 ≠ AX 质量（WeChat 是 native 但 AX 黑洞）；OP 对所有 app 都 work 且 ~95ms 不比 AX walk 慢 |
 | 滚动区检测 | 只用 AX（`AXScrollArea`/`AXWebArea`），不用 OP | 滚动区是容器无视觉特征，OP 识别不了；结构 AX 即使内容 AX 烂也可靠 |

@@ -54,9 +54,9 @@ F19 keyUp:
 
 ### 2.2 hint 字母池排除 h/j/k/l
 
-hjkl 是 TAP 与 SCROLL **统一的移光标键**，裸按一定是"移动"，不能再当 hint 字母（否则按 j 有歧义）。`v` 在 TAP normal 里也被占——bare `v` 进 DRAG 子状态。所以 `HintMode.alphabet` 排除 h/j/k/l/v，其余顺手字母取 **16 个** → **a s d f g e r u i o p w t n m c**（16² = 256 > maxTargets 200，2 字母 label 封顶，不会出现 3 字母）。
+hjkl 是 TAP 与 SCROLL **统一的移光标键**，裸按一定是"移动"，不能再当 hint 字母（否则按 j 有歧义）。`v` 和 `c` 在 TAP normal 里也被占——bare `v` 进 DRAG 子状态、bare `c` 点击当前光标位置。所以 `HintMode.alphabet` 排除 h/j/k/l/v/c，其余顺手字母取 **15 个** → **a s d f g e r u i o p w t n m**（15² = 225 > maxTargets 200，2 字母 label 封顶，不会出现 3 字母）。
 
-（历史：最早 chord 进入时 j/k 仍是 hint 字母、池为 `a s d f g h j k l`；TAP 加 IJKL 移光标后删 j/k/l 补 e/r/u；hjkl 统一后删 h 补 i 成 9 键；扩到 16 键以让 2 字母 label 封顶；DRAG 从 bare `v` 改成 `Caps Lock + v` chord 时短暂把 `v` 加进池里（17 键）；DRAG 又收编成 TAP 子状态、bare `v` 改成"进 DRAG"触发键后，`v` 又从池里移除回到 16 键。详见 `modes.md` §4 / §6。）
+（历史：最早 chord 进入时 j/k 仍是 hint 字母、池为 `a s d f g h j k l`；TAP 加 IJKL 移光标后删 j/k/l 补 e/r/u；hjkl 统一后删 h 补 i 成 9 键；扩到 16 键以让 2 字母 label 封顶；DRAG 从 bare `v` 改成 `Caps Lock + v` chord 时短暂把 `v` 加进池里（17 键）；DRAG 又收编成 TAP 子状态、bare `v` 改成"进 DRAG"触发键后 `v` 又移除（16 键）；最后 Enter 点击改成 bare `c` 点击（Enter 改放行给 app）、`c` 再次移除变 15 键。详见 `modes.md` §4 / §6 / §4.3。）
 
 ### 2.3 chord 只进入，不滚动
 
@@ -70,7 +70,8 @@ SCROLL 模式：
     d / u 按住 → 连续下/上滚，松开停   （Shift 加速）
     h/j/k/l 按住 → 移光标 左/下/上/右   （vim hjkl，与 TAP 统一；Shift 快 / Option 慢，见 §3.3）
     gg / G     → 跳到选中区域 顶部 / 底部（vim 风格，见 §3.2）
-    Enter       → 当前光标位置左键单击，留在 SCROLL（配 hjkl：移→点）
+    c           → 当前光标位置左键单击，留在 SCROLL（配 hjkl：移→点；Shift 双击 / Option 右键）
+    Enter       → 放行给焦点 app（菜单确认 / 表单提交，不被 SCROLL 吃掉）
     数字键 1-9   → 切换选中区域
     Caps Lock   → 切到 TAP 模式（这时才扫描 + 出 hints）
     Esc         → 退出到 OFF
@@ -80,13 +81,13 @@ SCROLL 模式：
 
 合成一个超大 pixel scroll delta（±200k），app 把它 clamp 在内容边界，效果就是瞬间跳到选中区域的顶/底。`gg` 用 pending-flag 检测连按两个 g（第一个 g 置位，第二个 g 触发；中间按任何别的键则取消——g 单独无操作），`G` = Shift+g 单击即触发。实现见 `ScrollController.jumpToTop/jumpToBottom` + `VimSession.handleScroll` 的 `scrollPendingG`。
 
-### 3.3 hjkl 移光标 + Enter 点击
+### 3.3 hjkl 移光标 + bare `c` 点击
 
-SCROLL 里也能键盘移光标 + 点击，跟 TAP **共用同一套 hjkl + Enter**，复用同一套 `MouseMover` / `MouseSynth`、同一个 `VimSession.moveDirection(for:)` 映射。
+SCROLL 里也能键盘移光标 + 点击，跟 TAP **共用同一套 hjkl + bare `c`**，复用同一套 `MouseMover` / `MouseSynth`、同一个 `VimSession.moveDirection(for:)` 映射。
 
 **移光标键与 TAP 统一成 hjkl**：早期 SCROLL 用 SDFE、TAP 用 IJKL，两套移动键逼用户在模式间切换肌肉记忆——是真实的认知负担。现统一成 vim hjkl（h 左 / j 下 / k 上 / l 右），"移光标"在哪都一样。代价是滚动从 `j/k` 让到 **`d`(下)/`u`(上)**——但 `d` 正好对上进入 chord，反而更顺。三档速度：bare normal / Shift fast / Option slow（精细）。
 
-`Enter` = 当前光标位置左键单击（Shift 双击 / Option 右键），点完留在 SCROLL（不像 TAP 有 sticky/exit 分派——scroll 里就是连续操作）。
+`c` = 当前光标位置左键单击（Shift 双击 / Option 右键），点完留在 SCROLL（不像 TAP 有 sticky/exit 分派——scroll 里就是连续操作）。原来用 Enter，改成 `c` 是为了让 Enter 放行给焦点 app（详见 `modes.md` §4.3）。
 
 > 统一前两个模式移光标键不同（TAP=IJKL、SCROLL=SDFE）是各自键位约束下的妥协；统一到 hjkl 后认知负担消除。日后会开放让用户自定义按键配置。
 
@@ -170,12 +171,12 @@ scroll?.post(tap: .cghidEventTap)
 | 组件 | 职责 |
 | --- | --- |
 | `HotkeyTap` | F19 armed 状态机 + keyUp + chord 检测（Caps Lock + d）；分发到 TAP / SCROLL |
-| `VimSession` | Mode enum 加 `.scroll`；scroll 按键分发（d/u 滚、hjkl 移、gg/G 跳、Enter 点、数字切区）|
+| `VimSession` | Mode enum 加 `.scroll`；scroll 按键分发（d/u 滚、hjkl 移、gg/G 跳、bare `c` 点、数字切区）|
 | `ScrollAreaDetector` | AX walk 找 AXScrollArea + AXWebArea，返回各自 screen rect |
 | `ScrollOverlay` | 画蓝色光晕边框（Homerow 风）+ 数字 badge 标每个区域 |
 | `ScrollController` | 滚动合成 + 连续定时器 + gg/G 跳顶底 + 光标 warp + 区域选择状态 |
 | `MouseMover` | hjkl 连续移光标（TAP + SCROLL 共用同一套）|
-| `MouseSynth` | Enter 点击合成（与 TAP 共用）|
+| `MouseSynth` | bare `c` 点击合成（与 TAP 共用）|
 
 ## 8. v1 scope
 
@@ -185,7 +186,7 @@ scroll?.post(tap: .cghidEventTap)
 - 多区域 overlay（数字 + 光晕边框 + 最近默认）
 - 按住连续滚（d/u）+ shift 加速
 - **gg / G 跳顶底**（§3.2）
-- **hjkl 移光标**（normal / Shift 快 / Option 慢精细）**+ Enter 点击**（§3.3，与 TAP 共用 MouseMover/MouseSynth，键位统一）
+- **hjkl 移光标**（normal / Shift 快 / Option 慢精细）**+ bare `c` 点击**（§3.3，与 TAP 共用 MouseMover/MouseSynth，键位统一；Enter 放行）
 - 数字键切区域
 - Caps Lock → TAP，Esc → OFF
 - 松开 d/u 不重扫

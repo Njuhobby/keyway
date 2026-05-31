@@ -11,17 +11,17 @@
 `HintMode.alphabet`：
 ```swift
 static let alphabet: [Character] = [
-    "a","s","d","f","g","e","r","u","i","o","p","w","t","n","m","c",
+    "a","s","d","f","g","e","r","u","i","o","p","w","t","n","m",
 ]
 ```
-16 个字母。**不含 h/j/k/l/v**——h/j/k/l 在 TAP 和 SCROLL 里都是 hjkl 移光标键、`v` 在 TAP normal 里是"进 DRAG 子状态"触发键，裸按它们都有专门含义、不能再当 hint 标签（见 `modes.md` §4 / §6）。除这五个外其它顺手字母都纳入。顺序按手感前置（左手 home row `a s d f g` 在前），因为单字母 label 用 `prefix` 取前缀、最短 label 最快 commit。
+15 个字母。**不含 h/j/k/l/v/c**——h/j/k/l 在 TAP 和 SCROLL 里都是 hjkl 移光标键、`v` 在 TAP normal 里是"进 DRAG 子状态"触发键、`c` 是"点击当前光标位置"触发键，裸按它们都有专门含义、不能再当 hint 标签（见 `modes.md` §4 / §6）。除这六个外其它顺手字母都纳入。顺序按手感前置（左手 home row `a s d f g` 在前），因为单字母 label 用 `prefix` 取前缀、最短 label 最快 commit。
 
-**历史**：`v` 曾经短暂被纳入过 hint 池（17 字母）：那是 DRAG 还是独立 mode、通过 `Caps Lock + v` chord 进入时——bare `v` 没人占，就借给 hint。后来 DRAG 收编成 TAP 子状态、bare `v` 改成"进 DRAG"触发键，`v` 又从 hint 池移除。
+**历史**：池容量在 16/17/15 之间来回过几轮。`v` 曾短暂被纳入（17 字母，那是 DRAG 还是独立 mode、`Caps Lock + v` chord 进入时），DRAG 收编成 TAP 子状态、bare `v` 改成进 DRAG 触发键后又移除（16）。`c` 这一轮：原本是 Enter 当点击键、`c` 留在池里；Enter 经常跟 app 的菜单确认 / 表单提交冲突（被 Mouseless 吃掉），把 Enter 放行 + 点击挪到 bare `c` 后，`c` 也从池里移除（15）。
 
 **字母组**（焦点 app + menu extras 共享），同一次扫描内所有标签**等长**——混长度会前缀冲突（"aa" 是 "aaa" 的前缀，用户输 "aa" 会卡住等第三字符）：
-- count ≤ 16：单字母
-- 17–256：两字母（16 × 16）
-- 257+：三字母——**实际不可达**：`maxTargets` 是 200 < 256，所以任何一次扫描都落在 ≤2 字母。三字母分支只作 pool/cap 变动时的安全网。
+- count ≤ 15：单字母
+- 16–225：两字母（15 × 15）
+- 226+：三字母——**实际不可达**：`maxTargets` 是 200 < 225，所以任何一次扫描都落在 ≤2 字母。三字母分支只作 pool/cap 变动时的安全网。
 
 **数字组**（Dock 独享）：
 - count ≤ 10：单字符 `0, 1, ..., 9`

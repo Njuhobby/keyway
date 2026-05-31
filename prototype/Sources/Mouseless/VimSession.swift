@@ -1015,13 +1015,20 @@ final class VimSession {
             return true
         }
 
-        // Enter → click at the current cursor position, stay in SCROLL.
-        // Modifier picks the kind: bare single-left / Shift double /
-        // Option right. Pairs with hjkl: move the cursor, Enter to click.
-        if keyCode == KeyCode.return {
+        // bare `c` → click at the current cursor position, stay in
+        // SCROLL. Modifier picks the kind: bare single-left / Shift
+        // double / Option right. Pairs with hjkl: move the cursor,
+        // `c` to click. Same swap from Enter→c as TAP normal (see
+        // handleTapNormal): Enter has app-level semantics we want to
+        // preserve.
+        if keyCode == KeyCode.c {
             let (button, count) = Self.clickKind(from: flags)
             MouseSynth.click(at: MouseSynth.cursorPosition(), button: button, count: count)
             return true
+        }
+        // Enter → pass through (same reason as TAP normal).
+        if keyCode == KeyCode.return {
+            return false
         }
 
         // Number keys 1-9 → switch the selected scroll area.
@@ -1163,16 +1170,24 @@ final class VimSession {
             return true
         }
 
-        // Enter — click at the current cursor position. Modifier picks
-        // the click kind, same mapping as hint commits: bare = single
-        // left, Shift = double, Option = right. Pairs with hjkl move:
-        // move the cursor, Enter to click. (Cmd/Ctrl+Enter already
-        // passed through up top; palette's Enter is intercepted earlier;
-        // hint labels are letters/digits so Enter never collides.)
+        // bare `c` — click at the current cursor position. Modifier
+        // picks the click kind, same mapping as hint commits: bare =
+        // single left, Shift = double, Option = right. Pairs with
+        // hjkl move: move the cursor, `c` to click. `c` is removed
+        // from the hint pool so this can never collide with a hint
+        // label that ends in `c`.
+        //
+        // **Why not Enter** (the prior binding): Enter has app-level
+        // semantics — e.g. arrow-key through a menu in the focused
+        // app then Enter to confirm, or Enter to submit a form. With
+        // arrow keys now passing through, eating Enter would block
+        // exactly the workflows the arrow-passthrough was meant to
+        // enable. Enter falls through to the explicit passthrough
+        // below.
         //
         // After-click behavior mirrors a hint commit: sticky → rescan +
         // stay in TAP; otherwise → exit to OFF.
-        if keyCode == KeyCode.return {
+        if keyCode == KeyCode.c {
             hint.deactivate()
             let (button, count) = Self.clickKind(from: flags)
             MouseSynth.click(at: MouseSynth.cursorPosition(), button: button, count: count)
@@ -1182,6 +1197,13 @@ final class VimSession {
                 exit()
             }
             return true
+        }
+
+        // Enter → pass through. Lets the focused app handle confirm /
+        // submit / menu-select semantics, which the user reaches via
+        // the arrow-key passthrough (see VimSession.handle()).
+        if keyCode == KeyCode.return {
+            return false
         }
 
         // Backspace — undo the last typed hint character (e.g. pressed a
@@ -1371,7 +1393,6 @@ final class VimSession {
         case KeyCode.t: return "t"
         case KeyCode.n: return "n"
         case KeyCode.m: return "m"
-        case KeyCode.c: return "c"
         case 18: return "1"
         case 19: return "2"
         case 20: return "3"
