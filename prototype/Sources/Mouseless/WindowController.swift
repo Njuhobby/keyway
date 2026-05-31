@@ -2,13 +2,19 @@ import Cocoa
 import ApplicationServices
 
 /// Continuous window-resize driver for `.window` mode. Tracks which
-/// edges (h/j/k/l) are currently held, samples Shift each tick (Shift
-/// → shrink instead of expand), and applies the deltas via direct AX
-/// writes to `AXPosition` / `AXSize`. The mode-entry gate in
-/// `VimSession.enterWindowMode` guarantees both attributes are
-/// writable AND the window has a real title bar (`AXWindowOps`'s
-/// `isResizable` + `hasTitleBarButton`), so we don't carry a fallback
-/// path here.
+/// edges (h/j/k/l) are currently held; each tick reads modifier flags
+/// live and applies the deltas via direct AX writes to `AXPosition` /
+/// `AXSize`:
+///
+///   - bare: expand outward, normal step (20pt/tick).
+///   - **Shift**: invert → shrink inward, normal step.
+///   - **Option**: precision step (5pt/tick), expand direction.
+///   - **Shift + Option**: precision shrink — both modifiers compose.
+///
+/// The mode-entry gate in `VimSession.enterWindowMode` guarantees both
+/// AX attrs are writable AND the window has a real title bar
+/// (`AXWindowOps`'s `isResizable` + `hasTitleBarButton`), so we don't
+/// carry a fallback path here.
 ///
 /// Edge math: expanding the top or left edge moves the origin AND
 /// grows the size; expanding bottom or right just grows the size.
@@ -26,7 +32,8 @@ final class WindowController {
     private var activeEdges: Set<Edge> = []
     private var timer: Timer?
 
-    private let stepPerTick: CGFloat = 20      // pixels per tick at 60fps
+    private let normalStep: CGFloat = 20   // pixels per tick at 60fps
+    private let slowStep: CGFloat = 5      // Option held → precision (smaller step)
     private let tickInterval: TimeInterval = 1.0 / 60.0
     private let minSize: CGSize = CGSize(width: 200, height: 120)
 
@@ -74,9 +81,12 @@ final class WindowController {
 
     private func tick() {
         guard !activeEdges.isEmpty else { return }
-        let shrink = NSEvent.modifierFlags.contains(.shift)
+        let flags = NSEvent.modifierFlags
+        let shrink = flags.contains(.shift)
         let s: CGFloat = shrink ? -1 : 1
-        let step = stepPerTick
+        // Option = precision (smaller step). Composes with Shift: hold
+        // both for slow-shrink, hold only Option for slow-expand.
+        let step: CGFloat = flags.contains(.option) ? slowStep : normalStep
 
         var newRect = currentRect
         for e in activeEdges {
