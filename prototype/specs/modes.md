@@ -102,6 +102,7 @@ Mouseless 的状态有**三层**，"退出"在哪一层语义不一样：
 | Caps Lock + d | 进 SCROLL | 进 SCROLL | 进 SCROLL | （重进 SCROLL）| 进 SCROLL | 进 SCROLL | 进 SCROLL | — |
 | Caps Lock + w | 进 WINDOW | 进 WINDOW | 进 WINDOW | 进 WINDOW | 进 WINDOW | （已在 WINDOW，no-op）| 进 WINDOW | — |
 | Caps Lock + m | 进 MOVE | 进 MOVE | 进 MOVE | 进 MOVE | 进 MOVE | 进 MOVE | （已在 MOVE，no-op）| — |
+| Caps Lock + v | 进 DRAG | 进 DRAG | 进 DRAG | 进 DRAG | （已在 DRAG，no-op）| 进 DRAG | 进 DRAG | — |
 | `Esc` | — | deactivate | deactivate | deactivate | deactivate（drop at cursor）| deactivate | deactivate | deactivate |
 | 菜单栏 Quit / Cmd+Q | quit 进程 | quit 进程 | quit 进程 | quit 进程 | quit 进程 | quit 进程 | quit 进程 | quit 进程 |
 
@@ -220,39 +221,43 @@ MouseSynth.click(at: MouseSynth.cursorPosition(), button: .left, count: 1)
 
 ## 6. DRAG mode 键位
 
-全键盘拖拽，vim-visual 风格——光标已经在哪（用 hjkl 移到位），按一下进 drag，hjkl 拖到目标，松开。`DragController` 持有状态、`MouseSynth.dragDown`/`dragUp` 合成按下/松开、`MouseMover` 的 `dragHeld` 标志把每次移动事件类型从 `.mouseMoved` 切到 `.leftMouseDragged`。
+全键盘拖拽，vim-visual 风格——光标在哪（用 hjkl 先移到位），按 chord 进 drag，hjkl 拖到目标，松开。`DragController` 持有状态、`MouseSynth.dragDown`/`dragUp` 合成按下/松开、`MouseMover` 的 `dragHeld` 标志把每次移动事件类型从 `.mouseMoved` 切到 `.leftMouseDragged`。
 
 | 键 | 行为 |
 | --- | --- |
-| **进入：bare `v`**（TAP 或 SCROLL 下）| 在当前光标位置合成 `leftMouseDown` → 进 `.drag`（HUD 显示 "DRAG"，原 overlay 隐藏） |
+| **进入：`Caps Lock + v` chord**（任意 mode，包括 OFF）| 在当前光标位置合成 `leftMouseDown` → 进 `.drag`（HUD 显示 "DRAG"，原 overlay 隐藏）。pre-drag mode 存进 `DragController.preMode`，决定完成时回哪里 |
 | `h/j/k/l` (bare) | 移光标，事件类型换成 `.leftMouseDragged`（目标 app 看到拖拽轨迹）；按住连续；Shift 加速 / Option 慢 |
-| `Enter` | drop：当前位置 `leftMouseUp`。sticky-aware 完成（见下） |
+| `Enter` | drop：当前位置 `leftMouseUp`。pre-drag 相关流转见下 |
 | `Esc` | 当前位置 `leftMouseUp`（按钮必须释放）→ exit OFF。cursor 留在原地 |
 | `Backspace` | **真取消**：cursor warp 回 `startPoint` → 在起点 `leftMouseUp`（目标 app 看到的是零位移 click，不触发 drop）→ 回到 pre-drag mode |
-| Caps Lock（单击 / + d / + w / + m chord）| 立即切到对应 mode（TAP / SCROLL / WINDOW / MOVE）。`teardownCurrentMode` 先在当前光标位置 mouseUp 释放 drag（drop 副作用——跟 Esc 同逻辑、不可避免），再切。想"取消 drop"用 Backspace（warp 回起点 + 那里 mouseUp） |
+| Caps Lock（单击 / + d / + w / + m chord）| 立即切到对应 mode（TAP / SCROLL / WINDOW / MOVE）。`teardownCurrentMode` 先在当前光标位置 mouseUp 释放 drag（drop 副作用——跟 Esc 同逻辑、不可避免），再切。想"取消 drop"用 Backspace |
+| `Caps Lock + v` chord | 已在 DRAG，no-op |
 | 其它键 | 吞掉（防止按住 mouseDown 时误触发） |
 
-**`v` 选键说明**：不在 hint 池（`a s d f g e r u i o p w t n m c`，见 §4）、SCROLL 也没用、palette 拦截在前——bare `v` 在 TAP / SCROLL 下都不冲突。vim visual 的对应。
+**`v` 选键说明**：不在 hint 池（`a s d f g e r u i o p w t n m c`，见 §4）、SCROLL 也没用、palette 拦截在前——chord 触发不冲突。vim visual 的对应。
 
-**完成时的 sticky-aware 流转**（`finishDrag`）：
+**完成时的流转**（`finishDrag`），按 `preMode` 分派：
 
 | pre-drag mode | Enter（drop） | Backspace（cancel） |
 | --- | --- | --- |
 | TAP（sticky） | 回 TAP sticky 重扫 hints | 回 TAP sticky（cursor 已 warp 回起点），重扫 |
 | TAP（非 sticky） | exit OFF | 回 TAP 非 sticky，重扫 |
-| SCROLL | exit OFF（drop 后回 SCROLL 不太自然，简化） | 回 SCROLL（重新扫滚动区） |
+| SCROLL | exit OFF | 回 SCROLL（重新扫滚动区） |
+| **其它**（OFF / WINDOW / MOVE）| exit OFF | exit OFF（这些 mode 重建复杂，drag 完了直接退）|
 
 **典型用例**：
-- 拖文件：在 Finder 里 hjkl 把光标移到文件图标，`v` → hjkl 拖到目标文件夹（hover 高亮 + 拖拽指示）→ Enter。
-- 选文字 + 复制：hjkl 到选区起点，`v` → hjkl 到终点（沿途文本被选中）→ Enter（释放，**选区保留**）→ Cmd+C（passthrough，复制成功）。**Backspace 不行**——零位移 click 会清掉选区。
-- 拖 divider / slider / 时间轴 trim：起点 `v`，hjkl 拖，Enter 落点。
+- 拖文件：在 Finder 里 hjkl 把光标移到文件图标，`Caps Lock + v` → hjkl 拖到目标文件夹（hover 高亮 + 拖拽指示）→ Enter。
+- 选文字 + 复制：hjkl 到选区起点，`Caps Lock + v` → hjkl 到终点（沿途文本被选中）→ Enter（释放，**选区保留**）→ Cmd+C（passthrough，复制成功）。**Backspace 不行**——零位移 click 会清掉选区。
+- 拖 divider / slider / 时间轴 trim：起点 `Caps Lock + v`，hjkl 拖，Enter 落点。
+
+**为什么用 chord 而非 bare `v`**：早期版本是 bare `v` 在 TAP/SCROLL 里触发——但这逼用户为了拖必须先进 TAP/SCROLL，没必要。`Caps Lock + v` 从任何 mode（含 OFF）都能起，跟其它 mode 用 chord 触发的模式一致。
 
 **为什么这种"全键盘 drag"而非"两次 hint"**：源 / 目标不一定都是可点元素（拖文本选区、拖 divider、拖到空白处）。当前光标 + hjkl 是最通用的模型。
 
 **实现注意点**：
-- `enterDrag` 之前抓 `preMode`（pre-drag 是哪个模式 + sticky 状态），存进 `DragController`。`finishDrag` 用它决定去向。
+- `enterDrag` 之前抓 `preMode`（pre-drag 是哪个模式 + sticky 状态），存进 `DragController`。`finishDrag` 用它决定去向。从 OFF / WINDOW / MOVE 进来时 `preMode = .other`，完成后一律 exit OFF。
 - `teardownCurrentMode` / `exit` 都加了"在 drag 时合成 mouseUp"防御 —— 任何路径都不能留下按住的按钮。
-- F19 arm 在 drag 下 no-op（`handleTriggerTap` / `enterScroll` 顶上各加一道 guard）。
+- DRAG 下 Caps Lock 不再被吞，单击 / +d / +w / +m chord 都立即切对应 mode（同时 teardown 会先 mouseUp 释放 drag）。
 
 ---
 
