@@ -41,13 +41,6 @@ final class VimSession {
     ///   TAP    → toggle sticky
     ///   SCROLL → switch to TAP
     func handleTriggerTap() {
-        // Drag holds a synthesized mouseDown — let it complete via
-        // Enter/Esc/Backspace before any mode switch. Caps Lock is
-        // swallowed. Same for WINDOW (resize in progress shouldn't be
-        // interrupted by an accidental Caps Lock tap).
-        if case .drag = mode { return }
-        if case .window = mode { return }
-        if case .windowMove = mode { return }
         // Palette open → F19 closes it, back to the underlying mode
         // (preserves the pre-arm behavior now that F19 no longer reaches
         // handlePalette).
@@ -62,11 +55,16 @@ final class VimSession {
         case .tap:
             sticky.toggle()
             renderModeHUD()
-        case .scroll:
+        case .scroll, .drag, .window, .windowMove:
+            // Caps Lock single tap from any of these → switch to TAP.
+            // teardownCurrentMode handles the cleanup uniformly: drag
+            // releases its held mouseDown at the current cursor (so the
+            // button never stays stuck), window/windowMove stop their
+            // timer + hide the blue overlay, scroll hides its picker.
+            // The drag's drop side-effect is unavoidable — a chord that
+            // switches modes can't leave a button held.
             teardownCurrentMode()
             enter()
-        case .drag, .window, .windowMove:
-            break   // unreachable — guarded above
         }
     }
 
@@ -75,13 +73,11 @@ final class VimSession {
     /// scroll-area walk runs inline (cheap, ~few ms). See
     /// `specs/scroll-mode-design.md`.
     func enterScroll() {
-        // Same reason as handleTriggerTap: don't divert mid-drag — Caps
-        // Lock + d chord is swallowed until the drag completes. Same
-        // for WINDOW / windowMove.
-        if case .drag = mode { return }
-        if case .window = mode { return }
-        if case .windowMove = mode { return }
-        teardownCurrentMode()   // no-op from OFF; tears down TAP/SCROLL
+        // Caps Lock + d works from any mode — teardownCurrentMode
+        // handles drag's mouseUp release, window/move timer stop +
+        // overlay hide, tap deactivation. Idempotent if we're already
+        // in SCROLL (just re-detects areas).
+        teardownCurrentMode()
         let controller = ScrollController()
         controller.enter()      // detect scroll areas, warp, show overlay
         mode = .scroll(controller)
@@ -114,9 +110,10 @@ final class VimSession {
     /// almost always allow AX writes — the fallback's complexity wasn't
     /// earning its keep, so it's gone.)
     func enterWindowMode() {
-        if case .drag = mode { return }       // drag mid-flight wins
-        if case .window = mode { return }     // already in WINDOW
-        if case .windowMove = mode { return } // exit MOVE first
+        if case .window = mode { return }     // already here, chord is a no-op
+        // Other modes (drag / scroll / tap / windowMove): teardown
+        // cleanly switches over. Drag releases its held mouseDown at
+        // the current cursor (same as Esc); window/move overlays hide.
         guard let window = AXWindowOps.frontmostWindow(),
               let rect = AXWindowOps.readRect(window)
         else {
@@ -154,9 +151,10 @@ final class VimSession {
     /// window in that direction", not "pull that border", so
     /// border-anchored chips would mislead.
     func enterWindowMove() {
-        if case .drag = mode { return }
-        if case .window = mode { return }
-        if case .windowMove = mode { return }
+        if case .windowMove = mode { return } // already here, chord is a no-op
+        // Other modes (drag / scroll / tap / window): teardown cleanly
+        // switches over. Drag releases its held mouseDown at the
+        // current cursor; window/move overlays hide.
         guard let window = AXWindowOps.frontmostWindow(),
               let rect = AXWindowOps.readRect(window)
         else {
