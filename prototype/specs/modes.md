@@ -252,7 +252,41 @@ MouseSynth.click(at: MouseSynth.cursorPosition(), button: .left, count: 1)
 
 ---
 
-## 7. 命令面板键位
+## 7. WINDOW mode 键位
+
+整窗口尺寸调整。`WindowController` 持有状态 + 60fps timer，每 tick 算 delta 应用到焦点窗口；按入口时探测的结果走两条路：
+
+- **AX 直写**（native AppKit 等大多数 app）：每 tick 写 `AXPosition` / `AXSize`，瞬时无动画。
+- **Synth 边缘拖拽 fallback**（少数 AX-write 不通的 app，比如某些老 Electron）：合成 `leftMouseDown` 在窗口 border 中点 / 角点 → 每 tick 合成 `.leftMouseDragged` 推光标 → 松开 `leftMouseUp`；hjkl 组合变化（单边 ↔ 角）时 mouseUp + 重新 grab。每 tick 读一次 AX rect 来更新蓝色 border（合成 drag 后实际尺寸由 app 决定，得读出来才准）。
+
+| 键 | 行为 |
+| --- | --- |
+| **进入：`Caps Lock + w` chord**（任意 mode）| Probe 焦点窗口的 `AXPosition`/`AXSize` 可写性（`AXUIElementIsAttributeSettable`）→ 选 AX 或 fallback 路径 → 画 overlay。无前台窗口时 HUD 提示 `WINDOW: no frontmost window` 并留在原 mode |
+| `h` / `j` / `k` / `l` (held) | 把对应 border 往**外**推（`k` 顶上 / `j` 底下 / `h` 左外 / `l` 右外），按住连续；步长 20pt/tick @ 60fps |
+| `Shift + hjkl` | **反向**（往内压 = 缩小）。`tick()` 里现读 `NSEvent.modifierFlags`，所以 Shift 中途按下/松开**即时反向**，不用先松 hjkl |
+| 同时按（如 `h+j`）| 组合 → corner 推拉，4 个角都成立 |
+| 矛盾对（`h+l` 或 `j+k`）| AX 路径：deltas 自然抵消（位置和大小都 +/− 相消，窗口不变）。fallback 路径：保留上一 anchor、本 tick 跳过移动 |
+| `Esc` | exit OFF（teardown：停 timer / 关 overlay / fallback 路径释放 mouseDown） |
+| 其它键 | 吞掉 |
+| `Caps Lock`（单击 / + d chord / + w chord）| 吞掉，跟 DRAG 一样——drag / 同步 resize 不允许中途切到别的 mode |
+
+**视觉**：蓝色实线 border（3pt）贴窗口外沿；4 个 chip（蓝底白字）贴在每边中点的**外侧**，标 `↑k / ↓j / ←h / →l`。角落**不画**——hjkl 组合是隐含的，不再加 chip。**chip 屏幕外不画**：每个 chip 单独检查是不是全部包含在某个 NSScreen 的 view bounds 内；窗口顶到屏幕顶时，顶部 chip 应该在屏幕外那一块，就**直接不画**（用户明确要求：不画到屏幕外）。
+
+**HUD**：显示 `WINDOW · AX` 或 `WINDOW · synth-drag`，标明走的哪条路。
+
+**为什么用 chord 而非 bare `w`**：`w` 在 hint 字母池里（`a s d f g e r u i o p w t n m c`，见 §4）。用 chord 触发，bare `w` 仍可当 hint label。也跟 SCROLL 的 `Caps Lock + d` 一致。
+
+**为什么 fallback 而不是拒绝**：少数 app（某些老 Electron / 非规范 Catalyst）`AXSize` / `AXPosition` 不是 writable，AX 直写无效。Synth 边缘拖拽就是把"用户手动拖窗口边"那套自动化——只要 app 允许鼠标拖边 resize 就 work。代价是带 app 自己的 resize 动画、有一点点延迟，但用户体验上跟 AX 路径很接近。AX 探测一次性 ~2 IPC，可以接受。
+
+**实现要点**：
+- 触发：`HotkeyTap` F19 arm 期间按 `w` → `session.enterWindowMode()`，仿 `Caps Lock + d → enterScroll`。
+- 焦点窗口解析：`AXWindowOps.frontmostWindow()` 沿用 `ScreenCapture.focusedWindow()` 的链（`AXFocusedWindow` → `AXMainWindow` → `AXWindows[0]`）。
+- Edge math：`top` expand = `AXPosition.y -= step, AXSize.height += step`；`bottom` expand = `AXSize.height += step`；left/right 对称。shrink 翻号。
+- Fallback anchor：单边 → 边中点（内缩 4pt 让 OS hit-test 命中 resize handle）；两个兼容边 → 对应角点。
+
+---
+
+## 8. 命令面板键位
 
 | 键 | 行为 |
 | --- | --- |
@@ -282,7 +316,7 @@ case "dr": switchTo(.drag(...))
 
 ---
 
-## 8. KeyCode 常量
+## 9. KeyCode 常量
 
 `KeyCode.swift` 里的是 `kVK_ANSI_*`，**物理键位**。Dvorak / 国际键盘上字母位会错。
 迁移路径：用 `UCKeyTranslate` 或 `CGEventKeyboardGetUnicodeString` 把 keyCode + flags → 字符再匹配。
@@ -311,7 +345,7 @@ TODO 已经留在 `KeyCode.swift` 头部注释。
 
 ---
 
-## 9. 修饰键策略汇总
+## 10. 修饰键策略汇总
 
 | 修饰键 | 在 TAP mode 内的行为 | 为什么 |
 | --- | --- | --- |
@@ -324,7 +358,7 @@ TODO 已经留在 `KeyCode.swift` 头部注释。
 
 ---
 
-## 10. 新 mode 接入路径
+## 11. 新 mode 接入路径
 
 加一个新 mode（例如 select-text）的最小改动：
 
