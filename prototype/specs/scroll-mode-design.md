@@ -54,9 +54,9 @@ F19 keyUp:
 
 ### 2.2 hint 字母池排除 h/j/k/l
 
-hjkl 是 TAP 与 SCROLL **统一的移光标键**，裸按一定是"移动"，不能再当 hint 字母（否则按 j 有歧义）。所以 `HintMode.alphabet` 排除 h/j/k/l，其余顺手字母取 **16 个** → **a s d f g e r u i o p w t n m c**（16² = 256 > maxTargets 200，2 字母 label 封顶，不会出现 3 字母）。
+hjkl 是 TAP 与 SCROLL **统一的移光标键**，裸按一定是"移动"，不能再当 hint 字母（否则按 j 有歧义）。所以 `HintMode.alphabet` 排除 h/j/k/l，其余顺手字母取 **17 个** → **a s d f g e r u i o p w t n m c v**（17² = 289 > maxTargets 200，2 字母 label 封顶，不会出现 3 字母）。
 
-（历史：最早 chord 进入时 j/k 仍是 hint 字母、池为 `a s d f g h j k l`；TAP 加 IJKL 移光标后删 j/k/l 补 e/r/u；hjkl 统一后删 h 补 i 成 9 键；后扩到 16 键以让 2 字母 label 封顶。详见 `modes.md` §4。）
+（历史：最早 chord 进入时 j/k 仍是 hint 字母、池为 `a s d f g h j k l`；TAP 加 IJKL 移光标后删 j/k/l 补 e/r/u；hjkl 统一后删 h 补 i 成 9 键；扩到 16 键以让 2 字母 label 封顶；后来 DRAG 从 bare `v` 改成 `Caps Lock + v` chord，`v` 腾出来加进池里，变 17 键。详见 `modes.md` §4。）
 
 ### 2.3 chord 只进入，不滚动
 
