@@ -261,6 +261,8 @@ MouseSynth.click(at: MouseSynth.cursorPosition(), button: .left, count: 1)
 | **进入：`Caps Lock + w` chord**（任意 mode）| 两道 gate 都过才进（见下）。任一不过 → HUD 提示原因、不入 mode |
 | `h` / `j` / `k` / `l` (held) | 把对应 border 往**外**推（`k` 顶上 / `j` 底下 / `h` 左外 / `l` 右外），按住连续；步长 20pt/tick @ 60fps |
 | `Shift + hjkl` | **反向**（往内压 = 缩小）。`tick()` 里现读 `NSEvent.modifierFlags`，所以 Shift 中途按下/松开**即时反向**，不用先松 hjkl |
+| `Option + hjkl` | **精细**步长（5pt/tick 替代默认 20pt/tick），用于和别的窗口/屏幕边贴齐时的微调 |
+| `Shift + Option + hjkl` | 精细 shrink（两个修饰键正交，组合都成立）|
 | 同时按（如 `h+j`）| 组合 → corner 推拉，4 个角都成立 |
 | 矛盾对（`h+l` 或 `j+k`）| deltas 自然抵消（位置和大小都 +/− 相消，窗口不变） |
 | `Esc` | exit OFF（teardown：停 timer / 关 overlay） |
@@ -292,7 +294,40 @@ MouseSynth.click(at: MouseSynth.cursorPosition(), button: .left, count: 1)
 
 ---
 
-## 8. 命令面板键位
+## 8. WINDOW MOVE mode 键位
+
+窗口整体平移（不改尺寸）。跟 WINDOW resize 是**独立的两个 mode**——一个动 `AXPosition`、一个动 `AXPosition + AXSize`，混在一起做反而要给 hjkl 多挂修饰键，分开干净。
+
+`WindowMoveController` 镜像 `WindowController` 结构：方向集合 + 60fps timer + 每 tick 写 `AXPosition`（**只写 position**，单 IPC，比 `writeRect` 省一次 IPC）。
+
+| 键 | 行为 |
+| --- | --- |
+| **进入：`Caps Lock + m` chord**（任意 mode）| 两道 gate：`hasTitleBarButton`（同 WINDOW resize）+ `isMovable`（只查 `AXPosition` 可写，比 `isResizable` 松——move 不动 size） |
+| `h / j / k / l` (held) | 窗口往对应方向平移（h=左 / j=下 / k=上 / l=右，跟 cursor / SCROLL / WINDOW resize 同套 hjkl 方向编码）|
+| `Shift + hjkl` | **fast**（80pt/tick，4×）—— 跨屏快移 |
+| `Option + hjkl` | **slow**（5pt/tick）—— 精细对齐到其它窗口/屏幕边 |
+| `Shift + Option + hjkl` | **Option 优先 → slow**（跟 `MouseMover.moveSpeed` 优先级一致：误按 Shift+Option 时倾向"慢"而非"快"） |
+| 同时按（如 `h+j`）| 对角线平移（左下），两 axis 的 delta 独立叠加 |
+| 矛盾对（`h+l` 或 `j+k`）| 自然抵消（dx 或 dy 相加为 0，窗口不动） |
+| `Esc` | exit OFF |
+| 其它键 | 吞掉 |
+| `Caps Lock`（单击 / + d / + w / + m chord）| 吞掉，跟 DRAG / WINDOW resize 一样不允许中途切 |
+
+**视觉**：跟 WINDOW resize 共用 `WindowOpOverlay`，但 `show(rect:withChips:)` 这里传 `false`——**蓝色 border 照画，4 个边缘 chip 不画**。原因：resize 的 chip（`↑k / ↓j / ←h / →l`）暗示"这个 border 往那边推"，绑边语义；move 里 hjkl 是方向、不绑边，挂同样的 chip 反而让人误以为是 resize。border + HUD `MOVE` 标签足够，hjkl 方向跟其它 mode 一致不用每次重学。
+
+**HUD**：进 mode 时显示 `MOVE`。
+
+**为什么用 chord 而非 bare `m`**：`m` 在 hint 字母池里（`a s d f g e r u i o p w t n m c`，见 §4）。chord 触发，bare `m` 仍是 hint label。也跟 SCROLL `Caps Lock + d` / WINDOW resize `Caps Lock + w` 一致。
+
+**实现要点**：
+- 触发：`HotkeyTap` F19 arm 期间按 `m` → `session.enterWindowMove()`。
+- `AXWindowOps` 加 `isMovable`（只 probe `AXPosition` settable）+ `writePosition`（单 IPC 只写 origin）。
+- 控制器：`WindowMoveController.swift`，~70 行。`enum Direction { left, right, up, down }` + `Set<Direction>` 追踪按住的方向。tick 里每 axis 独立加 step 算 `dx, dy`。
+- Mode 互斥：MOVE 时其它 mode 触发（`enterWindowMode` / `enterScroll` / `enterDrag` / `handleTriggerTap`）都 guard 掉，必须先 Esc。
+
+---
+
+## 9. 命令面板键位
 
 | 键 | 行为 |
 | --- | --- |
@@ -322,7 +357,7 @@ case "dr": switchTo(.drag(...))
 
 ---
 
-## 9. KeyCode 常量
+## 10. KeyCode 常量
 
 `KeyCode.swift` 里的是 `kVK_ANSI_*`，**物理键位**。Dvorak / 国际键盘上字母位会错。
 迁移路径：用 `UCKeyTranslate` 或 `CGEventKeyboardGetUnicodeString` 把 keyCode + flags → 字符再匹配。
@@ -351,7 +386,7 @@ TODO 已经留在 `KeyCode.swift` 头部注释。
 
 ---
 
-## 10. 修饰键策略汇总
+## 11. 修饰键策略汇总
 
 | 修饰键 | 在 TAP mode 内的行为 | 为什么 |
 | --- | --- | --- |
@@ -364,7 +399,7 @@ TODO 已经留在 `KeyCode.swift` 头部注释。
 
 ---
 
-## 11. 新 mode 接入路径
+## 12. 新 mode 接入路径
 
 加一个新 mode（例如 select-text）的最小改动：
 

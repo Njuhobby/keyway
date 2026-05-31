@@ -141,9 +141,10 @@ NSApplication
 | `DragController.swift` | DRAG 模式状态容器：`startPoint`（Backspace 取消用来 warp 回 + 起点 mouseUp）+ `preMode`（决定 Enter/Backspace 完成后回哪个模式，见 `modes.md` §6） |
 | `ScrollAreaDetector.swift` | AX-walk 焦点窗口找 `AXScrollArea`/`AXWebArea`（不依赖 OP 路由）|
 | `ScrollOverlay.swift` | 滚动区域 picker：蓝色光晕边框 + 数字标记 |
-| `WindowController.swift` | WINDOW 模式状态机 + 60fps timer：跟踪当前按住的 hjkl 边集合、每 tick 算 resize delta 直接 AX 写焦点窗口（无 fallback 路径——入口 gate 已保证 AX 可写）。Shift 现读 `NSEvent.modifierFlags` 决定 expand/shrink。见 `modes.md` §7 |
-| `WindowOpOverlay.swift` | WINDOW 模式蓝色 border + 4 个边缘 chip（`↑k / ↓j / ←h / →l`）。仿 `HintOverlay` / `ScrollOverlay` 的 per-NSScreen borderless window 模式；chip 算位置时若不全包于当前屏内则跳过不画（用户要求：不画到屏幕外） |
-| `AXWindowOps.swift` | 窗口 AX helper：`frontmostWindow()`、`isResizable()`（`AXUIElementIsAttributeSettable` probe `AXPosition`+`AXSize` 都可写）、`hasTitleBarButton()`（判"真窗口"：至少有 Close/Min/Zoom/FullScreen 一个按钮——`AXSubrole` 对 AX 黑洞 app 不可靠，标题栏按钮对外壳 NSWindow chrome 都查得到）、`readRect()` / `writeRect()` |
+| `WindowController.swift` | WINDOW resize 模式状态机 + 60fps timer：跟踪当前按住的 hjkl 边集合、每 tick 算 resize delta 直接 AX 写焦点窗口（无 fallback 路径——入口 gate 已保证 AX 可写）。每 tick 现读 `NSEvent.modifierFlags`：Shift = shrink、Option = 5pt 精细步长、两者正交可组合。见 `modes.md` §7 |
+| `WindowMoveController.swift` | WINDOW MOVE 模式状态机 + 60fps timer：跟踪按住的方向集合（`enum Direction { left, right, up, down }`），每 tick 只写 `AXPosition`（单 IPC，比 resize 省一次）。修饰键：bare 20pt / Shift 80pt fast / Option 5pt slow（Option > Shift 优先，仿 `MouseMover.moveSpeed`）。见 `modes.md` §8 |
+| `WindowOpOverlay.swift` | WINDOW resize / MOVE 共用：蓝色 border + 可选 4 个边缘 chip（`↑k / ↓j / ←h / →l`）。`show(rect:withChips:)` 控制是否画 chip——resize 画（绑边的暗示），MOVE 不画（hjkl 是方向不绑边）。仿 `HintOverlay` / `ScrollOverlay` 的 per-NSScreen borderless window 模式；chip 算位置时若不全包于当前屏内则跳过不画（用户要求：不画到屏幕外） |
+| `AXWindowOps.swift` | 窗口 AX helper：`frontmostWindow()`、`isResizable()`（probe `AXPosition`+`AXSize` 都可写）、`isMovable()`（只 probe `AXPosition`——MOVE 不需要 `AXSize`）、`hasTitleBarButton()`（判"真窗口"：至少有 Close/Min/Zoom/FullScreen 一个按钮——`AXSubrole` 对 AX 黑洞 app 不可靠，标题栏按钮对外壳 NSWindow chrome 都查得到）、`readRect()` / `writeRect()`（两 IPC，pos+size）/ `writePosition()`（单 IPC，只写 origin，给 MOVE 用） |
 
 **OmniParser 视觉路径**（AX-bad app 的焦点窗口 hint，见 `omniparser-fallback-design.md`）：
 
@@ -224,7 +225,7 @@ NSApplication
    **跟 OmniParser 路由是独立问题**——OP 只解决 AX 黑洞 app；cleanup 尖峰下
    AX 仍能返回候选（只是慢），且白名单 app 才走 AX walk。详见
    `specs/hint-discovery.md` §5 + [`specs/omniparser-fallback-design.md`](specs/omniparser-fallback-design.md) §4.5。
-4. **新 modes** —— `Mode` enum 已经留好扩展点：select-text、right-click 命令模式（DRAG 见 `specs/modes.md` §6，WINDOW resize 见 §7，都已实现）。接入路径见 `specs/modes.md` §11。
+4. **新 modes** —— `Mode` enum 已经留好扩展点：select-text、right-click 命令模式（DRAG `specs/modes.md` §6 / WINDOW resize §7 / WINDOW MOVE §8 都已实现）。接入路径见 `specs/modes.md` §12。
 5. **多 hint 来源的标签空间冲突** —— 焦点 app 元素很多时会吃光字母组，menu extras 排到 `lj/lk/ll`。
    方案候选：menu extras 走单独的前缀（如 `;a`, `;s` …）或单独字母池。
 6. **Dock 分隔符 / Recents 占位过滤** —— 当前 Dock 把所有 `AXDockItem` 都收，包括分隔符。低价值的 hint 浪费标签。
