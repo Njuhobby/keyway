@@ -96,14 +96,18 @@ Mouseless 的状态有**三层**，"退出"在哪一层语义不一样：
 
 ### 3.2 Caps Lock 在各状态的行为（统一 arm）
 
-| 操作 | OFF | TAP | TAP sticky | SCROLL | palette 开 |
-| --- | --- | --- | --- | --- | --- |
-| Caps Lock 单击（松手无 chord） | 进 TAP | 切 sticky | 切回非 sticky | 切回 TAP | 关 palette |
-| Caps Lock 按住 + d | 进 SCROLL | 进 SCROLL | 进 SCROLL | （重进 SCROLL） | — |
-| `Esc` | — | deactivate | deactivate | deactivate | deactivate |
-| 菜单栏 Quit / Cmd+Q | quit 进程 | quit 进程 | quit 进程 | quit 进程 | quit 进程 |
+| 操作 | OFF | TAP | TAP sticky | SCROLL | DRAG | WINDOW | MOVE | palette 开 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Caps Lock 单击（松手无 chord） | 进 TAP | 切 sticky | 切回非 sticky | 切回 TAP | 切回 TAP | 切回 TAP | 切回 TAP | 关 palette |
+| Caps Lock + d | 进 SCROLL | 进 SCROLL | 进 SCROLL | （重进 SCROLL）| 进 SCROLL | 进 SCROLL | 进 SCROLL | — |
+| Caps Lock + w | 进 WINDOW | 进 WINDOW | 进 WINDOW | 进 WINDOW | 进 WINDOW | （已在 WINDOW，no-op）| 进 WINDOW | — |
+| Caps Lock + m | 进 MOVE | 进 MOVE | 进 MOVE | 进 MOVE | 进 MOVE | 进 MOVE | （已在 MOVE，no-op）| — |
+| `Esc` | — | deactivate | deactivate | deactivate | deactivate（drop at cursor）| deactivate | deactivate | deactivate |
+| 菜单栏 Quit / Cmd+Q | quit 进程 | quit 进程 | quit 进程 | quit 进程 | quit 进程 | quit 进程 | quit 进程 | quit 进程 |
 
 Caps Lock + Shift/Cmd/Ctrl/Option（修饰键）→ 不 arm，放行给系统/用户。
+
+**Caps Lock 永远响应**：DRAG / WINDOW / MOVE 不"吞" Caps Lock。`teardownCurrentMode()` 在切之前清干净——DRAG 释放 mouseDown 在当前光标位置（drop 副作用不可避免，Esc 也是这逻辑）、WINDOW/MOVE 停 timer + 关 overlay。所以 MOVE 里按 Caps Lock 直接切到 TAP、按 Caps Lock+w 直接切到 WINDOW resize，不需要先 Esc。
 
 `VimSession.enter()`：**同步**设 `mode = .tap(h)`（消除连按 race，见 §2.1），再异步 `h.activate()` 扫描 + 显示 overlay。三个来源都空时显示 "no hints here" 并退出。
 
@@ -225,7 +229,7 @@ MouseSynth.click(at: MouseSynth.cursorPosition(), button: .left, count: 1)
 | `Enter` | drop：当前位置 `leftMouseUp`。sticky-aware 完成（见下） |
 | `Esc` | 当前位置 `leftMouseUp`（按钮必须释放）→ exit OFF。cursor 留在原地 |
 | `Backspace` | **真取消**：cursor warp 回 `startPoint` → 在起点 `leftMouseUp`（目标 app 看到的是零位移 click，不触发 drop）→ 回到 pre-drag mode |
-| Caps Lock（单击 / + d chord）| 吞掉，不响应。必须先 Enter/Esc/Backspace 完成 drag |
+| Caps Lock（单击 / + d / + w / + m chord）| 立即切到对应 mode（TAP / SCROLL / WINDOW / MOVE）。`teardownCurrentMode` 先在当前光标位置 mouseUp 释放 drag（drop 副作用——跟 Esc 同逻辑、不可避免），再切。想"取消 drop"用 Backspace（warp 回起点 + 那里 mouseUp） |
 | 其它键 | 吞掉（防止按住 mouseDown 时误触发） |
 
 **`v` 选键说明**：不在 hint 池（`a s d f g e r u i o p w t n m c`，见 §4）、SCROLL 也没用、palette 拦截在前——bare `v` 在 TAP / SCROLL 下都不冲突。vim visual 的对应。
@@ -267,7 +271,7 @@ MouseSynth.click(at: MouseSynth.cursorPosition(), button: .left, count: 1)
 | 矛盾对（`h+l` 或 `j+k`）| deltas 自然抵消（位置和大小都 +/− 相消，窗口不变） |
 | `Esc` | exit OFF（teardown：停 timer / 关 overlay） |
 | 其它键 | 吞掉 |
-| `Caps Lock`（单击 / + d chord / + w chord）| 吞掉，跟 DRAG 一样——resize 不允许中途切到别的 mode |
+| `Caps Lock`（单击 / + d / + w / + m chord）| 立即切到对应 mode。`teardownCurrentMode` 先停 timer + 关 overlay 再切；resize 不残留状态 |
 
 **入 mode 的两道 gate**（`enterWindowMode`）：
 
@@ -311,7 +315,7 @@ MouseSynth.click(at: MouseSynth.cursorPosition(), button: .left, count: 1)
 | 矛盾对（`h+l` 或 `j+k`）| 自然抵消（dx 或 dy 相加为 0，窗口不动） |
 | `Esc` | exit OFF |
 | 其它键 | 吞掉 |
-| `Caps Lock`（单击 / + d / + w / + m chord）| 吞掉，跟 DRAG / WINDOW resize 一样不允许中途切 |
+| `Caps Lock`（单击 / + d / + w / + m chord）| 立即切到对应 mode。`teardownCurrentMode` 先停 timer + 关 overlay 再切 |
 
 **视觉**：跟 WINDOW resize 共用 `WindowOpOverlay`，但 `show(rect:withChips:)` 这里传 `false`——**蓝色 border 照画，4 个边缘 chip 不画**。原因：resize 的 chip（`↑k / ↓j / ←h / →l`）暗示"这个 border 往那边推"，绑边语义；move 里 hjkl 是方向、不绑边，挂同样的 chip 反而让人误以为是 resize。border + HUD `MOVE` 标签足够，hjkl 方向跟其它 mode 一致不用每次重学。
 
