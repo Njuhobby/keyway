@@ -313,26 +313,32 @@ final class VimSession {
         }
     }
 
-    /// Re-hint after a sticky commit on the **same window**, delayed
-    /// ~100ms. The synthesized click is async, so re-hinting now would
-    /// scan/screenshot the pre-click frame (stale). The delay lets the
-    /// click land and the content re-render settle first — enough for any
-    /// reasonable app (a re-render that can't finish in 100ms is the app
-    /// being sluggish), short enough to feel immediate. Tradeoff: an
-    /// update that lands >100ms later re-hints stale; re-trigger to
-    /// refresh. A second commit during the wait cancels the pending item
-    /// (latest click wins); exiting / switching mode cancels it too.
+    /// Re-hint in sticky TAP after a delay. Two callers:
     ///
-    /// This is the **focused-window-unchanged** path. App switches don't
-    /// come here — they re-hint immediately with an app-isolated capture
-    /// (see `startAppSwitchFollow`), because the delay's purpose
-    /// (click-content settle) doesn't apply and the isolated capture
-    /// already handles the switcher HUD.
-    private func scheduleStickyRehint() {
+    /// 1. **Same-window commit** (default `isolateApp: false`): our
+    ///    synthesized click is async — re-hinting now would
+    ///    scan/screenshot the pre-click frame (stale). 100ms lets the
+    ///    click land and the content re-render settle.
+    ///
+    /// 2. **App switch** (`isolateApp: true`, from
+    ///    `startAppSwitchFollow`): `didActivateApplication` fires
+    ///    when the OS *marks* the new app active, but the AX tree
+    ///    isn't necessarily readable yet and ScreenCaptureKit may
+    ///    catch a half-drawn frame. 100ms lets the new app settle
+    ///    enough that the scan finds its real elements instead of
+    ///    coming back empty (which used to silently `exit()` the
+    ///    whole session). `isolateApp` propagates to the capture so
+    ///    the Cmd+Tab switcher HUD doesn't bleed into the OP pass.
+    ///
+    /// A second call during the wait cancels the pending item
+    /// (latest wins); exiting / switching mode cancels it too.
+    /// Tradeoff for case 1: an update that lands >100ms later
+    /// re-hints stale; re-trigger to refresh.
+    private func scheduleStickyRehint(isolateApp: Bool = false) {
         pendingStickyRehint?.cancel()
         let item = DispatchWorkItem { [weak self] in
             guard let self, self.isActive, self.sticky else { return }
-            self.rehintSticky()
+            self.rehintSticky(isolateApp: isolateApp)
         }
         pendingStickyRehint = item
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: item)
@@ -362,16 +368,24 @@ final class VimSession {
             object: nil, queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated {
-                guard let self, case .tap = self.mode, self.sticky else { return }
-                print("[mouseless] app switch in sticky TAP → re-hint new app")
-                // Immediate (no delay): the activation already means the
-                // new app is frontmost, and the isolated capture drops the
-                // Cmd+Tab switcher HUD regardless of whether it's still
-                // fading — so there's nothing to wait for. Cancel any
-                // pending same-window re-hint (this switch supersedes it).
-                self.pendingStickyRehint?.cancel()
-                self.pendingStickyRehint = nil
-                self.rehintSticky(isolateApp: true)
+                guard let self, case .tap(let h) = self.mode, self.sticky else { return }
+                print("[mouseless] app switch in sticky TAP → re-hint new app (100ms delay)")
+                // 1. Hide the stale overlay right now — it's drawn for
+                //    the OLD app at the OLD coords; leaving it visible
+                //    during the 100ms wait would be confusing.
+                h.deactivate()
+                // 2. Schedule the rescan 100ms out. Earlier we ran this
+                //    immediately, but `didActivateApplication` fires
+                //    before the new app's AX tree is fully readable /
+                //    its window is fully drawn, so the immediate scan
+                //    often came back empty → silent `exit()`. The
+                //    same-window scheduleStickyRehint already uses
+                //    100ms for a similar "let things settle" reason,
+                //    just for a different cause (click effect vs app
+                //    activation). isolateApp=true so the capture
+                //    excludes the Dock process (drops the Cmd+Tab
+                //    switcher HUD bleed-in).
+                self.scheduleStickyRehint(isolateApp: true)
             }
         }
     }
