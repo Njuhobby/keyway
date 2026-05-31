@@ -227,6 +227,12 @@ NSApplication
    AX 仍能返回候选（只是慢），且白名单 app 才走 AX walk。详见
    `specs/hint-discovery.md` §5 + [`specs/omniparser-fallback-design.md`](specs/omniparser-fallback-design.md) §4.5。
 4. **新 modes / 子状态** —— `Mode` enum 已经留好扩展点：select-text、right-click 命令模式（WINDOW resize `specs/modes.md` §7 / WINDOW MOVE §8 已实现；TAP 内部子状态 DRAG `specs/modes.md` §6 / `/`-搜索 §6.5 已实现）。接入路径见 `specs/modes.md` §12。
+5. **`/`-搜索支持中文输入** —— 当前 search typing 子状态只接 ASCII（`VimSession.searchTypingChar` 白名单 a-z + 0-9 + space），中文页面**能 OCR 出来**（`OCRRefiner.recognizeText` 已配 zh-Hans / zh-Hant），但**敲不进去**。根因：CGEventTap 在 IME 之前拦截 keyDown，IME 收不到原始按键就不能 compose。三条候选路径：
+   - **(a) 弹 modal NSPanel 收输入**（推荐）——bare `/` 时弹个小 borderless panel 暂时持焦点，让 IME 在 panel 的 NSTextField 里 work，子状态退出时还焦点。状态隔离最干净。
+   - **(b) 偷焦点到隐藏 NSTextField + NSTextInputClient**——不弹 panel，但要小心 sticky 重扫的 frontmost-app observer 会被偷焦点动作扰动。
+   - **(c) 允许 Cmd+V 贴剪贴板**——零代码风险但要求用户先在别处输入好复制。
+
+   MVP 暂时只英文够用，做的时候记得先评估 (a) 跟现有 SearchOverlay 视觉是否冲突。
 5. **多 hint 来源的标签空间冲突** —— 焦点 app 元素很多时会吃光字母组，menu extras 排到 `lj/lk/ll`。
    方案候选：menu extras 走单独的前缀（如 `;a`, `;s` …）或单独字母池。
 6. **Dock 分隔符 / Recents 占位过滤** —— 当前 Dock 把所有 `AXDockItem` 都收，包括分隔符。低价值的 hint 浪费标签。

@@ -267,6 +267,8 @@ MouseSynth.click(at: MouseSynth.cursorPosition(), button: .left, count: 1)
 
 **为什么字符级 boundingBox**：`VNRecognizedText.boundingBox(for: range)` 给的是 substring 在图像里的精确像素 rect，而不是整行 OCR observation 的粗框。用户搜 "complete" 想落点到 c 前面，不是整段文字开头。
 
+**输入侧目前只支持 ASCII**：OCR 双语（zh + en）但 search buffer 只接 a-z / 0-9 / space。原因是 CGEventTap 在 IME 之前拦截 keyDown、IME 收不到原料就 compose 不出字。中文支持已记入 `SPECS.md` §7 TODO list。
+
 **子状态机**：
 
 | 子状态 | 含义 | 进入条件 |
