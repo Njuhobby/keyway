@@ -152,8 +152,16 @@ final class VimSession {
     /// `windowReverseTapWindow` of the recorded keyUp is the second
     /// tap → reversed hold. CFAbsoluteTime (monotonic-ish, simple)
     /// rather than Date to avoid surprises if the wall clock jumps.
+    ///
+    /// **150ms**, tuned down from the initial 300ms. 300ms caught a
+    /// lot of "tap, look at result, tap again to grow more" patterns
+    /// as false-positive double-taps; 200ms was the first cut but
+    /// still let some natural pauses slip through. 150ms is a tight
+    /// "deliberately fast" window — a real double-tap gesture lands
+    /// in 80-130ms, so 150ms still has comfortable margin, but the
+    /// "look-and-decide-then-press-again" pattern (250ms+) is out.
     private var lastWindowEdgeKeyUp: [WindowController.Edge: CFAbsoluteTime] = [:]
-    private let windowReverseTapWindow: CFAbsoluteTime = 0.3
+    private let windowReverseTapWindow: CFAbsoluteTime = 0.15
 
     var isActive: Bool { mode != nil }
 
@@ -810,7 +818,7 @@ final class VimSession {
     private func handleWindow(controller: WindowController, keyCode: Int, flags: CGEventFlags) -> Bool {
         if let edge = Self.windowEdge(for: keyCode) {
             // Double-tap detection: if this edge's previous keyUp
-            // happened within `windowReverseTapWindow` (300ms), this
+            // happened within `windowReverseTapWindow` (150ms), this
             // keyDown is the second of a jj/kk/hh/ll pair → shrink.
             // Otherwise normal expand. OS key-repeat fires keyDown
             // without a matching keyUp, so it can't accidentally
