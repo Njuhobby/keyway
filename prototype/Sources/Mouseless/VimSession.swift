@@ -33,6 +33,27 @@ final class VimSession {
         case searchPicking(matches: [SearchMatch], typed: String)
     }
 
+    /// SCROLL mode sub-states. Currently only hosts the `/`-search
+    /// sub-states (mirrors TapSub's search cases) — SCROLL has its
+    /// own `.normal` for d/u scrolling + hjkl cursor + c click + gg/G
+    /// jumps + number-key area picker. Reset to `.normal` on exit /
+    /// mode change (see `cleanupScrollSub`).
+    ///
+    /// **Why** search belongs in SCROLL too: search is "precise
+    /// cursor teleport"; SCROLL already exposes cursor movement
+    /// (hjkl) and cursor-position click (bare `c`); adding `/` is
+    /// the natural extension so users can scroll a long page, spot a
+    /// keyword, jump to it, click — all without leaving SCROLL. The
+    /// search machinery itself (OCR + label rendering + matching) is
+    /// host-agnostic and reused via `setSearchPhase` / `searchPhase`
+    /// helpers.
+    enum ScrollSub {
+        case normal
+        case searchTyping(buffer: String)
+        case searchSearching
+        case searchPicking(matches: [SearchMatch], typed: String)
+    }
+
     /// One text match from the search OCR pass.
     struct SearchMatch {
         let label: String   // hint-style label (e.g. "a", "as", …)
@@ -42,6 +63,7 @@ final class VimSession {
 
     private var mode: Mode? = nil
     private var tapSub: TapSub = .normal       // only meaningful when mode == .tap
+    private var scrollSub: ScrollSub = .normal // only meaningful when mode == .scroll
     private var paletteBuffer: String? = nil   // nil = palette closed
     private var sticky: Bool = false           // toggled by trigger key in TAP
     private let mover = MouseMover()            // hjkl cursor move (TAP + SCROLL)
@@ -67,6 +89,61 @@ final class VimSession {
         case .window:     return .window
         case .windowMove: return .windowMove
         case nil:         return nil
+        }
+    }
+
+    /// Host-agnostic projection of whichever sub-state enum corresponds
+    /// to the current mode. Lets the search machinery (`kickoffSearch`,
+    /// `handleSearchTyping`, `handleSearchPicking`, etc.) read /
+    /// write the search state without knowing whether the host is TAP
+    /// or SCROLL.
+    private enum SearchPhase {
+        case typing(buffer: String)
+        case searching
+        case picking(matches: [SearchMatch], typed: String)
+    }
+    private var searchPhase: SearchPhase? {
+        switch mode {
+        case .tap:
+            switch tapSub {
+            case .searchTyping(let b): return .typing(buffer: b)
+            case .searchSearching: return .searching
+            case .searchPicking(let m, let t): return .picking(matches: m, typed: t)
+            default: return nil
+            }
+        case .scroll:
+            switch scrollSub {
+            case .searchTyping(let b): return .typing(buffer: b)
+            case .searchSearching: return .searching
+            case .searchPicking(let m, let t): return .picking(matches: m, typed: t)
+            default: return nil
+            }
+        default:
+            return nil
+        }
+    }
+    /// Write a search sub-state on whichever host (TAP / SCROLL) is
+    /// active. Pass `nil` to exit search entirely (returns the host
+    /// to its `.normal` sub-state). No-op if `mode` isn't a host
+    /// that supports search.
+    private func setSearchPhase(_ phase: SearchPhase?) {
+        switch mode {
+        case .tap:
+            switch phase {
+            case nil: tapSub = .normal
+            case .typing(let b): tapSub = .searchTyping(buffer: b)
+            case .searching: tapSub = .searchSearching
+            case .picking(let m, let t): tapSub = .searchPicking(matches: m, typed: t)
+            }
+        case .scroll:
+            switch phase {
+            case nil: scrollSub = .normal
+            case .typing(let b): scrollSub = .searchTyping(buffer: b)
+            case .searching: scrollSub = .searchSearching
+            case .picking(let m, let t): scrollSub = .searchPicking(matches: m, typed: t)
+            }
+        default:
+            return
         }
     }
     /// Per-edge timestamp of the last hjkl keyUp in `.window` mode,
@@ -301,11 +378,13 @@ final class VimSession {
             c.teardown()                // stops the move timer
             WindowOpOverlay.shared.hide()
         }
-        // TAP sub-state cleanup. Drag has a held mouseDown that must
-        // be released so we don't leave a stuck button across mode
-        // switches; search has an overlay to hide. Done BEFORE
-        // setting mode = nil so the resync paths see the right state.
+        // TAP / SCROLL sub-state cleanup. Drag has a held mouseDown
+        // that must be released so we don't leave a stuck button
+        // across mode switches; search (either host) has a SearchOverlay
+        // to hide. Done BEFORE setting mode = nil so the resync paths
+        // see the right state.
         cleanupTapSub()
+        cleanupScrollSub()
         mode = nil
     }
 
@@ -328,6 +407,19 @@ final class VimSession {
             SearchOverlay.shared.hide()
         }
         tapSub = .normal
+    }
+
+    /// Reset SCROLL sub-state to .normal. Currently only cleans up
+    /// the SearchOverlay if a `/`-search sub-state was active when a
+    /// mode-switch chord was pressed.
+    private func cleanupScrollSub() {
+        switch scrollSub {
+        case .normal:
+            break
+        case .searchTyping, .searchSearching, .searchPicking:
+            SearchOverlay.shared.hide()
+        }
+        scrollSub = .normal
     }
 
     // MARK: - Sticky re-hint (+ async-focus recheck)
@@ -543,8 +635,9 @@ final class VimSession {
             c.teardown()
             WindowOpOverlay.shared.hide()
         }
-        // TAP sub-state cleanup (mouseUp held drag, hide search overlay).
+        // TAP / SCROLL sub-state cleanup (mouseUp held drag, hide search overlay).
         cleanupTapSub()
+        cleanupScrollSub()
         mode = nil
         paletteBuffer = nil
         sticky = false
@@ -640,16 +733,16 @@ final class VimSession {
         // fully quit, use the menu bar Quit item (which reverts the
         // Caps Lock remap on its way out). See SPECS §2.1.
         //
-        // Exception: in TAP's **search** sub-states Esc cancels the
-        // search (back to TAP normal with the hint overlay re-shown),
-        // rather than exiting all the way out. Drag sub-state still
-        // exits — that matches the existing "Esc-in-drag = drop at
-        // cursor + exit" semantic.
+        // Exception: in **search** sub-states (TAP or SCROLL host) Esc
+        // cancels the search and returns to the host's `.normal` with
+        // the host's main overlay re-shown — rather than exiting all
+        // the way out. Drag sub-state still exits — that matches the
+        // existing "Esc-in-drag = drop at cursor + exit" semantic.
+        // `searchPhase` reads whichever host sub-state is active.
         if keyCode == KeyCode.escape {
-            switch tapSub {
-            case .searchTyping, .searchSearching, .searchPicking:
+            if searchPhase != nil {
                 cancelSearch()
-            default:
+            } else {
                 exit()
             }
             return true
@@ -802,12 +895,12 @@ final class VimSession {
         renderModeHUD()
     }
 
-    // MARK: - TAP sub-state: search (`/`)
+    // MARK: - Search sub-state (`/`) — shared between TAP and SCROLL
 
     /// Bare `/` in TAP normal → enter the search-typing sub-state.
     /// Hide the TAP hint overlay (the label pool is about to be
     /// reused for search matches; visual collision otherwise).
-    private func startSearch(hint: HintMode) {
+    private func startTapSearch(hint: HintMode) {
         guard case .tap = mode, case .normal = tapSub else { return }
         // Same reason as startDragFromTap: any pending re-hint from a
         // prior click/search-commit would fire mid-search and surface
@@ -815,15 +908,30 @@ final class VimSession {
         pendingStickyRehint?.cancel()
         pendingStickyRehint = nil
         hint.hideOverlay()
-        tapSub = .searchTyping(buffer: "")
+        setSearchPhase(.typing(buffer: ""))
+        renderModeHUD()
+    }
+
+    /// Bare `/` in SCROLL normal → enter search-typing sub-state.
+    /// Hide the scroll-area picker overlay; restored on commit / cancel.
+    /// SCROLL's search has the same semantics as TAP's: type query,
+    /// Enter to OCR, pick label, cursor warps to match. After commit,
+    /// user is back in SCROLL normal and can press `c` to click, `d/u`
+    /// to scroll, etc. — i.e., search is a precise teleport followed
+    /// by the user's normal SCROLL interactions.
+    private func startScrollSearch(controller: ScrollController) {
+        guard case .scroll = mode, case .normal = scrollSub else { return }
+        controller.hideOverlay()
+        setSearchPhase(.typing(buffer: ""))
         renderModeHUD()
     }
 
     /// `.searchTyping` keystrokes. Letter chars (a-z) append to the
     /// buffer; Backspace removes the last (empty buffer + Backspace =
-    /// cancel back to TAP normal); Enter kicks off OCR; Esc cancels
+    /// cancel back to host's .normal); Enter kicks off OCR; Esc cancels
     /// (handled in `handle()`'s Esc branch via cancelSearch).
-    private func handleTapSearchTyping(buffer: String, keyCode: Int, flags: CGEventFlags) -> Bool {
+    /// Host-agnostic — works for TAP and SCROLL alike via `setSearchPhase`.
+    private func handleSearchTyping(buffer: String, keyCode: Int, flags: CGEventFlags) -> Bool {
         // Two modifier masks:
         //   bareModifiers — strict, no modifiers at all (used by Backspace).
         //   typingMods    — allow Shift (for uppercase letters), block
@@ -849,7 +957,7 @@ final class VimSession {
             } else {
                 var next = buffer
                 next.removeLast()
-                tapSub = .searchTyping(buffer: next)
+                setSearchPhase(.typing(buffer: next))
                 renderModeHUD()
             }
             return true
@@ -866,7 +974,7 @@ final class VimSession {
             } else {
                 actual = ch
             }
-            tapSub = .searchTyping(buffer: buffer + String(actual))
+            setSearchPhase(.typing(buffer: buffer + String(actual)))
             renderModeHUD()
             return true
         }
@@ -896,7 +1004,7 @@ final class VimSession {
     /// transitions to `.searchPicking` (or back to `.normal` if no
     /// matches).
     private func kickoffSearch(query: String) {
-        tapSub = .searchSearching
+        setSearchPhase(.searching)
         renderModeHUD()
         print("[mouseless] search: query=\"\(query)\" — capturing + OCR'ing focused window")
         Task { @MainActor in
@@ -906,13 +1014,14 @@ final class VimSession {
                 return
             }
             // Guard against the user cancelling / mode-switching while
-            // OCR is in flight.
-            guard case .searchSearching = tapSub else {
+            // OCR is in flight. `searchPhase` reads from whichever host
+            // sub-state is active (TAP or SCROLL).
+            guard case .searching = self.searchPhase else {
                 print("[mouseless] search: cancelled during capture")
                 return
             }
             let observations = OCRRefiner.recognizeText(in: captured.image)
-            guard case .searchSearching = tapSub else {
+            guard case .searching = self.searchPhase else {
                 print("[mouseless] search: cancelled during OCR")
                 return
             }
@@ -933,7 +1042,7 @@ final class VimSession {
             let labeled = zip(labels, capped).map { (label, m) in
                 SearchMatch(label: label, rect: m.rect, text: m.text)
             }
-            tapSub = .searchPicking(matches: labeled, typed: "")
+            setSearchPhase(.picking(matches: labeled, typed: ""))
             let overlayMatches = labeled.map { SearchOverlay.Match(label: $0.label, rect: $0.rect) }
             SearchOverlay.shared.show(matches: overlayMatches, typed: "")
             renderModeHUD()
@@ -1003,11 +1112,12 @@ final class VimSession {
 
     /// `.searchPicking` keystrokes. Letter (a-z) extends `typed`; if
     /// uniquely identifies a label, commit (warp cursor + return to
-    /// TAP normal). Backspace removes last `typed` char, or goes back
-    /// to `.searchTyping` if empty (re-edit query). Enter swallowed
-    /// (commit happens by typing the full label).
-    private func handleTapSearchPicking(matches: [SearchMatch], typed: String,
-                                        keyCode: Int, flags: CGEventFlags) -> Bool {
+    /// host's .normal). Backspace removes last `typed` char, or goes
+    /// back to `.searchTyping` if empty (re-edit query). Enter
+    /// swallowed (commit happens by typing the full label).
+    /// Host-agnostic — shared between TAP and SCROLL.
+    private func handleSearchPicking(matches: [SearchMatch], typed: String,
+                                      keyCode: Int, flags: CGEventFlags) -> Bool {
         let modMask: CGEventFlags = [.maskCommand, .maskControl,
                                      .maskShift, .maskAlternate]
         let bareModifiers = flags.intersection(modMask).isEmpty
@@ -1018,13 +1128,13 @@ final class VimSession {
                 // user can edit it). For simplicity v1: just clear buffer
                 // and go back; storing buffer across the OCR call would
                 // require more state.
-                tapSub = .searchTyping(buffer: "")
+                setSearchPhase(.typing(buffer: ""))
                 SearchOverlay.shared.hide()
                 renderModeHUD()
             } else {
                 var next = typed
                 next.removeLast()
-                tapSub = .searchPicking(matches: matches, typed: next)
+                setSearchPhase(.picking(matches: matches, typed: next))
                 SearchOverlay.shared.updateTyped(next)
                 renderModeHUD()
             }
@@ -1047,7 +1157,7 @@ final class VimSession {
             commitSearchMatch(candidates[0])
             return true
         }
-        tapSub = .searchPicking(matches: matches, typed: next)
+        setSearchPhase(.picking(matches: matches, typed: next))
         SearchOverlay.shared.updateTyped(next)
         renderModeHUD()
         return true
@@ -1086,22 +1196,45 @@ final class VimSession {
         // the pixel but skip the event pipeline, leaving the view
         // still rendering the previous-location cursor.
         MouseSynth.warp(to: landing)
-        tapSub = .normal
-        // Re-hint so the user can interact with whatever's now under
-        // the new cursor position (sticky-aware: same logic as a hint
-        // commit). Even non-sticky re-scans here — the user just did
-        // a search, presumably they want to keep going (maybe drag
-        // the text with bare v next).
-        scheduleStickyRehint()
+        setSearchPhase(nil)   // back to host's .normal
+
+        // Host-specific follow-up:
+        switch mode {
+        case .tap:
+            // Re-hint: cursor moved → hover state may have changed,
+            // hint targets may no longer be exactly where they were.
+            // Even non-sticky re-scans here — the user just did a
+            // search, presumably they want to keep going (maybe drag
+            // the text with bare v next).
+            scheduleStickyRehint()
+        case .scroll(let c):
+            // Restore the scroll-area picker overlay. Cursor warp may
+            // have moved out of the previously-selected area; the
+            // existing controller state still points at the old area
+            // index, which is fine — user can press a number key to
+            // switch if they want, or scroll where the cursor now is.
+            c.showOverlay()
+            renderModeHUD()
+        default:
+            break
+        }
     }
 
     /// Esc inside search or empty-buffer Backspace → cancel back to
-    /// TAP normal with the hint overlay restored.
+    /// host's `.normal` with the host's main overlay restored.
+    /// Host-agnostic — works for TAP (restores hint overlay) and
+    /// SCROLL (restores scroll-area picker).
     private func cancelSearch() {
-        guard case .tap(let h) = mode else { return }
         SearchOverlay.shared.hide()
-        tapSub = .normal
-        h.showOverlay()
+        setSearchPhase(nil)
+        switch mode {
+        case .tap(let h):
+            h.showOverlay()
+        case .scroll(let c):
+            c.showOverlay()
+        default:
+            break
+        }
         renderModeHUD()
     }
 
@@ -1112,6 +1245,35 @@ final class VimSession {
     /// the ScrollController (continuous on hold); number keys switch
     /// the selected area.
     private func handleScroll(controller: ScrollController, keyCode: Int, flags: CGEventFlags) -> Bool {
+        // SCROLL routes keys based on the active sub-state, mirroring
+        // TAP's structure. Search sub-states use the shared
+        // host-agnostic handlers; .normal has SCROLL's own keymap
+        // (d/u scroll, hjkl cursor, c click, gg/G jump, numbers area).
+        switch scrollSub {
+        case .normal:
+            return handleScrollNormal(controller: controller, keyCode: keyCode, flags: flags)
+        case .searchTyping(let buffer):
+            return handleSearchTyping(buffer: buffer, keyCode: keyCode, flags: flags)
+        case .searchSearching:
+            return true   // transient — OCR in flight, swallow input
+        case .searchPicking(let matches, let typed):
+            return handleSearchPicking(matches: matches, typed: typed,
+                                       keyCode: keyCode, flags: flags)
+        }
+    }
+
+    private func handleScrollNormal(controller: ScrollController, keyCode: Int, flags: CGEventFlags) -> Bool {
+        // bare `/` → enter the search-typing sub-state. Same gesture
+        // and semantics as TAP's `/`: type query, Enter, pick label,
+        // cursor warps to match. Cursor warp is precise teleport —
+        // ideal companion to SCROLL's coarse d/u scrolling.
+        let modMask: CGEventFlags = [.maskShift, .maskControl,
+                                     .maskCommand, .maskAlternate]
+        if keyCode == KeyCode.slash && flags.intersection(modMask).isEmpty {
+            startScrollSearch(controller: controller)
+            return true
+        }
+
         // gg / G — vim-style jump to top / bottom of the selected area.
         // Reset the gg-pending flag up front; the bare-g branch re-arms
         // it. So any key other than a second bare g clears a half-typed
@@ -1285,12 +1447,12 @@ final class VimSession {
         case .dragging:
             return handleTapDragging(keyCode: keyCode, flags: flags)
         case .searchTyping(let buffer):
-            return handleTapSearchTyping(buffer: buffer, keyCode: keyCode, flags: flags)
+            return handleSearchTyping(buffer: buffer, keyCode: keyCode, flags: flags)
         case .searchSearching:
             return true   // transient — OCR in flight, swallow input
         case .searchPicking(let matches, let typed):
-            return handleTapSearchPicking(matches: matches, typed: typed,
-                                          keyCode: keyCode, flags: flags)
+            return handleSearchPicking(matches: matches, typed: typed,
+                                       keyCode: keyCode, flags: flags)
         }
     }
 
@@ -1308,7 +1470,7 @@ final class VimSession {
 
         // bare `/` → enter search-typing sub-state.
         if keyCode == KeyCode.slash && bareModifiers {
-            startSearch(hint: hint)
+            startTapSearch(hint: hint)
             return true
         }
 
@@ -1504,7 +1666,23 @@ final class VimSession {
             case .searchPicking(_, let typed):
                 label = typed.isEmpty ? "/ pick label" : "/ pick: \(typed)"
             }
-        case .scroll: label = "SCROLL"
+        case .scroll:
+            // SCROLL label depends on the active sub-state, mirroring
+            // TAP's layout. `/`-search shows the same `/`-prefixed
+            // buffer / pick HUD so the search UX is identical across
+            // hosts. Without this case dispatch, the user pressing
+            // `/` in SCROLL gets no visible feedback (HUD stuck at
+            // "SCROLL") and assumes nothing happened.
+            switch scrollSub {
+            case .normal:
+                label = "SCROLL"
+            case .searchTyping(let buffer):
+                label = "/" + buffer
+            case .searchSearching:
+                label = "/ … searching"
+            case .searchPicking(_, let typed):
+                label = typed.isEmpty ? "/ pick label" : "/ pick: \(typed)"
+            }
         case .window: label = "WINDOW"
         case .windowMove: label = "MOVE"
         }

@@ -219,11 +219,14 @@ MouseSynth.click(at: MouseSynth.cursorPosition(), button: .left, count: 1)
 | `c` (bare) | 当前光标位置左键单击（留在 SCROLL） |
 | `Shift / Option + c` | 当前光标位置 双击 / 右键 |
 | `Enter` | **放行**给焦点 app（与 TAP normal §4 统一） |
+| `/` (bare) | **进入 `/`-搜索子状态**——OCR 焦点窗口、字符级匹配、复用 hint label 池标记结果；commit 后光标 warp 到匹配文本左边、回 SCROLL normal（scroll-area picker overlay 自动恢复）。跟 TAP 的 §6.5 search 共用一套机制 |
 | `数字键 1-9` | 切换选中的滚动区域 |
 | Caps Lock 单击 | 切回 TAP（见 §2.1） |
-| `Esc` | deactivate 回 OFF |
+| `Esc` | search 子状态：取消回 SCROLL normal；normal：deactivate 回 OFF |
 
 **移光标用 hjkl，与 TAP 完全统一**：早期 SCROLL 用 SDFE、TAP 用 IJKL，两套移动键逼用户在模式间切换肌肉记忆——是真实的认知负担。现统一成 vim hjkl（`VimSession.moveDirection(for:)` 单一映射，两模式共用），"移光标"在哪都一样，只有滚动/点击因模式而异。滚动因此从 `j/k` 改到 **`d`(下)/`u`(上)**——`j/k` 让给移光标，`d` 也正好对上进入 SCROLL 的 chord 键。`c` 与 hjkl 配套（移→点闭环），复用 `MouseMover` / `MouseSynth`（与 TAP 同一套）。
+
+**`/`-搜索在 SCROLL 也支持**：search 本质上是"精准光标传送"——SCROLL 既然支持 hjkl 相对移光标 + c 点击，再加上 `/` 绝对跳转就构成"滚到大致位置 → search 精确定位 → c 点击"的完整闭环，全程不出 SCROLL。机制跟 TAP 的 §6.5 完全一样，差别只在 host overlay：进 search 时藏 scroll-area picker，commit 后光标 warp 完恢复 picker（不像 TAP 那样 sticky-rehint，因为 SCROLL 没有 hint 概念）。底层 OCR / label 生成 / SearchOverlay 完全复用，宿主无关的实现见 `setSearchPhase` / `searchPhase` 辅助函数。
 
 > 统一前两个模式移动键不同（TAP=IJKL、SCROLL=SDFE）是各自键位约束下的妥协；统一到 hjkl 后认知负担消除。日后会开放让用户自定义按键配置。
 

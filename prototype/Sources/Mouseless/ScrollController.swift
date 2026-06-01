@@ -64,6 +64,22 @@ final class ScrollController {
         ScrollOverlay.shared.hide()
     }
 
+    /// Hide the scroll-picker overlay WITHOUT tearing down state. Used
+    /// when entering a SCROLL sub-state (e.g. `/`-search) that wants
+    /// to draw a different overlay over the same screen real estate;
+    /// `showOverlay()` restores the picker on sub-state exit.
+    func hideOverlay() {
+        ScrollOverlay.shared.hide()
+    }
+
+    /// Re-show the scroll-picker overlay using current `areas` +
+    /// `selectedIndex`. No-op if there are no detected areas (the
+    /// zero-AX-app fallback path didn't draw anything to begin with).
+    func showOverlay() {
+        guard !areas.isEmpty else { return }
+        ScrollOverlay.shared.show(areas: areas.map { $0.rect }, selected: selectedIndex)
+    }
+
     private func warpToSelected() {
         guard selectedIndex < areas.count else { return }
         let r = areas[selectedIndex].rect
