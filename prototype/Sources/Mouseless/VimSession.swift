@@ -960,7 +960,13 @@ final class VimSession {
         )
         print("[mouseless] search commit: label=\(match.label) text=\"\(match.text.prefix(40))\" rect=(\(Int(match.rect.minX)),\(Int(match.rect.minY)),\(Int(match.rect.width))x\(Int(match.rect.height))) → cursor (\(Int(landing.x)),\(Int(landing.y)))")
         SearchOverlay.shared.hide()
-        CGWarpMouseCursorPosition(landing)
+        // Synthesized .mouseMoved instead of CGWarpMouseCursorPosition
+        // so the destination view sees the move and updates the
+        // cursor shape (I-beam over text) + hover state (button
+        // highlight / link underline / tooltip). CGWarp would move
+        // the pixel but skip the event pipeline, leaving the view
+        // still rendering the previous-location cursor.
+        MouseSynth.warp(to: landing)
         tapSub = .normal
         // Re-hint so the user can interact with whatever's now under
         // the new cursor position (sticky-aware: same logic as a hint

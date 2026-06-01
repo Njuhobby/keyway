@@ -64,4 +64,25 @@ enum MouseSynth {
     static func cursorPosition() -> CGPoint {
         CGEvent(source: nil)?.location ?? .zero
     }
+
+    /// Warp the cursor to `point` by synthesizing a `.mouseMoved`
+    /// event, **not** `CGWarpMouseCursorPosition`. The synthesized
+    /// event both moves the cursor pixel AND walks the full AppKit
+    /// event pipeline, so cursor-rect / tracking-area updates fire
+    /// at the destination — meaning over text the cursor flips to
+    /// I-beam, buttons under the new position highlight, links show
+    /// their underline, etc. CGWarp is a Window-Server-level
+    /// backdoor that skips all of that (designed for full-screen
+    /// games that explicitly want zero hover side effects), which
+    /// is the opposite of what we want for a "teleport cursor to
+    /// this text" gesture. Same `.cghidEventTap` posting +
+    /// `syntheticMarker` stamping as the other helpers here.
+    static func warp(to point: CGPoint) {
+        guard let src = CGEventSource(stateID: .privateState),
+              let ev = CGEvent(mouseEventSource: src, mouseType: .mouseMoved,
+                               mouseCursorPosition: point, mouseButton: .left)
+        else { return }
+        ev.setIntegerValueField(.eventSourceUserData, value: HotkeyTap.syntheticMarker)
+        ev.post(tap: .cghidEventTap)
+    }
 }
