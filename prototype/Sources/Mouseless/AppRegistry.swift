@@ -34,6 +34,19 @@ enum AppRegistry {
         "com.apple.finder",
         "com.apple.mail",
         "com.apple.Safari",          // chrome AppKit; web content's a separate matter
+        // Chrome was tried here and reverted: Chromium **disables web
+        // content AX by default** on macOS for perf — it only turns
+        // on when VoiceOver is running, when `chrome://accessibility`
+        // is manually flipped, or when launched with
+        // `--force-renderer-accessibility`. None of those hold for a
+        // normal user, so AX walk on Chrome returns the toolbar / tab
+        // bar / menu extras only — every link inside the rendered web
+        // page is invisible. OmniParser (the default fall-through) is
+        // the right path for Chrome. Could be revisited if we accept
+        // setting `AXEnhancedUserInterface = true` on Chrome's process
+        // to wake its AX subsystem — but that puts ALL of Chrome into
+        // VO-friendly mode (measurable slowdown) so it's not a free
+        // win.
         "com.apple.TextEdit",
         "com.apple.Preview",
         "com.apple.calculator",
