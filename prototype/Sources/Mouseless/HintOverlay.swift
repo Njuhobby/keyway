@@ -33,11 +33,22 @@ final class HintOverlay {
                 backing: .buffered,
                 defer: false
             )
-            // .statusBar (25) sits above the main menu bar (24) and normal
-            // app windows (0), but BELOW dropdown / popup menus (.popUpMenu
-            // = 101). When a dropdown opens, it covers the hints just like
-            // it covers the app underneath — preserving natural z-order.
-            w.level = .statusBar
+            // Level 102 (CGWindowLevel "overlay") — ABOVE dropdown /
+            // contextual menus (.popUpMenu = 101). Necessary because
+            // hint labels for AXMenuItem are drawn at the top-left
+            // inside each menu item's rect; at the natural z-order
+            // (.statusBar = 25) the dropdown's own background fills
+            // that rect and visually covers the label. Raising above
+            // .popUpMenu lets the small label squares (overlay
+            // otherwise transparent) float above the menu while the
+            // menu's actual text + icons still show through everywhere
+            // except the label rects. Trade-off: hint labels will
+            // also draw above modal alerts (level 8) and other normal
+            // windows — which is what the user wants in TAP mode
+            // anyway (hint-click the alert's buttons). The level
+            // stays below assistive-tech windows (1500) and the
+            // screen saver (1000).
+            w.level = NSWindow.Level(rawValue: 102)
             w.isOpaque = false
             w.backgroundColor = .clear
             w.hasShadow = false
@@ -176,87 +187,6 @@ final class HintOverlayView: NSView {
                 p.close()
 
                 fillRect = badgeRect
-                tail = p
-            } else if target.role == "AXMenuItem" {
-                // Dropdown menu items are tall narrow strips stacked
-                // vertically — a bubble below would collide with the next
-                // item. Default: place to the LEFT with a right-pointing
-                // tail; fall back to RIGHT if left clips off-screen.
-                //
-                // BUT in a cascade (parent menu open + submenu open), the
-                // LEFT side of a submenu item is the parent menu's window —
-                // which sits at `.popUpMenu` (101), above our `.statusBar`
-                // (25) overlay, and so visually occludes any label drawn
-                // there. Detect a sibling column of menu items strictly
-                // to our left / right (= a parent or child menu in a
-                // cascade) and place the label on the OPEN side instead.
-                let tailH: CGFloat = 4
-                let tailW: CGFloat = 8
-                let leftRect = NSRect(
-                    x: viewX - tailH - labelW,
-                    y: viewY + r.size.height / 2 - labelH / 2,
-                    width: labelW,
-                    height: labelH
-                )
-                let rightRect = NSRect(
-                    x: viewX + r.size.width + tailH,
-                    y: viewY + r.size.height / 2 - labelH / 2,
-                    width: labelW,
-                    height: labelH
-                )
-
-                var hasLeftSiblingMenu = false
-                var hasRightSiblingMenu = false
-                for other in targets where other.role == "AXMenuItem" {
-                    if other.rect == r { continue }
-                    if other.rect.maxX <= r.origin.x { hasLeftSiblingMenu = true }
-                    if other.rect.minX >= r.origin.x + r.size.width { hasRightSiblingMenu = true }
-                }
-
-                // Use `contains` (not `intersects`) so we only "place left"
-                // when the WHOLE badge fits on-screen. Partial overlap would
-                // clip the badge unreadably.
-                let viewBounds = self.bounds
-                let leftFits = viewBounds.contains(leftRect)
-                let rightFits = viewBounds.contains(rightRect)
-
-                let placeLeft: Bool
-                let placeRight: Bool
-                if hasLeftSiblingMenu && !hasRightSiblingMenu {
-                    // Parent menu on the left → label goes RIGHT.
-                    placeRight = rightFits
-                    placeLeft = !placeRight && leftFits
-                } else if hasRightSiblingMenu && !hasLeftSiblingMenu {
-                    // Parent menu on the right (right-anchored status menus
-                    // cascade leftward) → label goes LEFT.
-                    placeLeft = leftFits
-                    placeRight = !placeLeft && rightFits
-                } else {
-                    // Standalone menu (or sandwiched between two siblings —
-                    // rare). Default: prefer LEFT, fall back to RIGHT.
-                    placeLeft = leftFits
-                    placeRight = !placeLeft && rightFits
-                }
-
-                let p = NSBezierPath()
-                if placeLeft {
-                    fillRect = leftRect
-                    // Tail extends RIGHT from badge's right edge.
-                    let baseX = fillRect.maxX
-                    p.move(to: NSPoint(x: baseX, y: fillRect.midY + tailW / 2))
-                    p.line(to: NSPoint(x: baseX + tailH, y: fillRect.midY))
-                    p.line(to: NSPoint(x: baseX, y: fillRect.midY - tailW / 2))
-                } else if placeRight {
-                    fillRect = rightRect
-                    // Tail extends LEFT from badge's left edge.
-                    let baseX = fillRect.minX
-                    p.move(to: NSPoint(x: baseX, y: fillRect.midY - tailW / 2))
-                    p.line(to: NSPoint(x: baseX - tailH, y: fillRect.midY))
-                    p.line(to: NSPoint(x: baseX, y: fillRect.midY + tailW / 2))
-                } else {
-                    continue
-                }
-                p.close()
                 tail = p
             } else if fitsInside {
                 // Big-enough target (AX or OP): top-left INSIDE with
