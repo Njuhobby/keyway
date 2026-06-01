@@ -116,6 +116,15 @@ enum AXWindowOps {
         return AXUIElementSetAttributeValue(window, "AXPosition" as CFString, value) == .success
     }
 
+    /// Write just the window's size (for the size-first / anchored-
+    /// position-second resize pattern in `WindowController`). One IPC.
+    @discardableResult
+    static func writeSize(_ window: AXUIElement, size: CGSize) -> Bool {
+        var size = size
+        guard let value = AXValueCreate(.cgSize, &size) else { return false }
+        return AXUIElementSetAttributeValue(window, "AXSize" as CFString, value) == .success
+    }
+
     /// Write the window's rect. Two IPC writes. Returns false on any
     /// failure (app may have ignored / clamped — that's fine, the
     /// caller's in-memory rect can drift slightly without breaking).

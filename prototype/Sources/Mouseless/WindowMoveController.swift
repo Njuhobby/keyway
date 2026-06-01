@@ -104,7 +104,12 @@ final class WindowMoveController {
         newRect.origin.x += dx
         newRect.origin.y += dy
         if AXWindowOps.writePosition(window, origin: newRect.origin) {
-            currentRect = newRect
+            // Read back to capture any app-side clamping (e.g. apps
+            // that snap to safe areas or refuse to move off-screen).
+            // Same rationale as WindowController.tick() — keeps the
+            // overlay border aligned with the actually-visible window
+            // instead of our phantom in-memory rect.
+            currentRect = AXWindowOps.readRect(window) ?? newRect
             onRectUpdate?(currentRect)
         }
     }

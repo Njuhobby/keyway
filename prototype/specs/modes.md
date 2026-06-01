@@ -316,10 +316,11 @@ MouseSynth.click(at: MouseSynth.cursorPosition(), button: .left, count: 1)
 | --- | --- |
 | **进入：`Caps Lock + w` chord**（任意 mode）| 两道 gate 都过才进（见下）。任一不过 → HUD 提示原因、不入 mode |
 | `h` / `j` / `k` / `l` (held) | 把对应 border 往**外**推（`k` 顶上 / `j` 底下 / `h` 左外 / `l` 右外），按住连续；步长 20pt/tick @ 60fps |
-| `Shift + hjkl` | **反向**（往内压 = 缩小）。`tick()` 里现读 `NSEvent.modifierFlags`，所以 Shift 中途按下/松开**即时反向**，不用先松 hjkl |
+| **双击** `hh` / `jj` / `kk` / `ll`（300ms 内连按两次同键，第二下保持按住）| **反向**该 edge：往内压 = 缩小该 edge。每条 edge 独立——可以 k 长按扩顶 + jj 双击缩底同时进行 |
+| `Shift + hjkl` | **加速**（80pt/tick = 4×，跨屏快速 reshape）。跟 TAP-hjkl 移光标、SCROLL d/u、MOVE hjkl 的 Shift 语义一致 |
 | `Option + hjkl` | **精细**步长（5pt/tick 替代默认 20pt/tick），用于和别的窗口/屏幕边贴齐时的微调 |
-| `Shift + Option + hjkl` | 精细 shrink（两个修饰键正交，组合都成立）|
-| 同时按（如 `h+j`）| 组合 → corner 推拉，4 个角都成立 |
+| `Shift + Option + hjkl` | Option 优先 → slow（仿 `MouseMover.moveSpeed` / `WindowMoveController`：误按 Shift+Option 倾向"慢"而非"快"） |
+| 同时按（如 `h+j`）| 组合 → corner 推拉，4 个角都成立。双击反向也独立——`kk + jj` 双击同时按 = 顶底同时收 |
 | 矛盾对（`h+l` 或 `j+k`）| deltas 自然抵消（位置和大小都 +/− 相消，窗口不变） |
 | `Esc` | exit OFF（teardown：停 timer / 关 overlay） |
 | 其它键 | 吞掉 |
@@ -334,7 +335,13 @@ MouseSynth.click(at: MouseSynth.cursorPosition(), button: .left, count: 1)
    - **为什么用这个而非 `AXSubrole == "AXStandardWindow"`**：AX 黑洞 app 的 subrole 经常 nil / 乱写 / 不暴露，严格 subrole 检查会误杀。标题栏按钮直接查 attribute 是否存在，比 subrole 鲁棒；最多 4 次 IPC（短路命中即返），一次性。
 2. **`AXWindowOps.isResizable(window)`** —— `AXPosition` 和 `AXSize` 两个都得 `AXUIElementIsAttributeSettable` 才行。resize 靠每 tick 写这俩属性，任一不通直接没法做。
 
-**视觉**（`WindowOpOverlay`）：蓝色实线 border（3pt）贴窗口外沿；4 个 chip（蓝底白字）贴在每边中点的**外侧**，标 `↑k / ↓j / ←h / →l`。角落**不画**——hjkl 组合是隐含的，不再加 chip。**chip 屏幕外不画**：每个 chip 单独检查是不是全部包含在某个 NSScreen 的 view bounds 内；窗口顶到屏幕顶时，顶部 chip 应该在屏幕外那一块，就**直接不画**（用户明确要求：不画到屏幕外）。
+**视觉**（`WindowOpOverlay`）：蓝色实线 border（3pt）贴窗口外沿；4 个**两行 chip**（蓝底白字）贴在每边中点的**外侧**：
+- 第一行（大字粗体）：bare key + 扩展方向，如 `↑k`
+- 第二行（小字稍淡）：双击反向，如 `↓kk`
+
+完整对照：top `↑k / ↓kk`、bottom `↓j / ↑jj`、left `←h / →hh`、right `→l / ←ll`。角落**不画**——hjkl 组合是隐含的，不再加 chip。**chip 屏幕外不画**：每个 chip 单独检查是不是全部包含在某个 NSScreen 的 view bounds 内；窗口顶到屏幕顶时，顶部 chip 应该在屏幕外那一块，就**直接不画**（用户明确要求：不画到屏幕外）。
+
+**为什么双击反向、不是 Shift 反向**：早先版本用 `Shift+hjkl` 表示 shrink（反向）——但 Shift 在整个项目里固定语义是"加速"（TAP-hjkl 移光标、SCROLL d/u、MOVE-hjkl 都是 Shift=fast）。WINDOW 拿 Shift 做反向（a）跟其它 mode 不一致、用户切来切去会犯迷糊，（b）让 resize 失去了加速的能力。改成"双击同键反向"后：Shift 回归加速、反向落到一个本来就属于 vim 风格的肌肉记忆（连按）、每条 edge 的反向状态还能独立追踪（k 长按扩顶 + jj 双击缩底可以同时进行）。双击窗口是 300ms（`windowReverseTapWindow`），第二下要保持按住（"双击 + hold"，第二下放掉就只缩一格）。
 
 **HUD**：进 mode 时显示 `WINDOW`。
 
@@ -345,7 +352,9 @@ MouseSynth.click(at: MouseSynth.cursorPosition(), button: .left, count: 1)
 **实现要点**：
 - 触发：`HotkeyTap` F19 arm 期间按 `w` → `session.enterWindowMode()`，仿 `Caps Lock + d → enterScroll`。
 - 焦点窗口解析：`AXWindowOps.frontmostWindow()` 沿用 `ScreenCapture.focusedWindow()` 的链（`AXFocusedWindow` → `AXMainWindow` → `AXWindows[0]`）。
-- Edge math：`top` expand = `AXPosition.y -= step, AXSize.height += step`；`bottom` expand = `AXSize.height += step`；left/right 对称。shrink 翻号。
+- Edge math：`top` expand = `AXPosition.y -= step, AXSize.height += step`；`bottom` expand = `AXSize.height += step`；left/right 对称。shrink 翻号——每条 edge 的 sign 独立由 `WindowController.reversedEdges` 决定。
+- 双击检测：`VimSession.lastWindowEdgeKeyUp[edge]` 存每条 edge 上次 keyUp 的 `CFAbsoluteTimeGetCurrent()` 时间戳。下次同键 keyDown 时 `now - last < 0.3` → 此次 hold 标 reversed，传给 `controller.startEdge(edge, reversed: true)`。OS key-repeat 不会误触（key-repeat 不发 keyUp，timestamp 不更新）。退 WINDOW mode 时清空 `lastWindowEdgeKeyUp` 防再次进入读到旧时间戳。
+- 速度：bare = 20pt/tick，Shift = 80pt/tick (fast)，Option = 5pt/tick (slow)，Option > Shift 优先（同 `MouseMover.moveSpeed`）。
 - 软 min size 200×120 防 in-memory rect 跟实际拉得太开（app 自己也会 clamp）。
 
 ---

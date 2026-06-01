@@ -8,13 +8,24 @@ import Cocoa
 /// Each tick `WindowController` calls `update(rect:)` with the focused
 /// window's current AX rect; this redraws:
 ///   - **Blue solid border** (3pt) around the rect.
-///   - **Four "chip"s** at edge midpoints, just outside the border:
-///       top    `↑k` / bottom `↓j` / left `←h` / right `→l`
+///   - **Four two-line "chip"s** at edge midpoints, just outside the
+///     border. Each chip shows BOTH bindings for that edge — single
+///     press expands, double-tap shrinks:
+///       top    `↑k / ↓kk` (k grows top; kk shrinks top)
+///       bottom `↓j / ↑jj` (j grows bottom; jj shrinks bottom)
+///       left   `←h / →hh` (h grows left; hh shrinks left)
+///       right  `→l / ←ll` (l grows right; ll shrinks right)
 ///     A chip is **skipped** if it can't fit fully on any screen (e.g.
 ///     window touching the screen top → top chip would clip; per user
 ///     spec we just don't draw it rather than show a half chip).
 ///
 /// Corners aren't labeled — they're hjkl combinations, the user knows.
+/// The reverse hint is on the chip itself (not the HUD) because the
+/// user is already looking AT the window border while resizing — the
+/// HUD at screen-bottom is too far from the attention focus to be
+/// glanceable. Double-tap-for-reverse (rather than Shift-for-reverse,
+/// the earlier design) keeps Shift free for "accelerate" — the
+/// universal modifier convention across TAP / SCROLL / MOVE.
 @MainActor
 final class WindowOpOverlay {
     static let shared = WindowOpOverlay()
@@ -68,6 +79,25 @@ final class WindowOpOverlayView: NSView {
     private var axRect: CGRect = .zero
     private var showChips: Bool = true
 
+    // Cached fonts. Switched away from
+    // `monospacedSystemFont(ofSize:weight:)` after a crash in
+    // CoreText's `TAttributes::ApplyFont`: that API can return nil
+    // for certain (size, weight) pairs on some macOS builds despite a
+    // non-optional Swift signature; the Swift bridge force-casts the
+    // nil to NSFont, the attributes dict ends up with a nil value at
+    // `.font`, and NSStringDrawing throws "attempt to insert nil
+    // object from objects[0]" when CoreText tries to copy the dict.
+    // `systemFont(ofSize:weight:)` (regular SF, not Mono) is more
+    // robust here and renders the arrow glyphs (↑ ↓ ← →) cleanly
+    // anyway. Cached at static-let so they're created once at first
+    // use, not rebuilt per chip per redraw (the previous code
+    // re-constructed the attribute dicts on every tick × 4 chips,
+    // which is the path that hit the flaky monospacedSystemFont
+    // call most often).
+    private static let bareFont: NSFont = NSFont.systemFont(ofSize: 13, weight: .bold)
+    private static let reverseFont: NSFont = NSFont.systemFont(ofSize: 11, weight: .medium)
+    private static let dimWhite: NSColor = NSColor.white.withAlphaComponent(0.85)
+
     /// `withChips: nil` keeps the previous setting (used by tick-update
     /// from `show(rect:)` without `withChips:`). Pass `true`/`false`
     /// explicitly only when switching modes (show entry).
@@ -105,19 +135,23 @@ final class WindowOpOverlayView: NSView {
 
         // Four edge chips (skip any that don't fit fully on this screen).
         // MOVE mode passes `withChips: false` — border only.
+        // Each chip = bare key on line 1, double-tap reverse on line 2.
         if showChips {
-            drawChip(text: "↑k", side: .top,    of: viewRect, blue: blue)
-            drawChip(text: "↓j", side: .bottom, of: viewRect, blue: blue)
-            drawChip(text: "←h", side: .left,   of: viewRect, blue: blue)
-            drawChip(text: "→l", side: .right,  of: viewRect, blue: blue)
+            drawChip(bare: "↑k", reverse: "↓kk", side: .top,    of: viewRect, blue: blue)
+            drawChip(bare: "↓j", reverse: "↑jj", side: .bottom, of: viewRect, blue: blue)
+            drawChip(bare: "←h", reverse: "→hh", side: .left,   of: viewRect, blue: blue)
+            drawChip(bare: "→l", reverse: "←ll", side: .right,  of: viewRect, blue: blue)
         }
     }
 
     private enum Side { case top, bottom, left, right }
 
-    private func drawChip(text: String, side: Side, of viewRect: NSRect, blue: NSColor) {
-        let chipW: CGFloat = 32
-        let chipH: CGFloat = 22
+    private func drawChip(bare: String, reverse: String, side: Side, of viewRect: NSRect, blue: NSColor) {
+        // Two-line chip: each line is ≤3 chars in 13pt mono bold —
+        // fits comfortably in 44pt width. Height carries two text
+        // lines + a small gap.
+        let chipW: CGFloat = 44
+        let chipH: CGFloat = 36
         let gap: CGFloat = 8
         let chipRect: NSRect
         switch side {
@@ -143,16 +177,32 @@ final class WindowOpOverlayView: NSView {
         guard bounds.contains(chipRect) else { return }
 
         blue.setFill()
-        NSBezierPath(roundedRect: chipRect, xRadius: 4, yRadius: 4).fill()
+        NSBezierPath(roundedRect: chipRect, xRadius: 5, yRadius: 5).fill()
 
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .bold),
+        // Line 1 (top): bare key + arrow, larger / bolder weight.
+        // Line 2 (bottom): double-tap reverse, slightly smaller +
+        // dimmer to visually subordinate it to the primary binding.
+        // Fonts are file-scope cached static-lets — see the comment
+        // there for why we don't construct them per-draw.
+        let bareAttrs: [NSAttributedString.Key: Any] = [
+            .font: Self.bareFont,
             .foregroundColor: NSColor.white,
         ]
-        let s = text as NSString
-        let sz = s.size(withAttributes: attrs)
-        s.draw(at: NSPoint(x: chipRect.midX - sz.width / 2,
-                           y: chipRect.midY - sz.height / 2),
-               withAttributes: attrs)
+        let reverseAttrs: [NSAttributedString.Key: Any] = [
+            .font: Self.reverseFont,
+            .foregroundColor: Self.dimWhite,
+        ]
+        let bareStr = bare as NSString
+        let bareSz = bareStr.size(withAttributes: bareAttrs)
+        let reverseStr = reverse as NSString
+        let reverseSz = reverseStr.size(withAttributes: reverseAttrs)
+
+        // Stack vertically: bare on top half, reverse on bottom half.
+        let topY = chipRect.midY + 1                              // upper half center
+        let botY = chipRect.midY - reverseSz.height - 1           // lower half center
+        bareStr.draw(at: NSPoint(x: chipRect.midX - bareSz.width / 2, y: topY),
+                     withAttributes: bareAttrs)
+        reverseStr.draw(at: NSPoint(x: chipRect.midX - reverseSz.width / 2, y: botY),
+                        withAttributes: reverseAttrs)
     }
 }

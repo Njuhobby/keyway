@@ -48,6 +48,14 @@ final class VimSession {
     private var rehintGeneration = 0           // supersede in-flight re-hints
     private var pendingStickyRehint: DispatchWorkItem?  // post-commit delayed re-hint
     private var scrollPendingG = false         // first 'g' of a gg (SCROLL)
+    /// Per-edge timestamp of the last hjkl keyUp in `.window` mode,
+    /// used to detect a double-tap (jj/kk/hh/ll) for "shrink this
+    /// edge instead of expanding". A keyDown within
+    /// `windowReverseTapWindow` of the recorded keyUp is the second
+    /// tap → reversed hold. CFAbsoluteTime (monotonic-ish, simple)
+    /// rather than Date to avoid surprises if the wall clock jumps.
+    private var lastWindowEdgeKeyUp: [WindowController.Edge: CFAbsoluteTime] = [:]
+    private let windowReverseTapWindow: CFAbsoluteTime = 0.3
 
     var isActive: Bool { mode != nil }
 
@@ -254,6 +262,7 @@ final class VimSession {
         if case .scroll(let c) = mode { c.teardown() }
         if case .window(let c) = mode {
             c.teardown()                // stops the resize timer
+            lastWindowEdgeKeyUp.removeAll()   // forget stale double-tap timestamps
             WindowOpOverlay.shared.hide()
         }
         if case .windowMove(let c) = mode {
@@ -609,7 +618,19 @@ final class VimSession {
     /// (don't let it hit the focused app).
     private func handleWindow(controller: WindowController, keyCode: Int, flags: CGEventFlags) -> Bool {
         if let edge = Self.windowEdge(for: keyCode) {
-            controller.startEdge(edge)
+            // Double-tap detection: if this edge's previous keyUp
+            // happened within `windowReverseTapWindow` (300ms), this
+            // keyDown is the second of a jj/kk/hh/ll pair → shrink.
+            // Otherwise normal expand. OS key-repeat fires keyDown
+            // without a matching keyUp, so it can't accidentally
+            // trigger reverse (lastWindowEdgeKeyUp[edge] stays the
+            // old value, but the press is part of the same hold).
+            let now = CFAbsoluteTimeGetCurrent()
+            let reversed: Bool = {
+                guard let last = lastWindowEdgeKeyUp[edge] else { return false }
+                return (now - last) < windowReverseTapWindow
+            }()
+            controller.startEdge(edge, reversed: reversed)
             return true
         }
         return true   // swallow everything else
@@ -1106,9 +1127,12 @@ final class VimSession {
             return false
         }
         if case .window(let controller) = mode {
-            // hjkl release stops the corresponding edge resize.
+            // hjkl release stops the corresponding edge resize and
+            // records the timestamp for the next keyDown's double-
+            // tap check.
             if let edge = Self.windowEdge(for: keyCode) {
                 controller.stopEdge(edge)
+                lastWindowEdgeKeyUp[edge] = CFAbsoluteTimeGetCurrent()
                 return true
             }
             return false
