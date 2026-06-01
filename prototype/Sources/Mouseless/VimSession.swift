@@ -47,7 +47,28 @@ final class VimSession {
     private let mover = MouseMover()            // hjkl cursor move (TAP + SCROLL)
     private var rehintGeneration = 0           // supersede in-flight re-hints
     private var pendingStickyRehint: DispatchWorkItem?  // post-commit delayed re-hint
+    /// Pending work item for the "re-apply current mode on the newly-
+    /// activated app" flow — see `handleAppActivated`. Separate from
+    /// `pendingStickyRehint` because the two have different semantics
+    /// (this one fires regardless of sticky / mode, that one is for
+    /// post-commit same-window settle). Both get cancelled by user
+    /// actions that supersede them (Esc, mode chord, etc.).
+    private var pendingAppSwitchReenter: DispatchWorkItem?
     private var scrollPendingG = false         // first 'g' of a gg (SCROLL)
+
+    /// Mode without its associated value — captured at app-switch time
+    /// so the delayed re-enter knows which mode to reapply, even if
+    /// `self.mode` mutates during the 100ms settle gap.
+    private enum ModeKind { case tap, scroll, window, windowMove }
+    private var currentModeKind: ModeKind? {
+        switch mode {
+        case .tap:        return .tap
+        case .scroll:     return .scroll
+        case .window:     return .window
+        case .windowMove: return .windowMove
+        case nil:         return nil
+        }
+    }
     /// Per-edge timestamp of the last hjkl keyUp in `.window` mode,
     /// used to detect a double-tap (jj/kk/hh/ll) for "shrink this
     /// edge instead of expanding". A keyDown within
@@ -120,6 +141,7 @@ final class VimSession {
         paletteBuffer = nil
         sticky = false
         renderModeHUD()   // show "SCROLL" (was stuck on "TAP" when chorded from TAP)
+        startAppSwitchFollow()   // re-apply SCROLL on app activation
         print("[mouseless] enter SCROLL mode")
     }
 
@@ -176,6 +198,7 @@ final class VimSession {
         paletteBuffer = nil
         sticky = false
         renderModeHUD()
+        startAppSwitchFollow()   // re-apply WINDOW resize on app activation
         print("[mouseless] enter WINDOW mode at \(Int(rect.minX)),\(Int(rect.minY)) \(Int(rect.width))×\(Int(rect.height))")
     }
 
@@ -217,6 +240,7 @@ final class VimSession {
         paletteBuffer = nil
         sticky = false
         renderModeHUD()
+        startAppSwitchFollow()   // re-apply WINDOW MOVE on app activation
         print("[mouseless] enter MOVE mode at \(Int(rect.minX)),\(Int(rect.minY))")
     }
 
@@ -252,11 +276,19 @@ final class VimSession {
 
     /// Tear down whatever mode is active (stop mover/scroll, deactivate
     /// hints) and reset to OFF. Used when switching modes.
+    ///
+    /// **NOT** responsible for `stopAppSwitchFollow` — the app-switch
+    /// observer's lifecycle is session-level (active vs OFF), not
+    /// mode-level. Transitioning between modes (e.g., TAP → SCROLL via
+    /// Caps Lock + d) should keep the observer alive so the new mode
+    /// can also reapply itself on app activation. The observer is
+    /// stopped only in `exit()` (the true return to OFF).
     private func teardownCurrentMode() {
         mover.stop()
-        stopAppSwitchFollow()
         pendingStickyRehint?.cancel()
         pendingStickyRehint = nil
+        pendingAppSwitchReenter?.cancel()
+        pendingAppSwitchReenter = nil
         scrollPendingG = false
         if case .tap(let h) = mode { h.deactivate() }
         if case .scroll(let c) = mode { c.teardown() }
@@ -377,26 +409,90 @@ final class VimSession {
             object: nil, queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated {
-                guard let self, case .tap(let h) = self.mode, self.sticky else { return }
-                print("[mouseless] app switch in sticky TAP → re-hint new app (100ms delay)")
-                // 1. Hide the stale overlay right now — it's drawn for
-                //    the OLD app at the OLD coords; leaving it visible
-                //    during the 100ms wait would be confusing.
-                h.deactivate()
-                // 2. Schedule the rescan 100ms out. Earlier we ran this
-                //    immediately, but `didActivateApplication` fires
-                //    before the new app's AX tree is fully readable /
-                //    its window is fully drawn, so the immediate scan
-                //    often came back empty → silent `exit()`. The
-                //    same-window scheduleStickyRehint already uses
-                //    100ms for a similar "let things settle" reason,
-                //    just for a different cause (click effect vs app
-                //    activation). isolateApp=true so the capture
-                //    excludes the Dock process (drops the Cmd+Tab
-                //    switcher HUD bleed-in).
-                self.scheduleStickyRehint(isolateApp: true)
+                self?.handleAppActivated()
             }
         }
+    }
+
+    /// `NSWorkspace.didActivateApplication` fired and we're in some
+    /// active mode. Strategy: **re-apply the current mode on the new
+    /// frontmost app**. The user implicitly told us they want to
+    /// operate on the just-activated app — Cmd+Tab or window-click is
+    /// "I want to do <current operation> on this app instead".
+    ///
+    /// Per mode:
+    /// - **TAP** (sticky OR non-sticky): rescan hints on new app. Same
+    ///   for both — sticky/non-sticky only diverges *after* a commit
+    ///   (sticky restays, non-sticky exits); rescanning here is
+    ///   correct for both.
+    /// - **SCROLL**: re-detect scroll areas on new app, warp cursor to
+    ///   closest, redraw overlay.
+    /// - **WINDOW resize / MOVE**: find new frontmost window, re-check
+    ///   gates. Pass → new controller on new window. Fail → HUD note
+    ///   + exit OFF (the new app doesn't support this mode).
+    ///
+    /// Always with a 100ms settle delay — `didActivateApplication`
+    /// fires before the new app's AX tree / pixels are ready, and the
+    /// immediate scan otherwise returns empty.
+    private func handleAppActivated() {
+        guard isActive else { return }
+        let kind = currentModeKind
+        print("[mouseless] app activated → re-apply \(kind.map { "\($0)" } ?? "?") on new app (100ms delay)")
+
+        // Cancel any in-flight same-window operation (post-click
+        // re-hint, etc.) — this app switch supersedes it. Also cancel
+        // any prior pending app-switch re-enter (rapid Cmd+Tab through
+        // multiple apps: latest wins).
+        pendingStickyRehint?.cancel()
+        pendingStickyRehint = nil
+        pendingAppSwitchReenter?.cancel()
+
+        // Hide stale overlays immediately. They were drawn at the OLD
+        // app's coordinates; leaving them up during the 100ms settle
+        // would visually attach them to the wrong app.
+        // (We deliberately do NOT teardown the underlying controllers
+        // here — that would leave us with `mode != nil` but an inert
+        // controller, and a user input in the 100ms gap would route to
+        // an unusable state. Letting the timer keep ticking briefly is
+        // the lesser of two evils; the re-enter 100ms later does a
+        // full `teardownCurrentMode + new controller`.)
+        switch mode {
+        case .tap(let h):
+            h.deactivate()
+        case .scroll:
+            ScrollOverlay.shared.hide()
+        case .window, .windowMove:
+            WindowOpOverlay.shared.hide()
+        case nil:
+            return
+        }
+
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            // If user has Esc'd or chorded into a different mode in
+            // the 100ms gap, respect that action — don't override.
+            // (The chord paths cancel `pendingAppSwitchReenter` via
+            // `teardownCurrentMode` so we shouldn't even fire, but
+            // this guard is belt-and-suspenders.)
+            guard self.isActive, self.currentModeKind == kind else { return }
+            switch kind {
+            case .tap?:
+                // `rehintSticky` handles deactivate + async AX/OP
+                // scan + mode assignment. `isolateApp: true` drops
+                // the Cmd+Tab switcher HUD from the capture.
+                self.rehintSticky(isolateApp: true)
+            case .scroll?:
+                self.enterScroll()
+            case .window?:
+                self.enterWindowMode()
+            case .windowMove?:
+                self.enterWindowMove()
+            case nil:
+                return
+            }
+        }
+        pendingAppSwitchReenter = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: item)
     }
 
     private func stopAppSwitchFollow() {
@@ -430,6 +526,8 @@ final class VimSession {
         stopAppSwitchFollow()
         pendingStickyRehint?.cancel()
         pendingStickyRehint = nil
+        pendingAppSwitchReenter?.cancel()
+        pendingAppSwitchReenter = nil
         scrollPendingG = false
         if case .tap(let h) = mode {
             h.deactivate()
