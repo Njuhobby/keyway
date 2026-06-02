@@ -546,15 +546,39 @@ final class VimSession {
     /// is unaffected. Started in `enter()`, stopped in `exit()` /
     /// `teardownCurrentMode()`.
     private var appSwitchToken: NSObjectProtocol?
+    private var spaceChangeToken: NSObjectProtocol?
 
     private func startAppSwitchFollow() {
-        guard appSwitchToken == nil else { return }
-        appSwitchToken = NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.didActivateApplicationNotification,
-            object: nil, queue: .main
-        ) { [weak self] _ in
-            MainActor.assumeIsolated {
-                self?.handleAppActivated()
+        if appSwitchToken == nil {
+            appSwitchToken = NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.didActivateApplicationNotification,
+                object: nil, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.handleAppActivated()
+                }
+            }
+        }
+        // Also listen for Space changes. There's no public macOS
+        // notification for "Space is currently animating" or "about
+        // to switch Space" — only `activeSpaceDidChange`, which
+        // fires *after* the slide animation completes. Used in two
+        // ways:
+        //   1. **Accelerate** a pending app-switch re-enter that was
+        //      delayed because the new app's window was on another
+        //      Space — the animation just finished, retry now.
+        //   2. **Trigger fresh re-apply** for user-driven Space
+        //      switches (Ctrl+arrow / three-finger swipe) where no
+        //      app activation happens but the focused window
+        //      effectively changes.
+        if spaceChangeToken == nil {
+            spaceChangeToken = NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.activeSpaceDidChangeNotification,
+                object: nil, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.handleSpaceChanged()
+                }
             }
         }
     }
@@ -576,18 +600,36 @@ final class VimSession {
     ///   gates. Pass → new controller on new window. Fail → HUD note
     ///   + exit OFF (the new app doesn't support this mode).
     ///
-    /// Always with a 100ms settle delay — `didActivateApplication`
-    /// fires before the new app's AX tree / pixels are ready, and the
-    /// immediate scan otherwise returns empty.
+    /// **Variable settle delay**:
+    /// - **100ms** when the just-activated app already has a window
+    ///   on the current Space (the common case). Long enough for
+    ///   the AX tree / pixels to stabilize after activation.
+    /// - **500ms** when the activated app has NO on-screen window
+    ///   (`CGWindowListCopyWindowInfo` returns no entry for its
+    ///   PID). Two sub-cases collapsed: (a) Cmd+Tab to an app on
+    ///   another Space — the slide animation takes 250-400ms and a
+    ///   100ms scan would catch a mid-animation black-fill state;
+    ///   (b) the app genuinely has no visible window (all hidden /
+    ///   minimized) — the longer wait just delays the "no frontmost
+    ///   window" HUD slightly, no harm. If (a), `activeSpaceDidChange`
+    ///   fires when the animation completes — its handler calls
+    ///   `handleAppActivated` again, which cancels the 500ms pending
+    ///   and reschedules with the short 100ms (since by then the
+    ///   window IS on the current Space).
     private func handleAppActivated() {
         guard isActive else { return }
         let kind = currentModeKind
-        print("[mouseless] app activated → re-apply \(kind.map { "\($0)" } ?? "?") on new app (100ms delay)")
+
+        // See doc comment above for the rationale.
+        let onScreen = Self.frontmostAppHasOnScreenWindow()
+        let delay: TimeInterval = onScreen ? 0.1 : 0.5
+        print("[mouseless] app/space changed → re-apply \(kind.map { "\($0)" } ?? "?") in \(Int(delay * 1000))ms (onScreen=\(onScreen))")
 
         // Cancel any in-flight same-window operation (post-click
         // re-hint, etc.) — this app switch supersedes it. Also cancel
         // any prior pending app-switch re-enter (rapid Cmd+Tab through
-        // multiple apps: latest wins).
+        // multiple apps: latest wins; cross-Space switch where the
+        // 500ms delay gets short-circuited by activeSpaceDidChange).
         pendingStickyRehint?.cancel()
         pendingStickyRehint = nil
         pendingAppSwitchReenter?.cancel()
@@ -659,13 +701,58 @@ final class VimSession {
             }
         }
         pendingAppSwitchReenter = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: item)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
     }
 
     private func stopAppSwitchFollow() {
         if let token = appSwitchToken {
             NSWorkspace.shared.notificationCenter.removeObserver(token)
             appSwitchToken = nil
+        }
+        if let token = spaceChangeToken {
+            NSWorkspace.shared.notificationCenter.removeObserver(token)
+            spaceChangeToken = nil
+        }
+    }
+
+    /// `activeSpaceDidChange` handler. Just delegates back into
+    /// `handleAppActivated`, which will detect "on-screen window now
+    /// present" (Space animation completed → frontmost app's window
+    /// is now visible) and use the short delay. If a 500ms pending
+    /// re-enter from a prior `didActivateApplication` is still in
+    /// flight, the cancel+reschedule pattern in `handleAppActivated`
+    /// replaces it with the shorter post-animation delay.
+    private func handleSpaceChanged() {
+        handleAppActivated()
+    }
+
+    /// Is the currently-frontmost app's window visible on the
+    /// **current Space**? Used by `handleAppActivated` to predict
+    /// whether a Space-switch animation is likely in progress: when
+    /// the OS reports an app as "activated" but its windows are
+    /// nowhere in the on-screen list, the user almost certainly just
+    /// Cmd+Tab'd to a cross-Space app and the slide animation is
+    /// running.
+    ///
+    /// `CGWindowListCopyWindowInfo(.optionOnScreenOnly, ...)`
+    /// deliberately excludes windows on other Spaces, minimized
+    /// windows, and hidden windows — so "no on-screen window for
+    /// this PID" covers all three cases. We can't distinguish
+    /// "cross-Space animation" from "genuinely no visible window"
+    /// up front; `handleAppActivated` resolves the ambiguity by
+    /// using a longer delay AND letting `activeSpaceDidChange`
+    /// short-circuit if it fires.
+    private static func frontmostAppHasOnScreenWindow() -> Bool {
+        guard let app = NSWorkspace.shared.frontmostApplication else { return false }
+        let pid = app.processIdentifier
+        let opts: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+        guard let raw = CGWindowListCopyWindowInfo(opts, kCGNullWindowID)
+                as? [[String: Any]]
+        else { return false }
+        return raw.contains { dict in
+            guard let ownerPID = dict[kCGWindowOwnerPID as String] as? Int32
+            else { return false }
+            return ownerPID == pid
         }
     }
 
