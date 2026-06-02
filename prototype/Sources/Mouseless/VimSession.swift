@@ -602,6 +602,18 @@ final class VimSession {
     private var windowChangeObserver: AXObserver?
     private var observedAppPID: pid_t?
 
+    /// Polling fallback for AX-notification-deficient apps. The AX
+    /// observer above is per-app and relies on the app emitting
+    /// `kAXFocusedWindowChangedNotification` — but emission is the
+    /// app's responsibility, and non-native frameworks (WeChat,
+    /// Electron variants, Qt apps) commonly skip it. We poll
+    /// `AXFocusedWindow` every 300ms; on element change (or transition
+    /// to nil), trigger the same re-apply path. Cost is one AX IPC
+    /// per 300ms while active — trivial. AX equality via `CFEqual`:
+    /// refs to the same logical window compare equal.
+    private var focusedWindowPollTimer: Timer?
+    private var lastSeenFocusedWindow: AXUIElement?
+
     private func startFollowingFrontmost() {
         if appSwitchToken == nil {
             appSwitchToken = NSWorkspace.shared.notificationCenter.addObserver(
@@ -636,6 +648,53 @@ final class VimSession {
             }
         }
         ensureFocusedWindowObserver()
+        startFocusedWindowPoll()
+    }
+
+    private func startFocusedWindowPoll() {
+        focusedWindowPollTimer?.invalidate()
+        lastSeenFocusedWindow = Self.currentFocusedWindow()
+        let t = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.pollFocusedWindow()
+            }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        focusedWindowPollTimer = t
+    }
+
+    private func stopFocusedWindowPoll() {
+        focusedWindowPollTimer?.invalidate()
+        focusedWindowPollTimer = nil
+        lastSeenFocusedWindow = nil
+    }
+
+    private func pollFocusedWindow() {
+        guard isActive else { return }
+        let current = Self.currentFocusedWindow()
+        let cached = lastSeenFocusedWindow
+        let changed: Bool
+        switch (current, cached) {
+        case (nil, nil):
+            changed = false
+        case let (c?, l?):
+            changed = !CFEqual(c, l)
+        default:
+            changed = true
+        }
+        guard changed else { return }
+        lastSeenFocusedWindow = current
+        print("[mouseless] focused window change detected (poll) → re-apply")
+        reapplyOnCurrentFrontmost()
+    }
+
+    private static func currentFocusedWindow() -> AXUIElement? {
+        guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
+        let appEl = AXUIElementCreateApplication(app.processIdentifier)
+        var ref: CFTypeRef?
+        let r = AXUIElementCopyAttributeValue(appEl, kAXFocusedWindowAttribute as CFString, &ref)
+        guard r == .success, let win = ref else { return nil }
+        return (win as! AXUIElement)
     }
 
     /// Register an AX observer on the current frontmost app's process
@@ -744,6 +803,12 @@ final class VimSession {
         // through to us. Idempotent if PID is unchanged (intra-app
         // window switch).
         ensureFocusedWindowObserver()
+        // Re-baseline the poll cache: whichever signal (AX observer or
+        // poll) called us, the OTHER would otherwise see the post-
+        // change focused window vs its stale cache and fire reapply
+        // again ~300ms later. Updating the cache now collapses that
+        // duplicate.
+        lastSeenFocusedWindow = Self.currentFocusedWindow()
 
         // See doc comment above for the rationale.
         let onScreen = Self.frontmostAppHasOnScreenWindow()
@@ -839,6 +904,7 @@ final class VimSession {
             spaceChangeToken = nil
         }
         stopFocusedWindowObserver()
+        stopFocusedWindowPoll()
     }
 
     /// `activeSpaceDidChange` handler. Just delegates back into
