@@ -164,13 +164,17 @@ final class WindowController {
         else { step = normalStep }
 
         // Decompose the per-edge contributions into:
-        //   - sizeDelta: how much width/height should change this tick
-        //   - top/leftActive: do the corresponding "anchored" edges
-        //     have a position component that needs to track size?
-        // Top and left edges anchor on the bottom/right side respectively:
-        // when the top edge moves, the bottom must stay put, so origin.y
-        // changes in lockstep with size.height. Bottom and right edges
-        // are origin-fixed — only size changes.
+        //   - sizeDelta: total width/height change this tick
+        //   - top/leftContribution: how much of sizeDelta came from
+        //     the corresponding ANCHORED edge specifically (top→height,
+        //     left→width). These drive Phase 2 origin movement.
+        //
+        // The contribution split matters when an anchored and a
+        // non-anchored edge on the same axis are both held (e.g.
+        // k+j growing both top and bottom). The ORIGIN should move
+        // by only the anchored edge's share, not the whole size
+        // change — otherwise k's "origin -= step" eats j's "bottom
+        // -= step" and the bottom doesn't move.
         //
         // **Clamp-aware skip**: when a top/left edge is GROWING (s=+1)
         // and we've already detected a position clamp on its axis,
@@ -180,96 +184,226 @@ final class WindowController {
         // creates a visible per-frame flicker. The clamp cache is
         // cleared on `stopEdge`, so re-pressing the key re-tries.
         var sizeDelta = CGSize.zero
-        var topActive = false
-        var leftActive = false
+        var topContribution: CGFloat = 0
+        var leftContribution: CGFloat = 0
         for e in activeEdges {
             let s: CGFloat = reversedEdges.contains(e) ? -1 : 1
+            // Clamp-suppressed: skip this edge ENTIRELY this tick
+            // (don't add to sizeDelta AND don't contribute to origin
+            // movement). The "I'm still wanting to move" thinking
+            // was wrong — if the edge can't actually move, its
+            // origin needs no compensating movement either; pretending
+            // otherwise causes Phase 2 to write origin, OS to clamp,
+            // Phase 3 to trim size — which would erase OTHER edges'
+            // legitimate size growth.
             if e == .top, s > 0,
                let clampY = clampedOriginY,
                currentRect.origin.y <= clampY + 0.5 {
-                topActive = true  // still mark "wants to move" for phase 2 logic
-                continue          // but contribute 0 to sizeDelta
+                continue
             }
             if e == .left, s > 0,
                let clampX = clampedOriginX,
                currentRect.origin.x <= clampX + 0.5 {
-                leftActive = true
                 continue
             }
             switch e {
-            case .top:    sizeDelta.height += step * s; topActive  = true
-            case .bottom: sizeDelta.height += step * s
-            case .left:   sizeDelta.width  += step * s; leftActive = true
-            case .right:  sizeDelta.width  += step * s
+            case .top:
+                sizeDelta.height += step * s
+                topContribution  += step * s
+            case .bottom:
+                sizeDelta.height += step * s
+            case .left:
+                sizeDelta.width  += step * s
+                leftContribution += step * s
+            case .right:
+                sizeDelta.width  += step * s
             }
         }
-        // If nothing wants to change anything this tick (all active
-        // edges are stuck against clamps and none contribute), bail
-        // out entirely — no IPC, no flicker.
-        if sizeDelta == .zero { return }
-        let intendedSize = CGSize(
-            width:  currentRect.size.width  + sizeDelta.width,
-            height: currentRect.size.height + sizeDelta.height
-        )
-        // Soft min guard at our side — the app will clamp anyway, but
-        // stopping the write when our intended size goes below sensible
-        // keeps the in-memory rect from drifting wildly beneath what the
-        // app actually shows.
-        if intendedSize.width < minSize.width || intendedSize.height < minSize.height {
+        // Bail if nothing wants to happen on EITHER axis: size unchanged
+        // AND no anchored origin movement. Pure-translation cases like
+        // k+jj (top up + bottom up = window slides up, size unchanged)
+        // still need to proceed even though sizeDelta is zero.
+        if sizeDelta == .zero && topContribution == 0 && leftContribution == 0 {
             return
         }
 
-        // Phase 1 — write the SIZE first, then read back what the app
-        // actually accepted. This is the critical step for clamp-prone
-        // apps (DingTalk / Electron / anything with internal min-size
-        // constraints): the size write may succeed at the AX layer
-        // while the app silently caps the actual visible size.
-        guard AXWindowOps.writeSize(window, size: intendedSize) else { return }
-        let postSize = AXWindowOps.readRect(window) ?? CGRect(origin: currentRect.origin, size: intendedSize)
-        let actualHDelta = postSize.size.height - currentRect.size.height
-        let actualWDelta = postSize.size.width  - currentRect.size.width
+        // Branch on direction. Anchored GROW (h or k pushing outward
+        // from the corner away from the origin) needs **position-first**
+        // — otherwise apps that constrain "right/bottom edge ≤ X"
+        // (e.g. WeChat tying max width to display.right) reject our
+        // writeSize because the intermediate state "old origin + new
+        // bigger size" pushes the opposite edge past their limit.
+        // Writing origin first moves the anchored edge in its intended
+        // direction, then the size write keeps the opposite edge at
+        // the same position (or moves it consistently with a
+        // non-anchored contribution), never overshooting.
+        //
+        // Anchored SHRINK and non-anchored ops stay on the original
+        // size-first path: that flow handles app-side min-size clamps
+        // gracefully (writeSize refused → origin doesn't move → "stuck
+        // at min", which matches native mouse-drag behavior).
+        let anchoredGrowing = topContribution > 0 || leftContribution > 0
+        if anchoredGrowing {
+            tickPositionFirst(sizeDelta: sizeDelta,
+                              topContribution: topContribution,
+                              leftContribution: leftContribution)
+        } else {
+            tickSizeFirst(sizeDelta: sizeDelta,
+                          topContribution: topContribution,
+                          leftContribution: leftContribution)
+        }
+        onRectUpdate?(currentRect)
+    }
 
-        // Phase 2 — move the origin by the AMOUNT THE SIZE ACTUALLY
-        // CHANGED, not by our intended delta. For top/left active edges
-        // this keeps the opposite edge pinned in place even when the
-        // app clamps the size. Handles the "shrink past app's min →
-        // window slides" bug: actualHDelta is 0 when size clamps →
-        // origin doesn't move → gesture stops cleanly.
+    /// Position-first tick — for anchored grows (h/k or combinations
+    /// that include them). Writes origin to where the anchored
+    /// edge(s) should go, reads back to learn what the OS actually
+    /// allowed (e.g. menu bar clamps origin.y to 23), then writes
+    /// size based on **actual** origin movement so the opposite
+    /// edge stays put (or moves consistently with non-anchored
+    /// contributions). Avoids the intermediate "old origin + new
+    /// size" state that some apps reject.
+    private func tickPositionFirst(sizeDelta: CGSize, topContribution: CGFloat, leftContribution: CGFloat) {
+        // 1. Compute and write the new origin. Only the anchored
+        // axes contribute (top/left).
+        var newOrigin = currentRect.origin
+        if topContribution  != 0 { newOrigin.y = currentRect.origin.y - topContribution }
+        if leftContribution != 0 { newOrigin.x = currentRect.origin.x - leftContribution }
+        if newOrigin != currentRect.origin {
+            AXWindowOps.writePosition(window, origin: newOrigin)
+        }
+        let postOrigin = AXWindowOps.readRect(window)
+            ?? CGRect(origin: newOrigin, size: currentRect.size)
+
+        // 2. How much did the origin actually move? OS may clamp
+        // (menu bar, screen-left). Sign matches the contribution's
+        // sign (positive contribution → origin moved in negative
+        // direction → actualMove > 0).
+        let actualTopMove  = currentRect.origin.y - postOrigin.origin.y
+        let actualLeftMove = currentRect.origin.x - postOrigin.origin.x
+
+        // 3. Compute target size:
+        //    - Anchored contribution to size = actual origin movement
+        //      (preserves opposite-edge invariant; if origin was
+        //      OS-clamped, size grows by only the achieved movement).
+        //    - Non-anchored contribution = its planned size delta
+        //      (j/l's share of sizeDelta, which is sizeDelta minus
+        //      the anchored portion).
+        let bottomContribution = sizeDelta.height - topContribution
+        let rightContribution  = sizeDelta.width  - leftContribution
+        let newSize = CGSize(
+            width:  currentRect.size.width  + actualLeftMove + rightContribution,
+            height: currentRect.size.height + actualTopMove  + bottomContribution
+        )
+        // Soft min guard.
+        if newSize.width < minSize.width || newSize.height < minSize.height {
+            currentRect = postOrigin
+            return
+        }
+        // Skip writeSize if no change intended (e.g., k+jj pure
+        // translation: actualTopMove + bottomContribution = 0).
+        let sizeChanged = abs(newSize.width  - currentRect.size.width)  > 0.5
+                       || abs(newSize.height - currentRect.size.height) > 0.5
+        if sizeChanged {
+            AXWindowOps.writeSize(window, size: newSize)
+        }
+        let postSize = AXWindowOps.readRect(window) ?? CGRect(origin: postOrigin.origin, size: newSize)
+
+        // 4. Clamp memory — let the next tick suppress this edge if
+        //    we now know it's stuck against the OS (menu bar /
+        //    screen-left). Only set on partial moves; clear on full
+        //    moves (user shrunk away from the clamp, room re-appeared).
+        if topContribution > 0 {
+            if actualTopMove < topContribution - 0.5 {
+                clampedOriginY = postOrigin.origin.y
+            } else {
+                clampedOriginY = nil
+            }
+        }
+        if leftContribution > 0 {
+            if actualLeftMove < leftContribution - 0.5 {
+                clampedOriginX = postOrigin.origin.x
+            } else {
+                clampedOriginX = nil
+            }
+        }
+
+        currentRect = postSize
+    }
+
+    /// Size-first tick — original flow, used for shrinks (anchored
+    /// or not) and non-anchored grows. The "write size first, then
+    /// origin tracking the actual size change" approach handles
+    /// app-side min-size clamps cleanly: when writeSize refuses to
+    /// shrink further, actualΔ=0 → origin doesn't move → gesture
+    /// stops at the wall, mimicking native mouse drag.
+    private func tickSizeFirst(sizeDelta: CGSize, topContribution: CGFloat, leftContribution: CGFloat) {
+        // Phase 1 — write the SIZE first (if changing), then read back
+        // what the app actually accepted.
+        var postSize: CGRect = currentRect
+        var actualHDelta: CGFloat = 0
+        var actualWDelta: CGFloat = 0
+        if sizeDelta != .zero {
+            let intendedSize = CGSize(
+                width:  currentRect.size.width  + sizeDelta.width,
+                height: currentRect.size.height + sizeDelta.height
+            )
+            if intendedSize.width < minSize.width || intendedSize.height < minSize.height {
+                return
+            }
+            guard AXWindowOps.writeSize(window, size: intendedSize) else { return }
+            postSize = AXWindowOps.readRect(window) ?? CGRect(origin: currentRect.origin, size: intendedSize)
+            actualHDelta = postSize.size.height - currentRect.size.height
+            actualWDelta = postSize.size.width  - currentRect.size.width
+        }
+
+        // Phase 2 — move the origin by the ANCHORED EDGE's share of
+        // the actual size change. Proportional scaling handles app-
+        // side size clamps; the contribution is shrinking-direction
+        // here (or zero), so origin moves toward the opposite edge.
         var newOrigin = postSize.origin
-        if topActive  { newOrigin.y = currentRect.origin.y - actualHDelta }
-        if leftActive { newOrigin.x = currentRect.origin.x - actualWDelta }
+        if topContribution != 0 {
+            let actualTopContribution: CGFloat
+            if sizeDelta.height == 0 {
+                actualTopContribution = topContribution
+            } else {
+                actualTopContribution = topContribution * (actualHDelta / sizeDelta.height)
+            }
+            newOrigin.y = currentRect.origin.y - actualTopContribution
+        }
+        if leftContribution != 0 {
+            let actualLeftContribution: CGFloat
+            if sizeDelta.width == 0 {
+                actualLeftContribution = leftContribution
+            } else {
+                actualLeftContribution = leftContribution * (actualWDelta / sizeDelta.width)
+            }
+            newOrigin.x = currentRect.origin.x - actualLeftContribution
+        }
         if newOrigin != postSize.origin {
             AXWindowOps.writePosition(window, origin: newOrigin)
         }
         let postPos = AXWindowOps.readRect(window) ?? CGRect(origin: newOrigin, size: postSize.size)
 
-        // Phase 3 — the INVERSE clamp: position may have been clamped
-        // (top edge hit the menu bar / screen ceiling, left edge hit
-        // the screen left). Size grew to intendedSize successfully,
-        // but origin couldn't move the full distance to keep the
-        // opposite edge anchored → window grows DOWNWARD/RIGHTWARD
-        // past where it should. Detect via origin discrepancy, trim
-        // size by the amount origin was held back.
+        // Phase 3 — the INVERSE clamp: position may have been clamped.
+        // Trim size by the amount origin was held back so the opposite
+        // edge stays anchored. (Mostly relevant in size-first GROW
+        // cases — now rare since position-first handles those — but
+        // still possible if a shrink's compensating origin write got
+        // clamped for some reason.)
         var trimmedSize = postPos.size
         var trimNeeded = false
-        if topActive {
-            // newOrigin.y is what we asked for; postPos.origin.y is
-            // what the OS allowed. If OS held it BACK (higher y =
-            // more toward bottom = couldn't go up far enough), the
-            // size needs to shrink by that gap.
+        if topContribution != 0 {
             let yHeldBack = postPos.origin.y - newOrigin.y
             if yHeldBack > 0.5 {
                 trimmedSize.height -= yHeldBack
                 trimNeeded = true
-                clampedOriginY = postPos.origin.y   // remember for future ticks
+                clampedOriginY = postPos.origin.y
             } else if newOrigin.y < currentRect.origin.y - 0.5 {
-                // Origin successfully moved up — any prior clamp is
-                // stale (e.g., user shrunk first and is now growing
-                // again with room to spare).
                 clampedOriginY = nil
             }
         }
-        if leftActive {
+        if leftContribution != 0 {
             let xHeldBack = postPos.origin.x - newOrigin.x
             if xHeldBack > 0.5 {
                 trimmedSize.width -= xHeldBack
@@ -285,6 +419,5 @@ final class WindowController {
         } else {
             currentRect = postPos
         }
-        onRectUpdate?(currentRect)
     }
 }
