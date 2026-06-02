@@ -488,14 +488,37 @@ final class VimSession {
                 // on another Space), surface that to the user. The
                 // existing hints on Dock / menu bar / menu extras
                 // remain visible.
-                if fromAppSwitch, AXWindowOps.frontmostWindow() == nil {
-                    // Match the wording from WINDOW resize / MOVE
-                    // ("WINDOW: no frontmost window" / "MOVE: no
-                    // frontmost window") so the three modes use a
-                    // consistent term for the same condition. Covers
-                    // all-minimized, all-hidden, on-another-Space,
-                    // and never-opened-a-window-here.
-                    HUD.shared.show("TAP: no frontmost window")
+                if fromAppSwitch {
+                    if let frontWindow = AXWindowOps.frontmostWindow(),
+                       let frontRect = AXWindowOps.readRect(frontWindow) {
+                        // Park the cursor at the new window's top-
+                        // border midpoint. The user's next action is
+                        // almost always *on* this app, so meeting
+                        // them with the cursor already there saves a
+                        // big cursor traversal. Choice of point:
+                        // - midX: center horizontally (no L/R bias).
+                        // - minY + 6pt: just below the top edge,
+                        //   inside the title bar territory — already
+                        //   a useful spot since double-clicking the
+                        //   title bar maximizes / restores the
+                        //   window, and dragging from here moves
+                        //   the window.
+                        // MouseSynth.warp posts a synthetic mouseMoved
+                        // so the destination view picks up the move
+                        // (cursor shape, hover state) — same reason
+                        // we use it from /-search commit (see comment
+                        // on MouseSynth.warp).
+                        let landing = CGPoint(x: frontRect.midX,
+                                              y: frontRect.minY + 6)
+                        MouseSynth.warp(to: landing)
+                    } else {
+                        // No frontmost window — same condition the
+                        // WINDOW / MOVE modes flag. Match wording so
+                        // all four modes use the same term. Covers
+                        // all-minimized, all-hidden, on-another-Space,
+                        // and never-opened-a-window-here.
+                        HUD.shared.show("TAP: no frontmost window")
+                    }
                 }
             } else {
                 // All 4 sources came back empty — rare (would need
