@@ -44,6 +44,14 @@ final class HintMode {
     private var typed: String = ""
     private var isActiveFlag = false
 
+    /// How many of the activated targets came from the focused
+    /// window's content (AX walk + OmniParser). Distinct from
+    /// `targets.count` which also counts Dock + menu-extras hints.
+    /// Used by `VimSession`'s app-switch path to surface "the new
+    /// app has no visible window" even when `activate` overall
+    /// returned true thanks to Dock / extras hints.
+    private(set) var focusedTargetCount: Int = 0
+
     // h/j/k/l are the unified cursor-move keys (vim hjkl) in TAP *and*
     // SCROLL, so they can't be hint labels — a bare j would be ambiguous
     // (move? or hint?). Everything else ergonomic is fair game.
@@ -167,6 +175,7 @@ final class HintMode {
         }
 
         targets = dockTargets + nonDockTargets
+        focusedTargetCount = collected.focused.count + collected.focusedOmni.count
         typed = ""
         isActiveFlag = true
         HintOverlay.shared.show(targets: targets, typed: "")

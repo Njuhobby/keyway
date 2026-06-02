@@ -31,22 +31,31 @@ final class ScrollController {
     /// one nearest the cursor, warps the cursor into it, and shows the
     /// numbered picker overlay. Falls back to the focused window center
     /// when AX exposes no scroll areas (zero-AX apps).
-    func enter() {
+    ///
+    /// Returns `false` if there's **no focused window at all** (no
+    /// scroll areas AND no window rect) — most often when the user
+    /// just Cmd+Tab'd to an app whose windows are all minimized /
+    /// hidden / on another Space. The caller should HUD-note + exit
+    /// rather than leaving SCROLL active on a target-less state.
+    @discardableResult
+    func enter() -> Bool {
         areas = ScrollAreaDetector.detect()
         if areas.isEmpty {
             // Fallback: window center, no overlay (nothing to pick).
             if let center = Self.focusedWindowCenter() {
                 CGWarpMouseCursorPosition(center)
                 print("[mouseless] scroll: no AXScrollArea — fallback to window center")
+                return true
             } else {
                 print("[mouseless] scroll: no scroll area and no window rect")
+                return false
             }
-            return
         }
         selectedIndex = Self.nearestAreaIndex(areas, to: Self.cursorPoint())
         warpToSelected()
         ScrollOverlay.shared.show(areas: areas.map { $0.rect }, selected: selectedIndex)
         print("[mouseless] scroll: \(areas.count) area(s), selected #\(selectedIndex + 1)")
+        return true
     }
 
     /// Switch the active scroll area (number-key press). 1-based `number`.

@@ -221,7 +221,18 @@ final class VimSession {
         // in SCROLL (just re-detects areas).
         teardownCurrentMode()
         let controller = ScrollController()
-        controller.enter()      // detect scroll areas, warp, show overlay
+        let ready = controller.enter()      // detect scroll areas, warp, show overlay
+        guard ready else {
+            // No focused window at all — common when reached via the
+            // app-switch re-apply path and the new app has its
+            // windows minimized / hidden / on another Space. Surface
+            // it instead of leaving SCROLL mode active on an empty
+            // controller (user would press d/u and nothing useful
+            // would happen).
+            HUD.shared.show("SCROLL: no frontmost window")
+            print("[mouseless] enter SCROLL: aborted — no focused window")
+            return
+        }
         mode = .scroll(controller)
         paletteBuffer = nil
         sticky = false
@@ -437,7 +448,7 @@ final class VimSession {
     /// recheck poller firing) bumps the generation so an earlier in-
     /// flight scan, when it finishes, sees it's been superseded and bows
     /// out instead of racing to overwrite `mode`.
-    private func rehintSticky(isolateApp: Bool = false) {
+    private func rehintSticky(isolateApp: Bool = false, fromAppSwitch: Bool = false) {
         rehintGeneration += 1
         let gen = rehintGeneration
         if case .tap(let h) = mode { h.deactivate() }
@@ -448,7 +459,31 @@ final class VimSession {
             if ok {
                 self.mode = .tap(next)
                 self.renderModeHUD()
+                // App-switch path nuance: `ok` is `true` whenever ANY
+                // of the 4 sources produced targets. In practice Dock
+                // and menu-extras (and the focused app's own MENU BAR
+                // via walkMenuBar — File/Edit/View/... go into
+                // `collected.focused`) usually have items even when
+                // the user's actual target — a window — is missing.
+                // So check `AXFocusedWindow` directly: if the new app
+                // has no frontmost window (all minimized / hidden /
+                // on another Space), surface that to the user. The
+                // existing hints on Dock / menu bar / menu extras
+                // remain visible.
+                if fromAppSwitch, AXWindowOps.frontmostWindow() == nil {
+                    // Match the wording from WINDOW resize / MOVE
+                    // ("WINDOW: no frontmost window" / "MOVE: no
+                    // frontmost window") so the three modes use a
+                    // consistent term for the same condition. Covers
+                    // all-minimized, all-hidden, on-another-Space,
+                    // and never-opened-a-window-here.
+                    HUD.shared.show("TAP: no frontmost window")
+                }
             } else {
+                // All 4 sources came back empty — rare (would need
+                // Dock and menu extras to be empty too, e.g. during a
+                // transient OS state right after activation).
+                HUD.shared.show("no hints here")
                 self.exit()
             }
         }
@@ -580,13 +615,35 @@ final class VimSession {
                 // `rehintSticky` handles deactivate + async AX/OP
                 // scan + mode assignment. `isolateApp: true` drops
                 // the Cmd+Tab switcher HUD from the capture.
-                self.rehintSticky(isolateApp: true)
+                // `fromAppSwitch: true` enables the "new app has no
+                // visible window" HUD if focused-window targets are
+                // empty (even when Dock / extras saved us from a
+                // total `ok=false` exit).
+                self.rehintSticky(isolateApp: true, fromAppSwitch: true)
             case .scroll?:
+                // enterScroll's own teardownCurrentMode at the top
+                // tears down the stale .scroll(oldController) before
+                // creating the new one — no pre-teardown needed.
                 self.enterScroll()
-            case .window?:
-                self.enterWindowMode()
-            case .windowMove?:
-                self.enterWindowMove()
+            case .window?, .windowMove?:
+                // WINDOW resize / MOVE entry has an "already in this
+                // mode → no-op" early-return guard for the manual
+                // chord case (Caps+w while in WINDOW). In the
+                // app-switch path we ARE still in .window /
+                // .windowMove (we only hid the overlay; controllers
+                // weren't torn down — see the comment above). Clear
+                // the stale mode first so enterX runs fresh on the
+                // NEW app's frontmost window. If the new app fails
+                // the gates (no resizable / movable window), enterX
+                // shows HUD + leaves mode = nil (OFF), instead of
+                // leaving the user in a stale .window(oldController)
+                // pointing at the previous app's AX ref.
+                self.teardownCurrentMode()
+                if kind == .window {
+                    self.enterWindowMode()
+                } else {
+                    self.enterWindowMove()
+                }
             case nil:
                 return
             }
