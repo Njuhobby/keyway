@@ -179,6 +179,7 @@ NSApplication
 | [`specs/omniparser-fallback-design.md`](specs/omniparser-fallback-design.md) | **已实现 (P5-P6)**：OP 视觉路径，OP-default + AX whitelist 路由（非 fall-through）；baseline 过滤；OCR click-point refiner（§4.6）；PoC 数据；captioner 搁置 |
 | [`specs/omniparser-integration-roadmap.md`](specs/omniparser-integration-roadmap.md) | **实施路线图**：P0-P6 已完成（CoreML spike → 截屏 → 路由 → 集成 → 端到端 → OCR refiner），P7（数据调参）/ P8（发布）待做 |
 | [`specs/per-app-correction-design.md`](specs/per-app-correction-design.md) | **设计草稿，未实现**：per-app 修正层（模板匹配补 OP 漏检 + exclude 误报），护城河；P8 之后启动 |
+| [`specs/browser-support-design.md`](specs/browser-support-design.md) | **设计草稿，未实现**：Chrome / Safari 走"插件 + Native Messaging Host + BrowserProvider"打通 DOM 级 HINT；借鉴 Vimium 的 detection 模块（MIT），其余复用现有 mode / overlay / commit；OP 降级 |
 
 ---
 
@@ -211,7 +212,9 @@ NSApplication
 
 1. **键盘布局** —— `KeyCode.swift` 是 ANSI 物理位。非 QWERTY 字母 hint 全错。
    迁移路径：用 `UCKeyTranslate` / `CGEventKeyboardGetUnicodeString` 把 keyCode + flags 映射到字符再匹配。
-2. **Electron / AX-bad app**（vs Homerow 的 wedge）—— **已实现 OmniParser 视觉路径 (P5-P6)**。
+2. **浏览器 HINT（Chrome / Safari）—— 设计完成，未实现**。OP 在网页上覆盖不全（icon-only 按钮、`<div onclick>`、SPA 框架按钮），打破"一套心智模型覆盖所有 app"产品论点。方案：装 Mouseless 扩展走 DOM 级检测，扩展通过 Native Messaging 跟主进程通讯，hint 列表喂进现有 `HintOverlay`，commit 仍走 `CGEvent`。借鉴 Vimium 的 detection 模块（MIT 许可，主要是可见性 / iframe / Shadow DOM 处理）。其它 mode（SCROLL/WINDOW/DRAG/MOVE）已经在浏览器里跑得通，不依赖这条改动。预估 ~10 天到能给用户用。详见 [`specs/browser-support-design.md`](specs/browser-support-design.md)。
+
+3. **Electron / AX-bad app**（vs Homerow 的 wedge）—— **已实现 OmniParser 视觉路径 (P5-P6)**。
    背景：Chromium 桥暴露什么取决于 app 的 ARIA 卫生，差的（WeChat、国产 SaaS）一片
    AXGroup 无 action；而且框架 ≠ AX 质量（WeChat 是 native AppKit 但聊天内容自渲染、AX 黑洞）。
    方案：**OP-default + AX whitelist 路由**——焦点窗口不在 `AppRegistry.AX_FOCUSED_WHITELIST`
@@ -219,20 +222,20 @@ NSApplication
    ~95ms 不比 AX walk 慢。剩余：P7 数据调参（confidence 阈值 / whitelist 增删）、P8 发布打包、
    per-app 修正层（模板匹配，护城河，P8 后）。详见
    [`specs/omniparser-fallback-design.md`](specs/omniparser-fallback-design.md)。
-3. **App AX cleanup 期的扫描尖峰** —— 关弹框 / 关 sheet 后 sticky rescan 落进目标 app
+4. **App AX cleanup 期的扫描尖峰** —— 关弹框 / 关 sheet 后 sticky rescan 落进目标 app
    的 ~500ms cleanup 窗口里，per-IPC 延迟从 ~0.2ms 涨到 ~40ms。IPC 数已经压到下限
    13（cache + walkMenuBar 双管），优化空间在这条路径上耗尽。事件驱动等 AX 稳定再
    扫的方案没尝试过——通知发出时机不可控，理论 wall-clock 时间可能不降。
    **跟 OmniParser 路由是独立问题**——OP 只解决 AX 黑洞 app；cleanup 尖峰下
    AX 仍能返回候选（只是慢），且白名单 app 才走 AX walk。详见
    `specs/hint-discovery.md` §5 + [`specs/omniparser-fallback-design.md`](specs/omniparser-fallback-design.md) §4.5。
-4. **新 modes / 子状态** —— `Mode` enum 已经留好扩展点：select-text、right-click 命令模式（WINDOW resize `specs/modes.md` §7 / WINDOW MOVE §8 已实现；TAP 内部子状态 DRAG `specs/modes.md` §6 / `/`-搜索 §6.5 已实现）。接入路径见 `specs/modes.md` §12。
-5. **`/`-搜索支持中文输入** —— 当前 search typing 子状态只接 ASCII（`VimSession.searchTypingChar` 白名单 a-z + 0-9 + space），中文页面**能 OCR 出来**（`OCRRefiner.recognizeText` 已配 zh-Hans / zh-Hant），但**敲不进去**。根因：CGEventTap 在 IME 之前拦截 keyDown，IME 收不到原始按键就不能 compose。三条候选路径：
+5. **新 modes / 子状态** —— `Mode` enum 已经留好扩展点：select-text、right-click 命令模式（WINDOW resize `specs/modes.md` §7 / WINDOW MOVE §8 已实现；TAP 内部子状态 DRAG `specs/modes.md` §6 / `/`-搜索 §6.5 已实现）。接入路径见 `specs/modes.md` §12。
+6. **`/`-搜索支持中文输入** —— 当前 search typing 子状态只接 ASCII（`VimSession.searchTypingChar` 白名单 a-z + 0-9 + space），中文页面**能 OCR 出来**（`OCRRefiner.recognizeText` 已配 zh-Hans / zh-Hant），但**敲不进去**。根因：CGEventTap 在 IME 之前拦截 keyDown，IME 收不到原始按键就不能 compose。三条候选路径：
    - **(a) 弹 modal NSPanel 收输入**（推荐）——bare `/` 时弹个小 borderless panel 暂时持焦点，让 IME 在 panel 的 NSTextField 里 work，子状态退出时还焦点。状态隔离最干净。
    - **(b) 偷焦点到隐藏 NSTextField + NSTextInputClient**——不弹 panel，但要小心 sticky 重扫的 frontmost-app observer 会被偷焦点动作扰动。
    - **(c) 允许 Cmd+V 贴剪贴板**——零代码风险但要求用户先在别处输入好复制。
 
    MVP 暂时只英文够用，做的时候记得先评估 (a) 跟现有 SearchOverlay 视觉是否冲突。
-5. **多 hint 来源的标签空间冲突** —— 焦点 app 元素很多时会吃光字母组，menu extras 排到 `lj/lk/ll`。
+7. **多 hint 来源的标签空间冲突** —— 焦点 app 元素很多时会吃光字母组，menu extras 排到 `lj/lk/ll`。
    方案候选：menu extras 走单独的前缀（如 `;a`, `;s` …）或单独字母池。
-6. **Dock 分隔符 / Recents 占位过滤** —— 当前 Dock 把所有 `AXDockItem` 都收，包括分隔符。低价值的 hint 浪费标签。
+8. **Dock 分隔符 / Recents 占位过滤** —— 当前 Dock 把所有 `AXDockItem` 都收，包括分隔符。低价值的 hint 浪费标签。
