@@ -195,6 +195,16 @@ final class VimSession {
             // releases the held mouseDown / clears search.
             if case .normal = tapSub {
                 sticky.toggle()
+                // Re-hint on the toggle so hints reflect any UI
+                // changes since the last scan — the user explicitly
+                // requested a state transition, treating it as a
+                // signal to refresh feels more aligned with their
+                // intent than silently flipping a flag while showing
+                // potentially-stale hint positions. Symmetric for
+                // both directions (off→on and on→off). rehintSticky
+                // does NOT itself modify `self.sticky`; the toggle
+                // above is the source of truth.
+                rehintSticky()
                 renderModeHUD()
             } else {
                 teardownCurrentMode()
