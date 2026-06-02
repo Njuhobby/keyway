@@ -387,9 +387,11 @@ final class VimSession {
             if await h.activate() {
                 self.renderModeHUD()
                 // Park cursor on focused window's title bar if not
-                // already inside that window — see
-                // `parkCursorOnFrontmostWindowIfOutside` for the
-                // skip-when-inside rationale.
+                // already inside that window — helper returns false
+                // if no frontmost window, in which case we show a
+                // HUD note but stay in TAP (Dock / menu bar / menu
+                // extras hints from `activate` are still usable, so
+                // exiting OFF would be too aggressive).
                 if !self.parkCursorOnFrontmostWindowIfOutside() {
                     HUD.shared.show("TAP: no frontmost window")
                 }
@@ -499,17 +501,11 @@ final class VimSession {
                 // has no frontmost window (all minimized / hidden /
                 // on another Space), surface that to the user. The
                 // existing hints on Dock / menu bar / menu extras
-                // remain visible.
+                // remain visible — we deliberately don't exit OFF,
+                // since those hints are still useful interaction
+                // targets.
                 if fromAppSwitch {
-                    // Same cursor-parking logic as the initial-entry
-                    // path — see `parkCursorOnFrontmostWindowIfOutside`
-                    // for the skip-when-inside rationale.
                     if !self.parkCursorOnFrontmostWindowIfOutside() {
-                        // No frontmost window — same condition the
-                        // WINDOW / MOVE modes flag. Match wording so
-                        // all four modes use the same term. Covers
-                        // all-minimized, all-hidden, on-another-Space,
-                        // and never-opened-a-window-here.
                         HUD.shared.show("TAP: no frontmost window")
                     }
                 }
@@ -1609,9 +1605,23 @@ final class VimSession {
             // hjkl release stops the corresponding edge resize and
             // records the timestamp for the next keyDown's double-
             // tap check.
+            //
+            // **Don't record the timestamp if the released press was
+            // itself reversed** (it was the second tap of an hh/kk
+            // pair). Otherwise: hh release at t=400, h press at
+            // t=500 → 500-400=100 < 150ms window → wrongly treated
+            // as a THIRD reverse tap chaining the previous hh.
+            // Clearing the timestamp on a reversed release means the
+            // next press falls outside the window and starts fresh.
+            // Read isReversed BEFORE stopEdge (stopEdge clears it).
             if let edge = Self.windowEdge(for: keyCode) {
+                let wasReversed = controller.isReversed(edge)
                 controller.stopEdge(edge)
-                lastWindowEdgeKeyUp[edge] = CFAbsoluteTimeGetCurrent()
+                if wasReversed {
+                    lastWindowEdgeKeyUp[edge] = nil
+                } else {
+                    lastWindowEdgeKeyUp[edge] = CFAbsoluteTimeGetCurrent()
+                }
                 return true
             }
             return false

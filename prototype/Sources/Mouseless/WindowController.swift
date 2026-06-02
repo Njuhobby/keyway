@@ -125,6 +125,14 @@ final class WindowController {
         }
     }
 
+    /// Used by `VimSession`'s keyUp handler to know whether the just-
+    /// released press was a double-tap (reversed) one. Caller must
+    /// query this BEFORE `stopEdge` runs — `stopEdge` clears the
+    /// reversed state.
+    func isReversed(_ edge: Edge) -> Bool {
+        return reversedEdges.contains(edge)
+    }
+
     func teardown() {
         timer?.invalidate()
         timer = nil
