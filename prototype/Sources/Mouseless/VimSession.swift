@@ -386,6 +386,27 @@ final class VimSession {
             guard case .tap(let cur) = self.mode, cur === h else { return }
             if await h.activate() {
                 self.renderModeHUD()
+                // Park the cursor on the focused window's title bar
+                // even on the initial Caps Lock entry (mirror of the
+                // app-switch path in rehintSticky). User pressing
+                // Caps Lock = signaling intent to interact with the
+                // focused app, so pre-positioning the cursor saves a
+                // traversal. Same landing point: (midX, top + 6pt)
+                // — title bar territory where double-click maximizes
+                // and drag moves the window. If no frontmost window
+                // (Finder Desktop / all-minimized / etc.), surface
+                // it via the same HUD as the app-switch path —
+                // hints still appear on Dock / menu bar / menu
+                // extras (whatever activate found), but the user
+                // gets feedback that the focused app has no window.
+                if let frontWindow = AXWindowOps.frontmostWindow(),
+                   let frontRect = AXWindowOps.readRect(frontWindow) {
+                    let landing = CGPoint(x: frontRect.midX,
+                                          y: frontRect.minY + 6)
+                    MouseSynth.warp(to: landing)
+                } else {
+                    HUD.shared.show("TAP: no frontmost window")
+                }
             } else {
                 HUD.shared.show("no hints here")
                 self.exit()
