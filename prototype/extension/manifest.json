@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "Mouseless (dev)",
+  "version": "0.0.1",
+  "description": "Bridge between Chrome and the Mouseless desktop app. Dev build — P0 environment proof of concept.",
+  "minimum_chrome_version": "120",
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content_script.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ]
+}
