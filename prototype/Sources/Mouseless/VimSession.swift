@@ -1,5 +1,20 @@
 import Cocoa
 import Vision   // VNRecognizedTextObservation, for the TAP /-search sub-state
+import ApplicationServices   // AXObserver for kAXFocusedWindowChangedNotification
+
+/// AXObserver callback for `kAXFocusedWindowChangedNotification`. File-scope
+/// because `@convention(c)` function pointers can't capture Swift context —
+/// the `VimSession` reference rides in via the `userInfo` refcon.
+///
+/// Runs on the main runloop (we add the source to `CFRunLoopGetMain()`), so
+/// `MainActor.assumeIsolated` is safe here.
+private let axFocusedWindowChangedCallback: AXObserverCallback = { _, _, _, userInfo in
+    guard let userInfo else { return }
+    let session = Unmanaged<VimSession>.fromOpaque(userInfo).takeUnretainedValue()
+    MainActor.assumeIsolated {
+        session.handleFocusedWindowChanged()
+    }
+}
 
 /// Owns the active interaction mode + an optional command-palette overlay.
 ///
@@ -70,7 +85,7 @@ final class VimSession {
     private var rehintGeneration = 0           // supersede in-flight re-hints
     private var pendingStickyRehint: DispatchWorkItem?  // post-commit delayed re-hint
     /// Pending work item for the "re-apply current mode on the newly-
-    /// activated app" flow — see `handleAppActivated`. Separate from
+    /// activated app" flow — see `reapplyOnCurrentFrontmost`. Separate from
     /// `pendingStickyRehint` because the two have different semantics
     /// (this one fires regardless of sticky / mode, that one is for
     /// post-commit same-window settle). Both get cancelled by user
@@ -260,7 +275,7 @@ final class VimSession {
         paletteBuffer = nil
         sticky = false
         renderModeHUD()   // show "SCROLL" (was stuck on "TAP" when chorded from TAP)
-        startAppSwitchFollow()   // re-apply SCROLL on app activation
+        startFollowingFrontmost()   // re-apply SCROLL on app activation
         print("[mouseless] enter SCROLL mode")
     }
 
@@ -317,7 +332,7 @@ final class VimSession {
         paletteBuffer = nil
         sticky = false
         renderModeHUD()
-        startAppSwitchFollow()   // re-apply WINDOW resize on app activation
+        startFollowingFrontmost()   // re-apply WINDOW resize on app activation
         print("[mouseless] enter WINDOW mode at \(Int(rect.minX)),\(Int(rect.minY)) \(Int(rect.width))×\(Int(rect.height))")
     }
 
@@ -359,7 +374,7 @@ final class VimSession {
         paletteBuffer = nil
         sticky = false
         renderModeHUD()
-        startAppSwitchFollow()   // re-apply WINDOW MOVE on app activation
+        startFollowingFrontmost()   // re-apply WINDOW MOVE on app activation
         print("[mouseless] enter MOVE mode at \(Int(rect.minX)),\(Int(rect.minY))")
     }
 
@@ -378,7 +393,7 @@ final class VimSession {
         sticky = false
         print("[mouseless] enter TAP mode")
         logFocusedAppRouting()
-        startAppSwitchFollow()   // acts only while sticky (gated in callback)
+        startFollowingFrontmost()   // acts only while sticky (gated in callback)
 
         Task { @MainActor in
             // Guard against the mode changing out from under us during
@@ -405,7 +420,7 @@ final class VimSession {
     /// Tear down whatever mode is active (stop mover/scroll, deactivate
     /// hints) and reset to OFF. Used when switching modes.
     ///
-    /// **NOT** responsible for `stopAppSwitchFollow` — the app-switch
+    /// **NOT** responsible for `stopFollowingFrontmost` — the app-switch
     /// observer's lifecycle is session-level (active vs OFF), not
     /// mode-level. Transitioning between modes (e.g., TAP → SCROLL via
     /// Caps Lock + d) should keep the observer alive so the new mode
@@ -527,7 +542,7 @@ final class VimSession {
     ///    click land and the content re-render settle.
     ///
     /// 2. **App switch** (`isolateApp: true`, from
-    ///    `startAppSwitchFollow`): `didActivateApplication` fires
+    ///    `startFollowingFrontmost`): `didActivateApplication` fires
     ///    when the OS *marks* the new app active, but the AX tree
     ///    isn't necessarily readable yet and ScreenCaptureKit may
     ///    catch a half-drawn frame. 100ms lets the new app settle
@@ -568,14 +583,33 @@ final class VimSession {
     private var appSwitchToken: NSObjectProtocol?
     private var spaceChangeToken: NSObjectProtocol?
 
-    private func startAppSwitchFollow() {
+    /// AX observer on the frontmost app's process listening for
+    /// `kAXFocusedWindowChangedNotification` — fires when the user closes
+    /// the focused window (Cmd+W), minimizes it, or switches between
+    /// windows of the same app (Cmd+`). Without this, the visible
+    /// overlays (hint labels, WindowOp blue chip, scroll picker) keep
+    /// pointing at coordinates of a window that no longer exists.
+    ///
+    /// `NSWorkspace.didActivateApplication` (the app-switch observer
+    /// above) doesn't fire on intra-app window changes — different
+    /// notification scope entirely. Hence this second observer at the
+    /// AX layer.
+    ///
+    /// One observer per session, re-registered when the frontmost PID
+    /// changes (see `ensureFocusedWindowObserver`). The Swift refcon
+    /// pattern (passUnretained → fromOpaque) lets the C trampoline
+    /// reach `self` without a closure.
+    private var windowChangeObserver: AXObserver?
+    private var observedAppPID: pid_t?
+
+    private func startFollowingFrontmost() {
         if appSwitchToken == nil {
             appSwitchToken = NSWorkspace.shared.notificationCenter.addObserver(
                 forName: NSWorkspace.didActivateApplicationNotification,
                 object: nil, queue: .main
             ) { [weak self] _ in
                 MainActor.assumeIsolated {
-                    self?.handleAppActivated()
+                    self?.reapplyOnCurrentFrontmost()
                 }
             }
         }
@@ -601,6 +635,70 @@ final class VimSession {
                 }
             }
         }
+        ensureFocusedWindowObserver()
+    }
+
+    /// Register an AX observer on the current frontmost app's process
+    /// for focused-window changes, if not already observing it.
+    /// Idempotent — safe to call from multiple hot paths (initial setup,
+    /// post-app-switch in `reapplyOnCurrentFrontmost`). If the frontmost PID
+    /// has changed since the last registration, tears down the old
+    /// observer first.
+    private func ensureFocusedWindowObserver() {
+        guard let app = NSWorkspace.shared.frontmostApplication else { return }
+        let pid = app.processIdentifier
+        if observedAppPID == pid, windowChangeObserver != nil {
+            return
+        }
+        stopFocusedWindowObserver()
+
+        var obs: AXObserver?
+        let createResult = AXObserverCreate(pid, axFocusedWindowChangedCallback, &obs)
+        guard createResult == .success, let observer = obs else {
+            print("[mouseless] AXObserverCreate failed pid=\(pid) err=\(createResult.rawValue)")
+            return
+        }
+        let appElement = AXUIElementCreateApplication(pid)
+        let refcon = Unmanaged.passUnretained(self).toOpaque()
+        let addResult = AXObserverAddNotification(
+            observer, appElement,
+            kAXFocusedWindowChangedNotification as CFString,
+            refcon
+        )
+        // `.notificationAlreadyRegistered` is benign — means a previous
+        // observer for this PID hasn't been torn down yet on the AX
+        // side. Treat as success.
+        guard addResult == .success || addResult == .notificationAlreadyRegistered else {
+            print("[mouseless] AXObserverAddNotification failed pid=\(pid) err=\(addResult.rawValue)")
+            return
+        }
+        CFRunLoopAddSource(CFRunLoopGetMain(),
+                           AXObserverGetRunLoopSource(observer),
+                           .defaultMode)
+        windowChangeObserver = observer
+        observedAppPID = pid
+    }
+
+    private func stopFocusedWindowObserver() {
+        if let obs = windowChangeObserver {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(),
+                                  AXObserverGetRunLoopSource(obs),
+                                  .defaultMode)
+        }
+        windowChangeObserver = nil
+        observedAppPID = nil
+    }
+
+    /// Called from the AX observer when the focused window of the
+    /// observed app changes — close, minimize, Cmd+` cycle, etc.
+    /// Reuses the `reapplyOnCurrentFrontmost` re-apply pipeline: if a new
+    /// window took focus the mode is re-applied onto it; if no window
+    /// remains, each mode's entry handler shows the "no frontmost
+    /// window" HUD and tears down stale overlays.
+    fileprivate func handleFocusedWindowChanged() {
+        guard isActive else { return }
+        print("[mouseless] focused window changed → re-apply current mode")
+        reapplyOnCurrentFrontmost()
     }
 
     /// `NSWorkspace.didActivateApplication` fired and we're in some
@@ -633,12 +731,19 @@ final class VimSession {
     ///   minimized) — the longer wait just delays the "no frontmost
     ///   window" HUD slightly, no harm. If (a), `activeSpaceDidChange`
     ///   fires when the animation completes — its handler calls
-    ///   `handleAppActivated` again, which cancels the 500ms pending
+    ///   `reapplyOnCurrentFrontmost` again, which cancels the 500ms pending
     ///   and reschedules with the short 100ms (since by then the
     ///   window IS on the current Space).
-    private func handleAppActivated() {
+    private func reapplyOnCurrentFrontmost() {
         guard isActive else { return }
         let kind = currentModeKind
+
+        // Frontmost PID may have changed (Cmd+Tab to a different app);
+        // re-target the AX observer at the new app so subsequent
+        // intra-app window changes (close, minimize, Cmd+`) keep firing
+        // through to us. Idempotent if PID is unchanged (intra-app
+        // window switch).
+        ensureFocusedWindowObserver()
 
         // See doc comment above for the rationale.
         let onScreen = Self.frontmostAppHasOnScreenWindow()
@@ -724,7 +829,7 @@ final class VimSession {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
     }
 
-    private func stopAppSwitchFollow() {
+    private func stopFollowingFrontmost() {
         if let token = appSwitchToken {
             NSWorkspace.shared.notificationCenter.removeObserver(token)
             appSwitchToken = nil
@@ -733,21 +838,22 @@ final class VimSession {
             NSWorkspace.shared.notificationCenter.removeObserver(token)
             spaceChangeToken = nil
         }
+        stopFocusedWindowObserver()
     }
 
     /// `activeSpaceDidChange` handler. Just delegates back into
-    /// `handleAppActivated`, which will detect "on-screen window now
+    /// `reapplyOnCurrentFrontmost`, which will detect "on-screen window now
     /// present" (Space animation completed → frontmost app's window
     /// is now visible) and use the short delay. If a 500ms pending
     /// re-enter from a prior `didActivateApplication` is still in
-    /// flight, the cancel+reschedule pattern in `handleAppActivated`
+    /// flight, the cancel+reschedule pattern in `reapplyOnCurrentFrontmost`
     /// replaces it with the shorter post-animation delay.
     private func handleSpaceChanged() {
-        handleAppActivated()
+        reapplyOnCurrentFrontmost()
     }
 
     /// Is the currently-frontmost app's window visible on the
-    /// **current Space**? Used by `handleAppActivated` to predict
+    /// **current Space**? Used by `reapplyOnCurrentFrontmost` to predict
     /// whether a Space-switch animation is likely in progress: when
     /// the OS reports an app as "activated" but its windows are
     /// nowhere in the on-screen list, the user almost certainly just
@@ -759,7 +865,7 @@ final class VimSession {
     /// windows, and hidden windows — so "no on-screen window for
     /// this PID" covers all three cases. We can't distinguish
     /// "cross-Space animation" from "genuinely no visible window"
-    /// up front; `handleAppActivated` resolves the ambiguity by
+    /// up front; `reapplyOnCurrentFrontmost` resolves the ambiguity by
     /// using a longer delay AND letting `activeSpaceDidChange`
     /// short-circuit if it fires.
     private static func frontmostAppHasOnScreenWindow() -> Bool {
@@ -830,7 +936,7 @@ final class VimSession {
 
     func exit() {
         mover.stop()
-        stopAppSwitchFollow()
+        stopFollowingFrontmost()
         pendingStickyRehint?.cancel()
         pendingStickyRehint = nil
         pendingAppSwitchReenter?.cancel()
