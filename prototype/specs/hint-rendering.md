@@ -143,7 +143,7 @@ private static func synthesizeClick(at point: CGPoint,
 ```swift
 for screen in NSScreen.screens {
     let w = NSWindow(contentRect: screen.frame, styleMask: .borderless, ...)
-    w.level = .statusBar               // 25
+    w.level = NSWindow.Level(rawValue: 102)   // CGOverlayWindowLevel, 高于 .popUpMenu = 101
     w.isOpaque = false
     w.backgroundColor = .clear
     w.hasShadow = false
@@ -160,11 +160,14 @@ for screen in NSScreen.screens {
 | level | 数值 | 谁在这里 |
 | --- | --- | --- |
 | `.normal` | 0 | 普通 app 窗口 |
+| `.modalPanel` | 8 | modal 弹窗 |
 | `.mainMenu` | 24 | 顶部菜单栏 |
-| `.statusBar` | **25** | **我们的 overlay** + HUD |
+| `.statusBar` | 25 | 早期 overlay 用过这里 |
 | `.popUpMenu` | 101 | 下拉菜单 / popover |
+| `CGOverlayWindowLevel` | **102** | **我们的 overlay** + HUD |
+| Assistive tech | 1500 | VoiceOver 等无障碍叠加 |
 
-选 `.statusBar` 的语义：高于菜单栏 + 普通窗口（hints 能盖住下方）；**低于** popup menu（下拉菜单打开时盖住 hints —— 这是 desired，跟"下拉菜单覆盖下方 app 内容"一致的 z-order 期望）。
+选 **102** 的语义：高于一切普通 UI 层（菜单栏、modal、`.popUpMenu` 下拉菜单），但低于 assistive tech，让 hint label 在打开的下拉菜单上也能可见——之前用 `.statusBar` (25) 时 AXMenuItem 的 inside-top-left label 会被菜单容器的背景填充盖掉（菜单容器在 101，label 画在 25 → 被覆盖）。代价是 hint label 也会画在 modal alert 之上，TAP mode 下这是想要的（hint-click alert 的按钮）。详见 §7.2。
 
 `ignoresMouseEvents = true`：overlay 不消费鼠标，鼠标点击穿透到底层 app。
 
@@ -218,36 +221,17 @@ let dockOrientation = UserDefaults(suiteName: "com.apple.dock")?
 
 Badge 居中对齐文字（其他几种是左对齐）。
 
-### 7.2 `AXMenuItem`（下拉菜单项）
+### 7.2 `AXMenuItem`（下拉菜单项）—— inside top-left
 
-菜单项是窄长条**纵向堆叠**的，下方紧贴下一项。所以 badge 不能放下方，否则盖到相邻菜单项。
+跟下面 §7.3 的大 rect 走**同一套 inside-top-left 放置**（rect 内部左上角、4pt 水平 inset、垂直贴顶、无尾巴）。早期版本另外做了一套"默认左、回退右、级联菜单特殊处理"的逻辑，统一到 inside 后那一堆"级联探测左右同伴列"代码全删掉。
 
-默认放**左侧**（尾巴向右指向菜单项），左侧超出屏幕回退到**右侧**。
-
-**级联菜单特殊处理**：parent menu 打开 + submenu 打开时，submenu 项的左边是 parent menu 的窗口（`.popUpMenu` = 101，高于我们的 `.statusBar` = 25），会**遮住**画在那里的 badge。
-
-检测策略：扫所有 `AXMenuItem` 同伴，看是否存在**严格在左侧的列**（其他 menu item 的 `maxX <= 当前 origin.x`）或**严格在右侧的列**：
-
-```swift
-var hasLeftSiblingMenu = false
-var hasRightSiblingMenu = false
-for other in targets where other.role == "AXMenuItem" {
-    if other.rect == r { continue }
-    if other.rect.maxX <= r.origin.x { hasLeftSiblingMenu = true }
-    if other.rect.minX >= r.origin.x + r.size.width { hasRightSiblingMenu = true }
-}
-```
-
-放置决策：
-- `hasLeftSiblingMenu && !hasRightSiblingMenu` → parent 在左 → badge 放**右**
-- `hasRightSiblingMenu && !hasLeftSiblingMenu` → parent 在右（右锚点 status menu 级联向左） → badge 放**左**
-- 独立菜单（或夹在中间，极少见）：默认左，回退右
+**前提是 overlay 必须位于 `.popUpMenu` 之上**（level 102，见 §6）。原因：菜单项的视觉背景是**菜单容器**那个 `.popUpMenu` (level 101) 窗口画的，里面包括菜单项之间的描边、selected highlight 高亮。我们的 label 画在菜单项 rect 内部，如果 overlay 在 `.statusBar` (25) 层、低于菜单容器，菜单容器的背景填充就盖在 label 上面只剩空白；overlay 升到 102 后，label 那一小方块的黄底浮在菜单容器之上，其余区域（菜单文字 / icon / selected 高亮）由菜单容器自己画、透过 overlay 透明区显出来，互不打架。
 
 **`contains` vs `intersects`**：用 `viewBounds.contains(rect)` 严格判断"badge 完整在屏幕内"，不用 `intersects`。部分超出会被裁剪不可读。
 
 ### 7.3 Inside 放置（足够大的 rect —— AX 和 OP 都适用）
 
-非 Dock、非 AXMenuItem 的 target，只要 rect ≥ **30pt 宽 × 16pt 高**，badge 画在 rect **内部左上角**（水平 4pt inset，垂直贴顶，无尾巴）。
+非 Dock 的 target，只要 rect ≥ **30pt 宽 × 16pt 高**，badge 画在 rect **内部左上角**（水平 4pt inset，垂直贴顶，无尾巴）。AXMenuItem 也走这里（见 §7.2 的特殊说明）。
 
 为什么：speech bubble（§7.4）+ 尾巴在密集列表（Finder 文件行、OP 聊天气泡）上会浮在相邻 rect 的间隙里，归属不清——badge 到底属于上面那行还是下面那行看不出来。放进 rect 内部，归属一目了然，那个又小又难看的尾巴也省了。
 

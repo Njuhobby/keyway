@@ -197,7 +197,7 @@ NSApplication
 | 焦点窗口 hint 路由 | AX whitelist → AX walk；其余 → OmniParser | 框架 ≠ AX 质量（WeChat 是 native 但 AX 黑洞）；OP 对所有 app 都 work 且 ~95ms 不比 AX walk 慢 |
 | 滚动区检测 | 只用 AX（`AXScrollArea`/`AXWebArea`），不用 OP | 滚动区是容器无视觉特征，OP 识别不了；结构 AX 即使内容 AX 烂也可靠 |
 | Overlay 数量 | 每屏一个窗口 | 单窗口跨屏 macOS 渲染不可靠 |
-| Overlay 层级 | `.statusBar` (25) | 高于菜单栏，低于下拉菜单（保持自然 z-order） |
+| Overlay 层级 | `CGOverlayWindowLevel` (102) | 高于一切常规 UI 层（菜单栏 / modal / `.popUpMenu` = 101），让 AXMenuItem 的 inside-top-left label 不被下拉菜单的背景填充盖掉。早期版本用 `.statusBar` (25) 撞到这个坑 |
 | 异步操作的"等" | AX / NSWorkspace observer + async/await + timeout 兜底 | 不用固定 sleep 猜时间。OS 通知比经验值早就发了就早走；慢路径一直等到 AX 同步完。silent failure 时超时兜底防 Task 卡死 |
 | Cmd/Ctrl 透传 | 不消费 | 保 Spotlight、Mission Control、screenshot 等系统功能 |
 | Shift/Option | 消费 | 给 hint click action 用（Shift=双击 / Option=右键） |

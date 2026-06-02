@@ -287,7 +287,7 @@ MouseSynth.click(at: MouseSynth.cursorPosition(), button: .left, count: 1)
 
 ## 6.5 `/`-搜索子状态（TAP 的子状态）
 
-按 bare `/` 进入：OCR 焦点窗口、字符级 substring 匹配、复用 hint label 池标记每个匹配——用户敲 query → Enter → 看到一群带 label 的高亮框 → 敲 label commit → cursor warp 到匹配文本左边沿（rect.minX, midY）→ 回 TAP normal。
+按 bare `/` 进入：OCR 焦点窗口、字符级 substring 匹配、复用 hint label 池标记每个匹配——用户敲 query → Enter → 看到一群带 label 的高亮框 → 敲 label commit → cursor warp 到匹配文本左边沿（rect.minX, minY + 0.6×height）→ 回 TAP normal。
 
 **为什么独立做、不复用 hint pipeline**：hint mode 走 AX walk + OmniParser 找 **可点元素**；search 走 OCR + 文本匹配找 **某个字符串在哪**——两个完全不同的检索意图。例如 WeChat 长聊天里要复制中间某条消息，hint 给的是消息行（每行只一个 commit 点、点完是选中行而不是 caret 落到字里），完全不能定位"那段文字的开头"；OCR 直接找字、按 character-level boundingBox 给出像素位置。
 
@@ -295,7 +295,7 @@ MouseSynth.click(at: MouseSynth.cursorPosition(), button: .left, count: 1)
 
 **为什么字符级 boundingBox**：`VNRecognizedText.boundingBox(for: range)` 给的是 substring 在图像里的精确像素 rect，而不是整行 OCR observation 的粗框。用户搜 "complete" 想落点到 c 前面，不是整段文字开头。
 
-**输入侧目前只支持 ASCII**：OCR 双语（zh + en）但 search buffer 只接 a-z / 0-9 / space。原因是 CGEventTap 在 IME 之前拦截 keyDown、IME 收不到原料就 compose 不出字。中文支持已记入 `SPECS.md` §7 TODO list。
+**输入侧目前只支持 ASCII**：OCR 双语（zh + en）但 search buffer 只接 a-z / 0-9 / space（含 **Shift+letter 大写**——`typingMods` 允许 Shift 通过，按下时把字符 `.uppercased()`）。原因是 CGEventTap 在 IME 之前拦截 keyDown、IME 收不到原料就 compose 不出字。中文支持已记入 `SPECS.md` §7 TODO list。
 
 **子状态机**：
 
@@ -317,7 +317,9 @@ MouseSynth.click(at: MouseSynth.cursorPosition(), button: .left, count: 1)
 | `Esc` | cancel 回 TAP normal（恢复 hint overlay）| cancel 回 TAP normal（OCR task 进 cancellation guard）| cancel 回 TAP normal |
 | Caps Lock 单击 / chord | 同 dragging：先 cleanup（关 search overlay 恢复 hints）再切 mode | 同 | 同 |
 
-**Commit 落点**：`(rect.minX, rect.midY)` —— 匹配文本的**左边沿**、垂直中线。用户预期是 "光标到这段字的开头"，然后 caret 跟着；不加 inset（早期讨论过给个 -2pt 偏移让光标在第一个字符**外**，但所有 macOS 文本控件 hit-test 都对 minX 包容，落到 minX 就在文本里）。Commit 后立刻可以按 `v` 起 drag（§6 入口），这是 search → drag 选文字复制的核心 workflow。
+**Commit 落点**：`(rect.minX, rect.minY + 0.6×height)` —— 匹配文本的**左边沿**、垂直从顶下来 60% 处。X 不加 inset（早期讨论过给个 -2pt 偏移让光标在第一个字符**外**，但所有 macOS 文本控件 hit-test 都对 minX 包容，落到 minX 就在文本里）。Y 用 60% 而非 50%：字符 boundingBox 通常贴文字本身，垂直正中（midY）会落在字符笔画里、文本视图 hit-test 有时把它判为"字符内部"而非"caret 间隙"；60%（midY 略偏下）落到字符基线附近，更稳定。Commit 后立刻可以按 `v` 起 drag（§6 入口），这是 search → drag 选文字复制的核心 workflow。
+
+**用 `.mouseMoved` 合成而非 `CGWarpMouseCursorPosition`**：CGWarp 把像素挪过去但**跳过事件管线**，目标 view 不知道鼠标进来过，cursor shape 还是 warp 前的样子（典型现象：落到文本框后光标仍是箭头不是 I-beam，要鼠动一下才翻）。改成合成一发 `.mouseMoved` 给同一个落点，view 收到正常事件 → 触发 cursorRect / hover state 更新 → I-beam 翻过来、按钮高亮、链接下划线、tooltip 等全部到位。代价是一次合成 `CGEvent` 比直接 warp 多 ~1ms，可忽略。
 
 **为什么 OCR 直接对**整个焦点窗口**而不是按 OP 那种 crop**：用户搜的字可能在窗口任何位置；crop 不知道往哪 crop。整窗 OCR 一次 ~80-200ms（取决于字数），用户已经按了 Enter、可以接受这点延迟（不像 hint mode 是进入瞬间）。
 
