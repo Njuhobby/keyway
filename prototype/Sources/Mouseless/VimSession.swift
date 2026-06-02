@@ -187,7 +187,7 @@ final class VimSession {
         switch mode {
         case .none:
             enter()
-        case .tap:
+        case .tap(let h):
             // In TAP, a Caps Lock tap toggles sticky — but only when
             // we're in the normal sub-state. While a drag is held or
             // a search is running, the chord still works as a "switch
@@ -196,15 +196,23 @@ final class VimSession {
             if case .normal = tapSub {
                 sticky.toggle()
                 // Re-hint on the toggle so hints reflect any UI
-                // changes since the last scan — the user explicitly
-                // requested a state transition, treating it as a
-                // signal to refresh feels more aligned with their
-                // intent than silently flipping a flag while showing
-                // potentially-stale hint positions. Symmetric for
-                // both directions (off→on and on→off). rehintSticky
-                // does NOT itself modify `self.sticky`; the toggle
-                // above is the source of truth.
-                rehintSticky()
+                // changes since the last scan. Symmetric for both
+                // directions (off→on and on→off). rehintSticky does
+                // NOT itself modify `self.sticky`; the toggle above
+                // is the source of truth.
+                //
+                // BUT skip the re-hint if the current HintMode hasn't
+                // finished its initial `activate` yet (`h.isActive`
+                // is false). This is the rapid Caps-Lock-double-tap
+                // case "OFF → TAP → TAP sticky" — the first scan is
+                // still in flight, scheduling a second one races and
+                // produces a visible hint flash. Letting the in-flight
+                // scan complete normally shows hints exactly once
+                // with `sticky=true` already set (renderModeHUD picks
+                // up the new sticky value when called).
+                if h.isActive {
+                    rehintSticky()
+                }
                 renderModeHUD()
             } else {
                 teardownCurrentMode()
