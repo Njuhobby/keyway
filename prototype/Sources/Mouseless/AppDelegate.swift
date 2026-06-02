@@ -31,6 +31,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if OmniParserPath.debugOverlayEnabled {
                 print("[mouseless] DEBUG overlay enabled (MOUSELESS_DEBUG_OVERLAY=1) — /tmp/mouseless-focused.png written on every OP scan, +30-80ms background")
             }
+
+            // Browser-extension bridge (P1: ping/pong only — see
+            // specs/browser-support-design.md). Handler echoes
+            // received message back; once the bridge CLI and
+            // extension land, this becomes the real "list_hints"
+            // routing surface.
+            BridgeServer.shared.start { msg, reply in
+                reply([
+                    "type": "pong",
+                    "echo": msg,
+                    "from": "mouseless-main"
+                ])
+            }
         } else {
             statusItem.button?.title = "M⚠"
             print("[mouseless] Accessibility not granted.")
@@ -45,6 +58,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // and crashes leave the remap in place until next reboot or next
         // Mouseless launch (which reapplies — idempotent).
         TriggerRemap.revertAtQuit()
+        BridgeServer.shared.stop()
     }
 
     private func setupMenuBar() {
