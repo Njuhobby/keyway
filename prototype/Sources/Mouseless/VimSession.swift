@@ -386,25 +386,11 @@ final class VimSession {
             guard case .tap(let cur) = self.mode, cur === h else { return }
             if await h.activate() {
                 self.renderModeHUD()
-                // Park the cursor on the focused window's title bar
-                // even on the initial Caps Lock entry (mirror of the
-                // app-switch path in rehintSticky). User pressing
-                // Caps Lock = signaling intent to interact with the
-                // focused app, so pre-positioning the cursor saves a
-                // traversal. Same landing point: (midX, top + 6pt)
-                // — title bar territory where double-click maximizes
-                // and drag moves the window. If no frontmost window
-                // (Finder Desktop / all-minimized / etc.), surface
-                // it via the same HUD as the app-switch path —
-                // hints still appear on Dock / menu bar / menu
-                // extras (whatever activate found), but the user
-                // gets feedback that the focused app has no window.
-                if let frontWindow = AXWindowOps.frontmostWindow(),
-                   let frontRect = AXWindowOps.readRect(frontWindow) {
-                    let landing = CGPoint(x: frontRect.midX,
-                                          y: frontRect.minY + 6)
-                    MouseSynth.warp(to: landing)
-                } else {
+                // Park cursor on focused window's title bar if not
+                // already inside that window — see
+                // `parkCursorOnFrontmostWindowIfOutside` for the
+                // skip-when-inside rationale.
+                if !self.parkCursorOnFrontmostWindowIfOutside() {
                     HUD.shared.show("TAP: no frontmost window")
                 }
             } else {
@@ -515,29 +501,10 @@ final class VimSession {
                 // existing hints on Dock / menu bar / menu extras
                 // remain visible.
                 if fromAppSwitch {
-                    if let frontWindow = AXWindowOps.frontmostWindow(),
-                       let frontRect = AXWindowOps.readRect(frontWindow) {
-                        // Park the cursor at the new window's top-
-                        // border midpoint. The user's next action is
-                        // almost always *on* this app, so meeting
-                        // them with the cursor already there saves a
-                        // big cursor traversal. Choice of point:
-                        // - midX: center horizontally (no L/R bias).
-                        // - minY + 6pt: just below the top edge,
-                        //   inside the title bar territory — already
-                        //   a useful spot since double-clicking the
-                        //   title bar maximizes / restores the
-                        //   window, and dragging from here moves
-                        //   the window.
-                        // MouseSynth.warp posts a synthetic mouseMoved
-                        // so the destination view picks up the move
-                        // (cursor shape, hover state) — same reason
-                        // we use it from /-search commit (see comment
-                        // on MouseSynth.warp).
-                        let landing = CGPoint(x: frontRect.midX,
-                                              y: frontRect.minY + 6)
-                        MouseSynth.warp(to: landing)
-                    } else {
+                    // Same cursor-parking logic as the initial-entry
+                    // path — see `parkCursorOnFrontmostWindowIfOutside`
+                    // for the skip-when-inside rationale.
+                    if !self.parkCursorOnFrontmostWindowIfOutside() {
                         // No frontmost window — same condition the
                         // WINDOW / MOVE modes flag. Match wording so
                         // all four modes use the same term. Covers
@@ -811,6 +778,39 @@ final class VimSession {
             else { return false }
             return ownerPID == pid
         }
+    }
+
+    /// When entering TAP (either via initial Caps Lock or via app-switch
+    /// re-apply), park the cursor on the focused window's title-bar
+    /// midpoint — BUT only if the cursor isn't already inside that
+    /// window. Skip-when-inside protects the case where the user was
+    /// just looking at something specific in the focused app; an
+    /// unconditional warp would feel intrusive ("Mouseless moved my
+    /// cursor away from where I was looking"). When the cursor is
+    /// outside the window (or on a different app), the warp is a
+    /// useful nudge — places the cursor at a known good spot
+    /// (title-bar: double-click to maximize, drag to move, +/- buttons
+    /// nearby).
+    ///
+    /// Returns `true` if the focused app has a frontmost window
+    /// (regardless of whether the cursor was actually moved), `false`
+    /// otherwise — caller can then show "TAP: no frontmost window"
+    /// HUD on `false`.
+    @discardableResult
+    private func parkCursorOnFrontmostWindowIfOutside() -> Bool {
+        guard let window = AXWindowOps.frontmostWindow(),
+              let rect = AXWindowOps.readRect(window)
+        else { return false }
+        let cursor = MouseSynth.cursorPosition()
+        if rect.contains(cursor) {
+            // Cursor already in the focused window — leave it where
+            // the user had it.
+            return true
+        }
+        // Outside the window — warp to title-bar midpoint.
+        let landing = CGPoint(x: rect.midX, y: rect.minY + 6)
+        MouseSynth.warp(to: landing)
+        return true
     }
 
     /// P3 debug: print whether the currently focused app would route
