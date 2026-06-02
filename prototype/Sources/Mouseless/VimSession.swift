@@ -194,23 +194,28 @@ final class VimSession {
             // mode" trigger (uniform with other modes); teardown
             // releases the held mouseDown / clears search.
             if case .normal = tapSub {
+                let wasSticky = sticky
                 sticky.toggle()
-                // Re-hint on the toggle so hints reflect any UI
-                // changes since the last scan. Symmetric for both
-                // directions (off→on and on→off). rehintSticky does
-                // NOT itself modify `self.sticky`; the toggle above
-                // is the source of truth.
-                //
-                // BUT skip the re-hint if the current HintMode hasn't
-                // finished its initial `activate` yet (`h.isActive`
-                // is false). This is the rapid Caps-Lock-double-tap
-                // case "OFF → TAP → TAP sticky" — the first scan is
-                // still in flight, scheduling a second one races and
-                // produces a visible hint flash. Letting the in-flight
-                // scan complete normally shows hints exactly once
-                // with `sticky=true` already set (renderModeHUD picks
-                // up the new sticky value when called).
-                if h.isActive {
+                // Re-hint **only on the sticky→non-sticky direction**
+                // — that's where the user originally asked for
+                // refresh ("about to make my final click, give me
+                // up-to-date hints before I commit"). The other
+                // direction (non-sticky→sticky) was added for
+                // symmetry, but it conflicts with the common rapid
+                // Caps-Lock-double-tap gesture "OFF → TAP → TAP
+                // sticky": typical double-tap interval (~200ms) is
+                // longer than the initial scan duration (~80ms), so
+                // by the time of the second Caps Lock the initial
+                // hints are already showing and a second scan
+                // produces a visible flash. Asymmetric semantics is
+                // also cleaner: toggling INTO sticky is "I want
+                // continuous mode going forward" — next commit
+                // refreshes hints — no immediate refresh needed.
+                // The `h.isActive` guard remains for the case where
+                // the user toggles sticky off WHILE the initial scan
+                // is still in flight (very fast double-tap from a
+                // pre-existing TAP sticky — uncommon but possible).
+                if wasSticky, h.isActive {
                     rehintSticky()
                 }
                 renderModeHUD()
