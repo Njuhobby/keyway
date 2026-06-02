@@ -1,20 +1,5 @@
 import Cocoa
 import Vision   // VNRecognizedTextObservation, for the TAP /-search sub-state
-import ApplicationServices   // AXObserver for kAXFocusedWindowChangedNotification
-
-/// AXObserver callback for `kAXFocusedWindowChangedNotification`. File-scope
-/// because `@convention(c)` function pointers can't capture Swift context —
-/// the `VimSession` reference rides in via the `userInfo` refcon.
-///
-/// Runs on the main runloop (we add the source to `CFRunLoopGetMain()`), so
-/// `MainActor.assumeIsolated` is safe here.
-private let axFocusedWindowChangedCallback: AXObserverCallback = { _, _, _, userInfo in
-    guard let userInfo else { return }
-    let session = Unmanaged<VimSession>.fromOpaque(userInfo).takeUnretainedValue()
-    MainActor.assumeIsolated {
-        session.handleFocusedWindowChanged()
-    }
-}
 
 /// Owns the active interaction mode + an optional command-palette overlay.
 ///
@@ -583,34 +568,23 @@ final class VimSession {
     private var appSwitchToken: NSObjectProtocol?
     private var spaceChangeToken: NSObjectProtocol?
 
-    /// AX observer on the frontmost app's process listening for
-    /// `kAXFocusedWindowChangedNotification` — fires when the user closes
-    /// the focused window (Cmd+W), minimizes it, or switches between
-    /// windows of the same app (Cmd+`). Without this, the visible
-    /// overlays (hint labels, WindowOp blue chip, scroll picker) keep
-    /// pointing at coordinates of a window that no longer exists.
+    /// Polls `AXFocusedWindow` while the session is active. `NSWorkspace.didActivateApplication`
+    /// (above) doesn't fire on intra-app window changes (Cmd+W close,
+    /// Cmd+M minimize, Cmd+` window cycle, Cmd+N new window) —
+    /// different notification scope.
     ///
-    /// `NSWorkspace.didActivateApplication` (the app-switch observer
-    /// above) doesn't fire on intra-app window changes — different
-    /// notification scope entirely. Hence this second observer at the
-    /// AX layer.
+    /// `kAXFocusedWindowChangedNotification` was the textbook fit but
+    /// emission is the app's responsibility, and non-native frameworks
+    /// (WeChat, Electron, Qt apps) commonly skip it — leaving our
+    /// overlays stuck pointing at a destroyed window. Polling is
+    /// universal: same AX read we'd do anyway, ~7 IPC/sec at 150ms,
+    /// trivial vs the 60fps tick paths in WindowController/ScrollController.
+    /// Worst-case latency = poll interval; 150ms is below the threshold
+    /// the eye notices a hint label sticking around after Cmd+W.
     ///
-    /// One observer per session, re-registered when the frontmost PID
-    /// changes (see `ensureFocusedWindowObserver`). The Swift refcon
-    /// pattern (passUnretained → fromOpaque) lets the C trampoline
-    /// reach `self` without a closure.
-    private var windowChangeObserver: AXObserver?
-    private var observedAppPID: pid_t?
-
-    /// Polling fallback for AX-notification-deficient apps. The AX
-    /// observer above is per-app and relies on the app emitting
-    /// `kAXFocusedWindowChangedNotification` — but emission is the
-    /// app's responsibility, and non-native frameworks (WeChat,
-    /// Electron variants, Qt apps) commonly skip it. We poll
-    /// `AXFocusedWindow` every 300ms; on element change (or transition
-    /// to nil), trigger the same re-apply path. Cost is one AX IPC
-    /// per 300ms while active — trivial. AX equality via `CFEqual`:
-    /// refs to the same logical window compare equal.
+    /// `CFEqual` compares AX elements by their internal (pid, cookie)
+    /// pair — two reads returning refs to the same logical window
+    /// compare equal even though they're different Swift wrappers.
     private var focusedWindowPollTimer: Timer?
     private var lastSeenFocusedWindow: AXUIElement?
 
@@ -647,14 +621,13 @@ final class VimSession {
                 }
             }
         }
-        ensureFocusedWindowObserver()
         startFocusedWindowPoll()
     }
 
     private func startFocusedWindowPoll() {
         focusedWindowPollTimer?.invalidate()
         lastSeenFocusedWindow = Self.currentFocusedWindow()
-        let t = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] _ in
+        let t = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.pollFocusedWindow()
             }
@@ -697,69 +670,6 @@ final class VimSession {
         return (win as! AXUIElement)
     }
 
-    /// Register an AX observer on the current frontmost app's process
-    /// for focused-window changes, if not already observing it.
-    /// Idempotent — safe to call from multiple hot paths (initial setup,
-    /// post-app-switch in `reapplyOnCurrentFrontmost`). If the frontmost PID
-    /// has changed since the last registration, tears down the old
-    /// observer first.
-    private func ensureFocusedWindowObserver() {
-        guard let app = NSWorkspace.shared.frontmostApplication else { return }
-        let pid = app.processIdentifier
-        if observedAppPID == pid, windowChangeObserver != nil {
-            return
-        }
-        stopFocusedWindowObserver()
-
-        var obs: AXObserver?
-        let createResult = AXObserverCreate(pid, axFocusedWindowChangedCallback, &obs)
-        guard createResult == .success, let observer = obs else {
-            print("[mouseless] AXObserverCreate failed pid=\(pid) err=\(createResult.rawValue)")
-            return
-        }
-        let appElement = AXUIElementCreateApplication(pid)
-        let refcon = Unmanaged.passUnretained(self).toOpaque()
-        let addResult = AXObserverAddNotification(
-            observer, appElement,
-            kAXFocusedWindowChangedNotification as CFString,
-            refcon
-        )
-        // `.notificationAlreadyRegistered` is benign — means a previous
-        // observer for this PID hasn't been torn down yet on the AX
-        // side. Treat as success.
-        guard addResult == .success || addResult == .notificationAlreadyRegistered else {
-            print("[mouseless] AXObserverAddNotification failed pid=\(pid) err=\(addResult.rawValue)")
-            return
-        }
-        CFRunLoopAddSource(CFRunLoopGetMain(),
-                           AXObserverGetRunLoopSource(observer),
-                           .defaultMode)
-        windowChangeObserver = observer
-        observedAppPID = pid
-    }
-
-    private func stopFocusedWindowObserver() {
-        if let obs = windowChangeObserver {
-            CFRunLoopRemoveSource(CFRunLoopGetMain(),
-                                  AXObserverGetRunLoopSource(obs),
-                                  .defaultMode)
-        }
-        windowChangeObserver = nil
-        observedAppPID = nil
-    }
-
-    /// Called from the AX observer when the focused window of the
-    /// observed app changes — close, minimize, Cmd+` cycle, etc.
-    /// Reuses the `reapplyOnCurrentFrontmost` re-apply pipeline: if a new
-    /// window took focus the mode is re-applied onto it; if no window
-    /// remains, each mode's entry handler shows the "no frontmost
-    /// window" HUD and tears down stale overlays.
-    fileprivate func handleFocusedWindowChanged() {
-        guard isActive else { return }
-        print("[mouseless] focused window changed → re-apply current mode")
-        reapplyOnCurrentFrontmost()
-    }
-
     /// `NSWorkspace.didActivateApplication` fired and we're in some
     /// active mode. Strategy: **re-apply the current mode on the new
     /// frontmost app**. The user implicitly told us they want to
@@ -797,17 +707,9 @@ final class VimSession {
         guard isActive else { return }
         let kind = currentModeKind
 
-        // Frontmost PID may have changed (Cmd+Tab to a different app);
-        // re-target the AX observer at the new app so subsequent
-        // intra-app window changes (close, minimize, Cmd+`) keep firing
-        // through to us. Idempotent if PID is unchanged (intra-app
-        // window switch).
-        ensureFocusedWindowObserver()
-        // Re-baseline the poll cache: whichever signal (AX observer or
-        // poll) called us, the OTHER would otherwise see the post-
-        // change focused window vs its stale cache and fire reapply
-        // again ~300ms later. Updating the cache now collapses that
-        // duplicate.
+        // Re-baseline the poll cache so the NSWorkspace path (which
+        // also routes here) and a coincidentally-fired poll don't
+        // both schedule a re-enter for the same change.
         lastSeenFocusedWindow = Self.currentFocusedWindow()
 
         // See doc comment above for the rationale.
@@ -903,7 +805,6 @@ final class VimSession {
             NSWorkspace.shared.notificationCenter.removeObserver(token)
             spaceChangeToken = nil
         }
-        stopFocusedWindowObserver()
         stopFocusedWindowPoll()
     }
 
