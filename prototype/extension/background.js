@@ -230,6 +230,38 @@ async function refreshExistingTabs() {
               injected, "injected,", failed, "rejected (chrome:// etc),", skipped, "skipped");
 }
 
+// Page-load completion. Fires when a tab finishes navigating —
+// crucial because content scripts inject at `document_idle` (after
+// the new page's DOMContentLoaded + some delay). If Mouseless asks
+// for hints during that gap (e.g., sticky TAP's 100ms post-commit
+// rehint after the user clicked a link), tabs.sendMessage fails with
+// "Receiving end does not exist". P4's MutationObserver doesn't save
+// us either — the new page's initial DOM is fully rendered before
+// our observer is attached, so no mutation fires.
+//
+// Signal "page_changed" once the navigation completes — Mouseless's
+// gates handle the rest (only acts if in TAP on focused browser).
+chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+  if (changeInfo.status !== "complete") return;
+  if (!tab.active) return;
+  try {
+    const win = await chrome.windows.get(tab.windowId);
+    if (!win.focused) return;
+  } catch (e) {
+    return;
+  }
+  if (!port) return;
+  try {
+    port.postMessage({
+      type: "page_changed",
+      url: tab.url,
+      reason: "navigation_complete",
+      tabId,
+    });
+    console.log("[mouseless-bg] page_changed (navigation complete) → tabId=" + tabId);
+  } catch (e) { /* port dead */ }
+});
+
 // Within-window tab switch (Cmd+1/2/3, clicking tab strip, Cmd+[ back
 // navigation). Doesn't fire chrome.windows.onFocusChanged (window is
 // the same), doesn't change AXFocusedWindow (window is the same), so
