@@ -1,58 +1,57 @@
-// Mouseless extension — P0 (environment proof of concept).
+// Mouseless content script.
 //
-// At document_idle, walk the page for clickable elements with a
-// hard-coded selector + visibility filter, and console.log a hint
-// list. This is the *only* thing P0 verifies — that we can load an
-// unpacked Manifest V3 extension, inject into a real page, and
-// read DOM rects.
+// Two roles:
+//   1. On document_idle, call the detector and `console.log` the hint
+//      count + sample. Lets you eyeball detection quality just by
+//      reloading any page (page DevTools, no extension involved).
+//   2. Listen for `chrome.runtime` messages from the background SW.
+//      On `{type: "list_hints"}` run the detector and respond with the
+//      hint array. Background then forwards over native messaging to
+//      the Mouseless main process.
 //
-// Anything Vimium-level (cross-frame, Shadow DOM, occlusion,
-// iframe coord translation, message passing to a background SW)
-// arrives in P1+. Keep this file boring.
+// All real classification + visibility + occlusion logic lives in
+// `detector.js`, which the manifest loads earlier in the same content
+// script array. (Same execution context, so `window.MouselessDetector`
+// is set by then.)
 
 (function () {
   "use strict";
 
-  const SELECTOR = [
-    "a[href]",
-    "button",
-    "input:not([type=hidden])",
-    "select",
-    "textarea",
-    "[role=button]",
-    "[role=link]",
-    "[onclick]",
-    "[tabindex]:not([tabindex='-1'])"
-  ].join(",");
-
-  function isVisible(el) {
-    const r = el.getBoundingClientRect();
-    if (r.width < 2 || r.height < 2) return false;
-    if (r.bottom < 0 || r.top > window.innerHeight) return false;
-    if (r.right < 0 || r.left > window.innerWidth) return false;
-    const cs = window.getComputedStyle(el);
-    if (cs.visibility === "hidden" || cs.display === "none") return false;
-    if (parseFloat(cs.opacity || "1") < 0.05) return false;
-    return true;
-  }
-
-  function listHints() {
-    const els = document.querySelectorAll(SELECTOR);
-    const out = [];
-    for (const el of els) {
-      if (!isVisible(el)) continue;
-      const r = el.getBoundingClientRect();
-      const text = (el.innerText || el.value || el.getAttribute("aria-label") || el.getAttribute("title") || "").trim().slice(0, 40);
-      out.push({
-        tag: el.tagName.toLowerCase(),
-        rect: { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) },
-        text
-      });
+  function runDetector() {
+    if (!window.MouselessDetector) {
+      console.warn("[mouseless cs] detector not loaded — check manifest order");
+      return null;
     }
-    return out;
+    const t0 = performance.now();
+    const hints = window.MouselessDetector.listHints();
+    const ms = (performance.now() - t0).toFixed(1);
+    return { hints, ms };
   }
 
-  const hints = listHints();
-  // eslint-disable-next-line no-console
-  console.log("[mouseless P0]", hints.length, "hints on", location.host, hints);
+  // (1) Auto-log on page idle.
+  const result = runDetector();
+  if (result) {
+    console.log(
+      "[mouseless cs]",
+      result.hints.length,
+      "hints on", location.host,
+      "in", result.ms + "ms",
+      result.hints
+    );
+  }
+
+  // (2) Respond to background SW.
+  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    if (msg && msg.type === "list_hints") {
+      const r = runDetector();
+      sendResponse({
+        type: "hints",
+        url: location.href,
+        viewport: { w: innerWidth, h: innerHeight, dpr: devicePixelRatio },
+        ms: r ? r.ms : null,
+        hints: r ? r.hints : [],
+      });
+      // sendResponse was called synchronously, no need to return true.
+    }
+  });
 })();

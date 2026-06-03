@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Mouseless (dev)",
-  "version": "0.0.2",
-  "description": "Bridge between Chrome and the Mouseless desktop app. Dev build — P1 native messaging.",
+  "version": "0.0.3",
+  "description": "Bridge between Chrome and the Mouseless desktop app. Dev build — P2 stage A: Vimium-derived hint detector.",
   "minimum_chrome_version": "120",
   "permissions": ["nativeMessaging"],
   "background": {
@@ -14,7 +14,7 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["content_script.js"],
+      "js": ["detector.js", "content_script.js"],
       "run_at": "document_idle",
       "all_frames": false
     }
