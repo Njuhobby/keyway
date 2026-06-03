@@ -1690,11 +1690,25 @@ final class VimSession {
         // scrolls with d/u, the same letters as the Caps Lock+d entry
         // chord.) Held-key OS repeats just refresh direction/speed.
         if keyCode == KeyCode.d {
-            controller.start(directionDown: true, fast: flags.contains(.maskShift))
+            controller.start(axis: .vertical, positive: true, fast: flags.contains(.maskShift))
             return true
         }
         if keyCode == KeyCode.u {
-            controller.start(directionDown: false, fast: flags.contains(.maskShift))
+            controller.start(axis: .vertical, positive: false, fast: flags.contains(.maskShift))
+            return true
+        }
+        // b / f → horizontal scroll left / right. Same `Axis` machinery
+        // in ScrollController, just driving wheel2 instead of wheel1.
+        // Mirrors the d/u letter rhythm on left-hand home row. Use
+        // case: Finder column view, wide spreadsheets, Notion DB
+        // tables, infinite-canvas tools (Figma, Miro) — scenarios
+        // where horizontal pan was previously trackpad-only.
+        if keyCode == KeyCode.b {
+            controller.start(axis: .horizontal, positive: false, fast: flags.contains(.maskShift))
+            return true
+        }
+        if keyCode == KeyCode.f {
+            controller.start(axis: .horizontal, positive: true, fast: flags.contains(.maskShift))
             return true
         }
 
@@ -1754,8 +1768,9 @@ final class VimSession {
     /// Key release handler — routed from HotkeyTap.
     func handleKeyUp(keyCode: Int) -> Bool {
         if case .scroll(let controller) = mode {
-            if keyCode == KeyCode.d || keyCode == KeyCode.u {
-                controller.stop()           // stop continuous scroll
+            if keyCode == KeyCode.d || keyCode == KeyCode.u
+                || keyCode == KeyCode.b || keyCode == KeyCode.f {
+                controller.stop()           // stop continuous scroll (vertical or horizontal)
                 return true
             }
             if Self.moveDirection(for: keyCode) != nil {

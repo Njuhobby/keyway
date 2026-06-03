@@ -20,8 +20,16 @@ final class ScrollController {
     private let fastDelta = 90
     private let tickInterval: TimeInterval = 1.0 / 60.0
 
+    /// Which physical axis we're driving this tick. d/u keys drive
+    /// vertical (wheel1); b/f drive horizontal (wheel2).
+    enum Axis { case vertical, horizontal }
+
     private var timer: Timer?
-    private var directionDown = true   // true = scroll page down (see lower content)
+    private var axis: Axis = .vertical
+    /// Direction along the active axis:
+    ///   vertical   true = scroll page DOWN  (see lower content)
+    ///   horizontal true = scroll page RIGHT (see right content)
+    private var positiveDirection = true
     private var fast = false
 
     private var areas: [ScrollAreaDetector.Area] = []
@@ -96,9 +104,12 @@ final class ScrollController {
     }
 
     /// Begin (or update) continuous scrolling. Idempotent under OS
-    /// key-repeat — repeated keyDowns just refresh direction/speed.
-    func start(directionDown: Bool, fast: Bool) {
-        self.directionDown = directionDown
+    /// key-repeat — repeated keyDowns just refresh axis/direction/speed.
+    /// Switching axis mid-scroll (e.g., releasing `d` and pressing `f`)
+    /// is supported — same timer reused.
+    func start(axis: Axis, positive: Bool, fast: Bool) {
+        self.axis = axis
+        self.positiveDirection = positive
         self.fast = fast
         if timer == nil {
             let t = Timer.scheduledTimer(withTimeInterval: tickInterval, repeats: true) { _ in
@@ -121,23 +132,31 @@ final class ScrollController {
     /// delta; the app clamps it at the content edge. 200k px is well
     /// past any real content height. Scrolls the area under the cursor
     /// (already warped to the selected area).
-    func jumpToTop()    { postScroll(deltaY:  200_000) }   // +y = up
-    func jumpToBottom() { postScroll(deltaY: -200_000) }   // -y = down
+    func jumpToTop()    { postScroll(deltaY:  200_000, deltaX: 0) }   // +y = up
+    func jumpToBottom() { postScroll(deltaY: -200_000, deltaX: 0) }   // -y = down
 
     private func tick() {
         let magnitude = fast ? fastDelta : normalDelta
-        // wheel1 sign: negative scrolls the page DOWN (reveals lower
-        // content) in the default convention. If j/k feel inverted on
-        // some setup, flip here.
-        let deltaY = directionDown ? -magnitude : magnitude
-        postScroll(deltaY: deltaY)
+        switch axis {
+        case .vertical:
+            // wheel1 sign: negative = page DOWN (reveal lower content)
+            let deltaY = positiveDirection ? -magnitude : magnitude
+            postScroll(deltaY: deltaY, deltaX: 0)
+        case .horizontal:
+            // wheel2 sign: negative = page RIGHT (reveal right content),
+            // matching wheel1's "negative = forward direction" convention.
+            let deltaX = positiveDirection ? -magnitude : magnitude
+            postScroll(deltaY: 0, deltaX: deltaX)
+        }
     }
 
-    private func postScroll(deltaY: Int) {
+    private func postScroll(deltaY: Int, deltaX: Int) {
         guard let src = CGEventSource(stateID: .privateState),
               let ev = CGEvent(scrollWheelEvent2Source: src,
-                               units: .pixel, wheelCount: 1,
-                               wheel1: Int32(deltaY), wheel2: 0, wheel3: 0)
+                               units: .pixel, wheelCount: 2,
+                               wheel1: Int32(deltaY),
+                               wheel2: Int32(deltaX),
+                               wheel3: 0)
         else { return }
         // Mark synthetic so HotkeyTap's callback ignores it (no feedback).
         ev.setIntegerValueField(.eventSourceUserData, value: HotkeyTap.syntheticMarker)
