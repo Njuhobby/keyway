@@ -40,17 +40,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             //   - type:"hints"         → consumed by BridgeServer's
             //                            awaitResponse path before this
             //                            handler sees it (BrowserProvider)
-            //   - type:"page_changed"  → extension detected new clickable
-            //                            element(s) appeared (async load,
-            //                            SPA re-render). Refresh hint
-            //                            overlay if currently in TAP on
-            //                            a browser. See
-            //                            VimSession.handlePageChanged.
+            //   - type:"page_changed"  → extension's MutationObserver
+            //                            detected new clickable
+            //                            element(s) appeared (async
+            //                            load, SPA re-render).
+            //   - type:"tab_changed"   → user switched active tab
+            //                            within the focused Chrome
+            //                            window (Cmd+1/2/3, click on
+            //                            tab strip, browser back/
+            //                            forward). Same UX response
+            //                            as page_changed — refresh
+            //                            the hint overlay to point
+            //                            at the new tab's elements.
             BridgeServer.shared.start { [weak self] msg, reply in
                 let cmd = msg["cmd"] as? String
                 let type = msg["type"] as? String
                 if cmd == "keepalive" { return }
-                if type == "page_changed" {
+                if type == "page_changed" || type == "tab_changed" {
                     Task { @MainActor in
                         self?.session?.handlePageChanged()
                     }

@@ -545,11 +545,21 @@ final class VimSession {
     /// several such events in a row.
     private var lastPageChangedRehintAt: CFAbsoluteTime = 0
 
-    /// Extension reported that new clickable element(s) appeared in the
-    /// active tab (async lazy-load, infinite scroll, SPA re-render).
-    /// In-place refresh the hint overlay — no deactivate flash — so
-    /// the new clickables become hint-able without the user having to
-    /// exit and re-enter TAP.
+    /// Extension reported a browser-side content change that requires
+    /// rescanning the active tab. Two triggers fan into here:
+    ///
+    ///   - `page_changed` — MutationObserver detected new clickable
+    ///     element(s) in the current tab (async lazy-load, SPA re-
+    ///     render, infinite scroll).
+    ///   - `tab_changed` — user switched active tab inside the focused
+    ///     Chrome window (Cmd+1/2/3, click on tab strip, navigation
+    ///     back/forward). Mouseless can't detect this from macOS AX
+    ///     because the NSWindow doesn't change — only the extension
+    ///     sees it via `chrome.tabs.onActivated`.
+    ///
+    /// Both result in an in-place hint overlay refresh — no deactivate
+    /// flash — so the new clickables become hint-able without the user
+    /// having to exit and re-enter TAP.
     ///
     /// Gates (all required):
     ///   - session active AND in TAP mode

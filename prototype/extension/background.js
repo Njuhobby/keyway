@@ -230,6 +230,32 @@ async function refreshExistingTabs() {
               injected, "injected,", failed, "rejected (chrome:// etc),", skipped, "skipped");
 }
 
+// Within-window tab switch (Cmd+1/2/3, clicking tab strip, Cmd+[ back
+// navigation). Doesn't fire chrome.windows.onFocusChanged (window is
+// the same), doesn't change AXFocusedWindow (window is the same), so
+// Mouseless's focused-window poll never notices. We have to tell it
+// explicitly: same handler as page_changed on the Mouseless side
+// (gates + cooldown + refreshInPlace).
+//
+// Filter by "is this profile's window the user's currently-focused
+// one" — background-window tab switches shouldn't trigger overlay
+// refresh on whatever the user IS looking at.
+chrome.tabs.onActivated.addListener(async (activeInfo) => {
+  if (!port) return;
+  try {
+    const win = await chrome.windows.get(activeInfo.windowId);
+    if (!win.focused) return;
+  } catch (e) {
+    return;
+  }
+  try {
+    port.postMessage({ type: "tab_changed", tabId: activeInfo.tabId });
+    console.log("[mouseless-bg] tab_changed → tabId=" + activeInfo.tabId);
+  } catch (e) {
+    /* port dead — will reconnect */
+  }
+});
+
 chrome.windows.onFocusChanged.addListener((winId) => {
   // WINDOW_ID_NONE fires when user switches AWAY from any of this
   // profile's windows (cross-app, or cross-profile to another Chrome
