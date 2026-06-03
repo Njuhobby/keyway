@@ -537,6 +537,57 @@ final class VimSession {
     ///    the Cmd+Tab switcher HUD doesn't bleed into the OP pass.
     ///
     /// A second call during the wait cancels the pending item
+    /// Last time `handlePageChanged` actually refreshed hints. Cooldown
+    /// gate to keep dynamic pages (Gmail / Slack / Twitter — DOM
+    /// mutates many times per second) from making the overlay churn.
+    /// MutationObserver in the extension already filters to "new
+    /// clickable element appeared," but a fast async load can produce
+    /// several such events in a row.
+    private var lastPageChangedRehintAt: CFAbsoluteTime = 0
+
+    /// Extension reported that new clickable element(s) appeared in the
+    /// active tab (async lazy-load, infinite scroll, SPA re-render).
+    /// In-place refresh the hint overlay — no deactivate flash — so
+    /// the new clickables become hint-able without the user having to
+    /// exit and re-enter TAP.
+    ///
+    /// Gates (all required):
+    ///   - session active AND in TAP mode
+    ///   - not in a TAP sub-state (drag / search) — those own the keys
+    ///   - frontmost app is a browser (so the in-flight hints came
+    ///     from the extension, not AX/OP)
+    ///   - typed prefix is empty — user not mid-label-selection; we
+    ///     refuse to reshuffle labels under their fingers
+    ///   - ≥ 500ms since last page_changed refresh — cooldown
+    func handlePageChanged() {
+        guard isActive else { return }
+        guard case .tap(let h) = mode else { return }
+        guard case .normal = tapSub else { return }
+        guard let bid = NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+              AppRegistry.isBrowserApp(bundleID: bid) else { return }
+        guard h.typedPrefix.isEmpty else {
+            // User is committing a hint — don't reshuffle out from under
+            // them. They'll see the eventually-fresh state after commit.
+            return
+        }
+        let now = CFAbsoluteTimeGetCurrent()
+        guard now - lastPageChangedRehintAt >= 0.5 else { return }
+        lastPageChangedRehintAt = now
+
+        rehintGeneration += 1
+        let gen = rehintGeneration
+        Task { @MainActor in
+            // Use refreshInPlace — re-scan + repaint same overlay window
+            // with new targets, NO hide-then-show cycle. Old labels stay
+            // visible until the new set lands, so the visual transition
+            // is just "labels shift to current positions / new ones
+            // appear" — no black-frame flash.
+            await h.refreshInPlace()
+            guard gen == self.rehintGeneration else { return }
+            print("[mouseless] page_changed → refreshed in-place")
+        }
+    }
+
     /// (latest wins); exiting / switching mode cancels it too.
     /// Tradeoff for case 1: an update that lands >100ms later
     /// re-hints stale; re-trigger to refresh.

@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Mouseless (dev)",
-  "version": "0.0.5",
-  "description": "Bridge between Chrome and the Mouseless desktop app. Dev build — P2 stage B: iframe hint coordination via postMessage.",
+  "version": "0.0.6",
+  "description": "Bridge between Chrome and the Mouseless desktop app. Dev build — P4: page-changed detection (async lazy-load aware).",
   "minimum_chrome_version": "120",
   "permissions": ["nativeMessaging"],
   "background": {

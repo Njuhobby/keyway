@@ -131,6 +131,21 @@ async function handleFromNative(msg) {
   console.log("[mouseless-bg] recv from native:", msg);
 }
 
+// Content script → bg → native: page_changed signal forwarded as-is.
+// Coalescing is the receiver's job (Mouseless cooldown), so we don't
+// debounce here — the content script only sends when it has actually
+// detected a new clickable element appearing.
+chrome.runtime.onMessage.addListener((msg, sender) => {
+  if (!msg || typeof msg !== "object") return;
+  if (msg.type !== "page_changed") return;
+  if (!port) return;
+  try {
+    port.postMessage({ type: "page_changed", url: msg.url, frameId: sender?.frameId });
+  } catch (e) {
+    console.warn("[mouseless-bg] page_changed forward failed:", e.message);
+  }
+});
+
 // Open the port the first time the SW wakes for any reason. Re-fired
 // on each cold start.
 chrome.runtime.onInstalled.addListener(connect);

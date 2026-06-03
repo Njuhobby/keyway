@@ -30,6 +30,21 @@
   const IS_TOP = (window.top === window);
   const HINT_REQ_TIMEOUT_MS = 250;
 
+  // Selector for "new clickable appeared" detection (same vocabulary
+  // as detector.js's classifier — kept inline so MutationObserver
+  // callbacks can run without going through the full classifier on
+  // every mutation). Misses some heuristic-driven cases (jsaction
+  // listener, ng-click family) but catches the bulk — the cost of a
+  // missed signal is just "Mouseless doesn't refresh this round";
+  // user can Caps Lock again. Erring on permissive side.
+  const CLICKABLE_SELECTOR = [
+    "a[href]", "button", "input", "select", "textarea",
+    "[role=button]", "[role=link]", "[role=tab]",
+    "[role=menuitem]", "[role=checkbox]", "[role=radio]",
+    "[onclick]", "[contenteditable=true]", "[contenteditable='']",
+    "[tabindex]:not([tabindex='-1'])",
+  ].join(",");
+
   // ---------- (3) Auto-log on top frame ----------
 
   if (IS_TOP) {
@@ -126,6 +141,74 @@
     );
     return myHints.concat(...childBatches);
   }
+
+  // ---------- (4) DOM-change detection ----------
+  //
+  // Watch for newly-added clickable elements (async lazy loads, SPA
+  // re-renders) and notify Mouseless main process so it can refresh
+  // the hint overlay in place. Each frame observes its own DOM.
+  // Top frame fires `chrome.runtime.sendMessage` to bg; child frames
+  // postMessage to their parent, which relays upward until it reaches
+  // the top frame.
+  //
+  // **Precise**, not throttled — only fires when at least one **new
+  // clickable** node enters the DOM (selector match on addedNodes /
+  // their subtrees). Heart-beats / animation pulses / chat indicator
+  // re-renders are ignored. Mouseless side enforces a 500ms cooldown
+  // for UX (overlay refresh rate), so a burst of additions during a
+  // page load collapses into one refresh on the receiver.
+
+  function hasNewClickable(mutations) {
+    for (const m of mutations) {
+      if (m.type !== "childList") continue;
+      for (const n of m.addedNodes) {
+        if (n.nodeType !== Node.ELEMENT_NODE) continue;
+        try {
+          if (n.matches && n.matches(CLICKABLE_SELECTOR)) return true;
+          if (n.querySelector && n.querySelector(CLICKABLE_SELECTOR)) return true;
+        } catch (e) { /* invalid selector on edge nodes — ignore */ }
+      }
+    }
+    return false;
+  }
+
+  function notifyPageChanged() {
+    if (IS_TOP) {
+      try {
+        chrome.runtime.sendMessage({ type: "page_changed", url: location.href });
+      } catch (e) { /* SW asleep or extension reloading; cooldown side covers gaps */ }
+    } else {
+      try {
+        window.parent.postMessage({ type: "mouseless_page_changed_inner" }, "*");
+      } catch (e) { /* sandboxed / cross-frame post fails — drop */ }
+    }
+  }
+
+  const pageChangeObserver = new MutationObserver((mutations) => {
+    if (!hasNewClickable(mutations)) return;
+    notifyPageChanged();
+  });
+
+  // Wait for documentElement / body to exist (run_at: document_idle
+  // guarantees it does, but be defensive).
+  const observeTarget = document.body || document.documentElement;
+  if (observeTarget) {
+    pageChangeObserver.observe(observeTarget, {
+      childList: true,
+      subtree: true,
+    });
+  }
+
+  // Relay iframe-originated page_changed signals up the parent chain.
+  // (Distinct from the hint-request listener at top of file — keep
+  // both registered; they handle different message types.)
+  window.addEventListener("message", (e) => {
+    if (!e.data || typeof e.data !== "object") return;
+    if (e.data.type !== "mouseless_page_changed_inner") return;
+    notifyPageChanged();
+  });
+
+  // ----------
 
   function askIframeForHints(iframe, parentOrigin) {
     return new Promise((resolve) => {

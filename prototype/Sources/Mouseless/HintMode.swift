@@ -129,9 +129,45 @@ final class HintMode {
 
     var isActive: Bool { isActiveFlag }
 
+    /// What the user has typed so far against the active hint set.
+    /// Read by `VimSession.handlePageChanged` to suppress disruptive
+    /// rehints in the middle of a label selection.
+    var typedPrefix: String { typed }
+
     @discardableResult
     func activate(isolateApp: Bool = false) async -> Bool {
         let collected = await Self.collectAll(isolateApp: isolateApp)
+        guard applyCollected(collected) else { return false }
+        typed = ""
+        isActiveFlag = true
+        HintOverlay.shared.show(targets: targets, typed: "")
+        return true
+    }
+
+    /// Re-scan and update the overlay **in place**, preserving the
+    /// existing HintMode (no deactivate / re-show cycle, so no visible
+    /// flash). Used by `VimSession.handlePageChanged` after the
+    /// extension reports new clickable elements appeared via lazy
+    /// loading. Caller must verify we're active and the typed prefix
+    /// is empty — refreshInPlace doesn't touch `typed` or `isActiveFlag`.
+    ///
+    /// If the new scan finds zero hints, the overlay is left as-is
+    /// (the old hints stay drawn). Caller can `deactivate()` explicitly
+    /// if it prefers that semantic. Keeping the old hints handles the
+    /// transient case where a re-render emptied the DOM momentarily.
+    @discardableResult
+    func refreshInPlace(isolateApp: Bool = false) async -> Bool {
+        let collected = await Self.collectAll(isolateApp: isolateApp)
+        guard applyCollected(collected) else { return false }
+        HintOverlay.shared.show(targets: targets, typed: typed)
+        return true
+    }
+
+    /// Label assignment + targets writeback shared by `activate` and
+    /// `refreshInPlace`. Returns false if the scan was empty (no hints
+    /// anywhere — Dock, focused window, menu extras all returned []).
+    /// Doesn't touch overlay / isActiveFlag / typed — callers decide.
+    private func applyCollected(_ collected: CollectedElements) -> Bool {
         if collected.focused.isEmpty
             && collected.focusedOmni.isEmpty
             && collected.focusedBrowser.isEmpty
@@ -193,9 +229,6 @@ final class HintMode {
         focusedTargetCount = collected.focused.count
                            + collected.focusedOmni.count
                            + collected.focusedBrowser.count
-        typed = ""
-        isActiveFlag = true
-        HintOverlay.shared.show(targets: targets, typed: "")
         print("[mouseless] hint: \(targets.count) targets (focusedAX: \(collected.focused.count), focusedOP: \(collected.focusedOmni.count), focusedBrowser: \(collected.focusedBrowser.count), dock: \(collected.dock.count), extras: \(collected.menuBarExtras.count))")
         return true
     }

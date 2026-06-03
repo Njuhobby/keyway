@@ -5,6 +5,7 @@ import ApplicationServices
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var tap: HotkeyTap?
+    private var session: VimSession?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupMenuBar()
@@ -33,15 +34,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
 
             // Browser-extension bridge. Incoming messages:
-            //   - cmd:"ping"      → reply with pong (sanity check)
-            //   - cmd:"keepalive" → no reply (silent ack, just keeps
-            //                       the SW + port alive)
-            //   - type:"hints"    → consumed by BridgeServer's
-            //                       awaitResponse path before this
-            //                       handler sees it (BrowserProvider)
-            BridgeServer.shared.start { msg, reply in
+            //   - cmd:"ping"           → reply with pong (sanity check)
+            //   - cmd:"keepalive"      → no reply (silent ack, just keeps
+            //                            the SW + port alive)
+            //   - type:"hints"         → consumed by BridgeServer's
+            //                            awaitResponse path before this
+            //                            handler sees it (BrowserProvider)
+            //   - type:"page_changed"  → extension detected new clickable
+            //                            element(s) appeared (async load,
+            //                            SPA re-render). Refresh hint
+            //                            overlay if currently in TAP on
+            //                            a browser. See
+            //                            VimSession.handlePageChanged.
+            BridgeServer.shared.start { [weak self] msg, reply in
                 let cmd = msg["cmd"] as? String
+                let type = msg["type"] as? String
                 if cmd == "keepalive" { return }
+                if type == "page_changed" {
+                    Task { @MainActor in
+                        self?.session?.handlePageChanged()
+                    }
+                    return
+                }
                 reply([
                     "type": "pong",
                     "echo": msg,
@@ -94,9 +108,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func startTap() {
-        let session = VimSession()
-        let newTap = HotkeyTap(session: session)
+        let newSession = VimSession()
+        let newTap = HotkeyTap(session: newSession)
         if newTap.start() {
+            session = newSession
             tap = newTap
             statusItem.button?.title = "M●"
             print("[mouseless] running. Press Caps Lock to enter vim mode.")
