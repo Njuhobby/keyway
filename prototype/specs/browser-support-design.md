@@ -1,6 +1,23 @@
 # Browser Support — Chrome / Safari 扩展 + Native Messaging
 
-**状态**：设计草稿，未实现。优先级：**高**——浏览器占用户日常 30%+ 时间，是 Mouseless"一套心智模型覆盖所有 app"产品论点的关键缺口。
+**状态**（2026-06）：
+
+| Phase | 状态 |
+|---|---|
+| P0 装机 PoC | ✅ |
+| P1 通讯骨架（BridgeServer / mouseless-bridge CLI / 扩展长连接） | ✅ |
+| P2-A 检测器（Vimium 规则改写） | ✅ |
+| P2-B iframe 跨 frame 协调（postMessage 链） | ✅ |
+| P3 `BrowserProvider` 接入 HintMode | ✅ |
+| P4 异步加载 `page_changed` 触发 in-place rehint | ✅ |
+| 增量补丁：多 profile / 多浏览器 `i_am_active` 路由 | ✅ |
+| 增量补丁：同窗口换 tab 的 `tab_changed` 信号 | ✅ |
+| 增量补丁：SW 启动 auto-inject 已存在的 tab | ✅ |
+| P5 Safari Web Extension + 上架 | ⏳ 未开始 |
+
+Chrome 上**功能层面已可 daily-drive**。Safari 等 P5。
+
+详细的 commit 链：`fb2ccde` (P0) → `130297e` (P1.1) → `f08a775` (P1.2) → `3c62077` (P1.3) → `a89caee` (P2-A) → `01a5fa8` (P2-B) → `59d4f54` (P3) → `fd7efa6` (P4) → `afd41bc` (multi-route) → `374ea21` (browser path 自治) → `0413c85` (auto-inject) → `76dd2a3` (tab_changed)。
 
 ---
 
@@ -129,7 +146,7 @@ Vimium 是 **MIT 协议**，可商用，要求 attribution + 保留 LICENSE。
 
 ## 5. 实施路线图（P0 → P5）
 
-### P0 — 概念验证（半天）
+### P0 — 概念验证（半天）✅
 
 最小可演示：硬编码一个 hardcoded selector（`a, button`），在 Chrome 一个固定测试页（如 https://github.com）上：
 
@@ -138,7 +155,7 @@ Vimium 是 **MIT 协议**，可商用，要求 attribution + 保留 LICENSE。
 
 **验收**：console 里打出 N 个 `{rect, text}` JSON。
 
-### P1 — Native Messaging Host + 协议 stub（1-2 天）
+### P1 — Native Messaging Host + 协议 stub（1-2 天）✅
 
 1. 写 `mouseless-bridge` Swift CLI（~200 LOC）：stdin 长度前缀 JSON 读取 + stdout 长度前缀 JSON 写出
 2. Mouseless 主进程开 Unix socket listener，bridge 跟它互发 echo
@@ -147,31 +164,76 @@ Vimium 是 **MIT 协议**，可商用，要求 attribution + 保留 LICENSE。
 
 **验收**：从扩展按一个按钮，能在 Mouseless 主进程 log 看到消息，且回包能传回扩展并在 console 显示。
 
-### P2 — 检测模块剥离 + 接入（2-3 天）
+### P2 — 检测模块（2-3 天）
 
-1. fork Vimium，抠 `link_hints.coffee` + `dom_utils.coffee` + iframe 协调相关的最小子集（编译输出 / 用现成 vimium-c 的 TS 版也可以——确认许可后选）
-2. 包装成 `detector.js`，导出 `listHints(viewportOnly: bool): Hint[]`
-3. content script 注入 `detector.js`，定期或按 background 请求调它，把结果发给 background
-4. background 收 `list_hints` 命令 → 转发给当前 active tab 的 content script → 取回 hint list → 通过 native messaging 发给 Mouseless
+#### P2-A 检测器规则改写 ✅
 
-**验收**：Mouseless 主进程能收到 GitHub 首页所有可点元素的 rect + text，数量级跟 Vimium 按 f 时画的差不多。
+**偏离原计划**：原计划是"fork Vimium 抠模块"，实际是**借鉴规则重写**——Vimium 的 `LocalHints` 严重依赖 6 个 Vimium-internal 全局（Settings / Utils / DomUtils / Rect / HUD / HintCoordinator），stub 比 rewrite 还麻烦。改成把 Vimium 的事实性 know-how（选择器列表、ARIA roles、jsaction 规则、可见性判断、5 点遮挡探测、shadow DOM 递归）搬过来在 `detector.js` 干净重写。许可方面保留 `vendor/vimium/MIT-LICENSE.txt` + `NOTICE.md` attribution。
 
-### P3 — Mouseless 端 BrowserProvider + Overlay 渲染（1-2 天）
+#### P2-B iframe 协调 ✅
 
-1. 新文件 `BrowserProvider.swift`，跟 `OPProvider` / AX walk 并列
-2. `HintMode` 在 frontmost bundleID 是 Chrome / Safari 时走 BrowserProvider 而非 OP
-3. BrowserProvider 通过 Unix socket 给 bridge 发 `list_hints`，timeout 200ms，失败 fallback 到 OP
-4. 收到 hint 列表后转成 `HintTarget`，喂进现有 `HintOverlay` 渲染
+**偏离原计划**：原计划提到"路 1（推荐）用 `chrome.scripting.executeScript({allFrames: true})`"和"路 2（Vimium 那套）postMessage 链"。**实际选了路 2 风格**——iframe 协调用 `window.postMessage` 在 frame 树上递归请求/响应。理由：
 
-**验收**：在 Chrome 上按 Caps Lock，看到 hint label 准确落在所有可点元素上（不是 OP 那种"只看到一半"的状态）。
+- 不需要新加 `scripting` permission（当时）
+- 每个 frame 独立报自己的 hint，父 frame 算"父 origin + iframe.getBoundingClientRect" 给子 frame 当 viewport origin → 嵌套 iframe 免费递归
+- 比 `executeScript` 跨 origin 限制少
 
-### P4 — Click commit + 滚动失效（1 天）
+各 frame 之间消息类型：
+- `mouseless_hints_request {id, origin}` → 父让子收集
+- `mouseless_hints_response {id, hints}` → 子返回（屏幕坐标 hint 列表）
+- `mouseless_page_changed_inner` → 子向父冒泡 "我这里有新可点元素"
+- 250ms 超时兜底（sandboxed / chrome:// iframe 不响应）
 
-1. 用户按 hint 字母 → Mouseless 触发现有 commit 流程：warp cursor 到 hint 中心 + 合成 `CGEvent` click
-2. 扩展 content script 监听 scroll / DOM mutation，>50ms debounce 后发 `invalidate` 给 Mouseless
-3. Mouseless 收 invalidate 时如果还在 TAP sticky mode 则触发 re-hint
+### P3 — Mouseless 端 BrowserProvider + Overlay 渲染（1-2 天）✅
 
-**验收**：在 Gmail / Twitter / Notion 这种 SPA 上 sticky 模式连点 5 个对象，每次都准。
+实现要点：
+
+- 新文件 `Sources/Mouseless/BrowserProvider.swift`
+- `HintSource` 新增 `case .browser`（commit 时跟 `.ax` 走同一条 `MouseSynth.click` 中心点击路径，浏览器自家 hit-test 自动路由）
+- `HintMode.collectAll` 在 `AppRegistry.isBrowserApp(bundleID:)` 时走 BrowserProvider 分支
+- `BridgeServer.sendToActive` 写 socket → bridge 转 stdio → 扩展 SW → content_script → detector → 反向回流；Mouseless 端 `awaitResponse(ofType:"hints", timeout:0.4)` async 等
+- **偏离原计划**：`fetchHints` 超时返回的不是 nil → fallback OP，而是 `[]` 直接接受。详见 §7 "浏览器路径自治"
+
+### P3.5 — 多 profile / 多浏览器路由（增量）✅
+
+原计划没考虑同一时刻有多个扩展客户端连着。实际场景常见：用户同时开 Chrome Profile A + Profile B（每个 profile 是独立扩展安装 = 独立 SW = 独立 bridge 进程 = 独立 socket 连接到 Mouseless）。
+
+错的话很难看：用户在 Profile A 按 Caps Lock，Mouseless 把 list_hints 发到最后连上的 fd（可能是 Profile B），Profile B 返回它自己 active tab 的 hints，画在 Profile A 上。
+
+**修法**：
+
+- 扩展端 `chrome.windows.onFocusChanged` 监听 → SW 发 `{type: "i_am_active"}` 给 Mouseless。SW 启动时也用 `chrome.windows.getLastFocused` 主动 probe 一次（startup race 兜底）。
+- `BridgeServer.activeFD` 不再在 accept 时设置，**只在收到 `i_am_active` 时跟着切**。
+- ping 带 `browser` 身份字段（`"chrome"/"edge"/"brave"/"safari"/...` 从 UA 反推）。
+- `sendToActive(_, expectingBrowserBundleID:)` 给当前 frontmost bundleID 与 active fd 的 identity 做匹配 — 不匹配 refuse（避免"Safari 是 frontmost 但只有 Chrome 扩展在线时把 list_hints 发给 Chrome bridge 拿到 Chrome 的 hints 画在 Safari 上"）
+
+### P4 — 异步加载感知的 hint 刷新 ✅
+
+**偏离原计划**：原计划 "scroll / DOM mutation 失效" 范围太宽。实际**砍掉了 scroll 失效**——Mouseless UX 里滚动必须进 SCROLL mode，不会出现"sticky TAP 中滚动 → hint 飘到错位置" 的场景。**留下 DOM mutation**，因为这是 Vimium 也没解决的 daily-use 痛点（用户进 TAP 时页面正在 lazy load，hint 不全；等几秒后再补）。
+
+机制：
+
+- **扩展端**：每个 frame content_script 装 `MutationObserver`。callback 用 selector 早 return 过滤"没新可点元素出现"的 mutation，避免 Gmail / Slack 每秒几十次 DOM 喷射打过来。"有新可点"时 top frame 直接 `chrome.runtime.sendMessage` 给 SW；iframe 用 `mouseless_page_changed_inner` postMessage 给父，父递归向上中继到 top 才出局。
+- **Mouseless 端**：BridgeServer handler 路由 `{type: "page_changed"}` → `VimSession.handlePageChanged` → 4 道闸：in TAP + frontmost 是 browser + `tapSub == .normal`（不在 drag/search 子状态） + `typed` 前缀为空（不打断用户选 label） + 距上次 ≥500ms cooldown。全过 → `HintMode.refreshInPlace` —— **不 deactivate + 不 hide + 不重 activate**，直接 `applyCollected` 重 fetch hints + `HintOverlay.show(targets: new, typed: typed)` 原地替换 targets，**零闪烁**。
+- **HintMode 改造**：原 `activate` 里"label 分配 + targets writeback"提到 `applyCollected(_:)` 共用，`activate` 跟新加的 `refreshInPlace(isolateApp:)` 都走它。前者初次进入会清 `typed` + 设 `isActiveFlag = true`；后者保留两者。
+
+### P4.5 — 同窗口换 tab 的 `tab_changed`（增量）✅
+
+P4 解决了"同 tab 内 DOM 变化"，但**同窗口切 tab**（Cmd+1/2/3 / 点 tab strip / Cmd+\[\] navigation）是另一个盲区：
+
+- NSWorkspace.didActivateApplication：不 fire（同 app）
+- activeSpaceDidChange：不 fire
+- 150ms `focusedWindowPoll`：AXFocusedWindow 还是同一个 NSWindow → 不触发
+- chrome.windows.onFocusChanged：不 fire（window 没变）
+- content_script MutationObserver：通常不 fire（tab 切换是 visibility 切换，DOM 没真改）
+
+**修法**：扩展端 `chrome.tabs.onActivated` 监听器；过滤"是不是这个 profile 当前 focused window 内的 tab 切"；发 `{type: "tab_changed"}` 给 Mouseless。Mouseless 端 handler 把 `tab_changed` 跟 `page_changed` 走同一条路径（reuse `handlePageChanged()`，UX 行为完全一致）。
+
+### P4.6 — SW 启动 auto-inject 已开 tab（增量）✅
+
+Chrome 扩展开发的 #1 footgun：**reload 扩展不会重新注入到已经打开的 tab**——manifest 的 `content_scripts` 只在 tab navigation 之后才注入。pre-existing tab 没有 content script（或者是旧版本），bg 用 `tabs.sendMessage` 失败报 `Receiving end does not exist`。
+
+**修法**：扩展 manifest 加 `"scripting"` permission + `"host_permissions": ["<all_urls>"]`。SW 连上 native bridge 时遍历所有 tab 调 `chrome.scripting.executeScript({target: {tabId, allFrames: true}, files: ["detector.js", "content_script.js"]})`。chrome:// / Web Store 等不允许 inject 的 tab 自然 reject（catch + 计数为 skipped，不算 error）。dev 迭代不再每次 reload 都要挨个刷标签页。
 
 ### P5 — Safari 适配 + 打包上架（3-5 天）
 
@@ -197,25 +259,48 @@ Vimium 是 **MIT 协议**，可商用，要求 attribution + 保留 LICENSE。
 
 ## 6. 风险 & 已知坑
 
-| 风险 | 缓解 |
+| 风险 | 实际处理 |
 |---|---|
-| **iframe 跨 origin** | content script 注入到所有 frame；每个 frame 各报各的 hints + offset；background 合并。Vimium 已经处理好，照抄。 |
-| **Shadow DOM** | Vimium 的 detector 支持递归 shadow root，照抄 |
-| **`<canvas>` 上的 UI（Figma / Google Maps）** | DOM 里只有一个 `<canvas>`——任何 DOM 路径都歇菜。降级到 OP。BrowserProvider 没拿到 hint 时主动降级。 |
-| **Chrome Web Store 审核宽权限** | 需要 `<all_urls>` host permission——会触发"宽权限审核"，过审稍慢。文案上说明"需要在所有网页上识别可点元素"。 |
-| **Manifest V3 限制** | Service Worker 会被 Chrome 主动 unload；保持长连接要重连机制 |
-| **Safari 扩展 API 不完全对齐 Chrome** | 主要是 `chrome.runtime.connectNative` 在 Safari 的等价 API（`browser.runtime.connectNative`）；调用约束略不同 |
-| **bridge host 没装** | Mouseless 端 BrowserProvider 在 frontmost 是 Chrome 但 socket 连不上时，HUD 提示一次 + 降级到 OP，不阻断 |
-| **用户没装扩展** | 同上——扩展不在时扩展端不会发数据，主进程超时降级到 OP |
-| **Mouseless 主进程没启动时浏览器收到消息** | bridge host 发现 socket 不可达 → 给扩展回 `{"type":"error","reason":"main_process_not_running"}` → 扩展 console 警告，不影响浏览器 |
+| **iframe 跨 origin** | postMessage 链协议：每 frame 自己运行 detector，子 frame 收父 frame 的 `mouseless_hints_request` + parent-computed `viewportOriginInScreen` 后递归询问自己的 iframe → 合并返回。所有 hint 都已在 screen 坐标，top frame 不用再做坐标变换。✅ 已实现 |
+| **Shadow DOM** | detector 的 `getAllElements` 递归 `element.shadowRoot`；`isOnTop` 占用 `elementsFromPoint` 也递归 shadow root。✅ 已实现 |
+| **`<canvas>` 上的 UI（Figma / Google Maps）** | DOM 里只有一个 `<canvas>` → detector 返回 0 hint。**不降级到 OP**（见 §7）—— 用户看到 0 web hint，只剩 Dock + menubar。**有意识取舍**：保持心智模型干净（browser = DOM truth），canvas-only UI 留给特殊处理（per-site rule，未做） |
+| **Chrome Web Store 审核宽权限** | `<all_urls>` host permission 已声明，过审时需要文案解释"需要在所有网页上识别可点元素"。**P5 上架时处理** |
+| **Manifest V3 SW 非常驻** | 长连接 + 20s `keepalive` 间隔的 port.postMessage 保活；port 死了用 1-30s 指数退避重连。✅ 已实现 |
+| **Safari 扩展 API 不完全对齐 Chrome** | `browser.runtime.connectNative` 等同，但 Safari Web Extension API 在 macOS 上跟 Chrome 共用 Manifest V3 大方向。**P5 实测** |
+| **bridge host 没装 / 扩展未安装 / 主进程没起** | `sendToActive` 返回 false → `BrowserProvider.fetchHints` 返回 `[]` → 用户在 browser app 看到 0 web hint（仍有 Dock + menubar）。**不降级到 OP**——见 §7 |
+| **多 profile / 多浏览器 routing 错** | i_am_active 信号 + bundleID 身份校验。✅ 已实现 |
+| **reload 扩展后已开 tab 没 content script** | SW 启动用 `chrome.scripting.executeScript({allFrames:true, files:[...]})` 主动 inject。✅ 已实现 |
+| **chrome:// / Web Store 这种内置页禁注入** | 扩展回 `error: content_script_unavailable` → BrowserProvider 接受 0 hint，**不降级到 OP**。用户在 chrome:// 上按 Caps Lock 只看到 Dock + menubar hint，符合预期 |
+| **同窗口切 tab 不刷新 hint** | `chrome.tabs.onActivated` → `tab_changed`。✅ 已实现 |
+| **异步加载内容晚到** | MutationObserver "新可点出现" → `page_changed` → in-place refresh。✅ 已实现 |
 
 ---
 
 ## 7. 跟现有 OP / AX 路径的关系
 
-- **不替换 OP**——OP 仍是 fallback。canvas-only UI / 扩展没装 / bridge 连不上 → 自动 OP
-- **不影响 AX whitelist 路径**——native macOS app 走 AX walk 不变
-- **路由决策点**：`HintMode` 启动时拿 frontmost bundleID，匹配新加的 `BROWSER_BUNDLE_IDS = { "com.google.Chrome", "com.apple.Safari", "org.mozilla.firefox" }` → 走 BrowserProvider，timeout 后才降级到 OP
+**核心决策（374ea21）**：**进了浏览器分支就和 OP 完全无关**——扩展回啥（包括 0 hint）就是啥，不 fallback OP。
+
+理由：
+
+1. **心智模型干净**——用户记一条规则："Chrome / Safari = DOM 真理；其他 app = AX 或 OP"
+2. **OP 在网页上效果差**——网页 OCR 既漏 icon-only 按钮又会误识背景文字，反而比"0 hint 但用户知道为啥" 更让人困惑
+3. **fallback 边界难定**——`empty hints` 是因为"页面真的空"还是"content script 没注入"？两种都返回 `[]`，没法区分；要么所有都 fallback 要么都不
+
+代价（接受）：
+
+- 用户没装扩展 → Chrome 上没 web hint。要求**扩展是产品的一部分，不是可选项**。P5 上架后用户拿到的是扩展 + Mouseless 的整体安装包
+- chrome:// / Web Store 页面没有 web hint。**合理**——这些页面本来也少有人需要 Mouseless 协助
+
+**路由决策点**（`HintMode.collectAll`）：
+
+```
+frontmost.bundleID
+   ├─ AppRegistry.isBrowserApp → BrowserProvider.fetchHints  (无 fallback)
+   ├─ AppRegistry.shouldUseAXForFocused → AX walk             (whitelist app)
+   └─ 其他 → OmniParserPath.collect                            (OP default)
+```
+
+`browserBundleIDs` 集合：Chrome / Chrome Canary / Chrome Beta / Brave / Edge / Arc / Safari。Safari 现在还在集合里但没扩展，导致进 browser 分支后 0 hint —— 是 P5 之前的预期行为。
 
 ---
 

@@ -151,11 +151,25 @@ NSApplication
 
 | 文件 | 职责 |
 | --- | --- |
-| `AppRegistry.swift` | `AX_FOCUSED_WHITELIST` —— 焦点窗口走 AX 还是 OP 的路由决策 |
+| `AppRegistry.swift` | `AX_FOCUSED_WHITELIST` —— 焦点窗口走 AX 还是 OP 的路由决策；`browserBundleIDs` —— 浏览器 app 走 BrowserProvider |
 | `ScreenCapture.swift` | ScreenCaptureKit 截焦点窗口（display capture + crop，display 缓存）|
 | `OmniParserModel.swift` | CoreML YOLO 检测器（icon_detect.mlpackage，启动预加载）|
 | `OmniParserPath.swift` | 截图 → 推理 → §5.1 baseline 过滤 → 屏幕坐标候选；debug overlay |
 | `OCRRefiner.swift` | OP 点击精度：center 落进 inner box 时用 Vision OCR 重定位（含 CJK）。也对外暴露 `recognizeText(in:)` helper 给 TAP `/`-搜索子状态用（同 `.accurate` + zh/en config）|
+
+**浏览器路径**（Chrome / Safari 的焦点窗口 hint，见 `browser-support-design.md`）：
+
+| 文件 | 职责 |
+| --- | --- |
+| `BridgeServer.swift` | Mouseless 主进程的 Unix-domain socket 服务端（`~/Library/Application Support/Mouseless/bridge.sock`）。多客户端并发；`activeFD` 跟 `i_am_active` 信号绑定（多 profile / 多浏览器路由）；`sendToActive(_, expectingBrowserBundleID:)` 给主动外发请求 + bundleID 不匹配 refuse；`awaitResponse(ofType:timeout:)` async 一发一收等扩展回包 |
+| `BrowserProvider.swift` | `HintMode` 浏览器分支的 hint 来源。`fetchHints` 走 BridgeServer 发 `list_hints` → 等扩展回 `type:"hints"` → 转 `[Hint{rect,tag,text}]`。**浏览器路径自治：不 fallback 到 OP**——扩展回啥就是啥（即便 0 个）|
+| `Sources/mouseless-bridge/main.swift` | 第二个 SwiftPM target，编出 `mouseless-bridge` 二进制。Chrome Native Messaging host：被 Chrome 拉起，stdio ↔ Unix socket 双向纯字节转发（不解析）；socket 连不上时往 stdout 回一帧 `bridge_error` 让扩展能看到 |
+| `extension/manifest.json` | Chrome 扩展 Manifest V3：声明 `nativeMessaging` + `scripting` 权限 + `host_permissions: <all_urls>`，content scripts 注入到所有 frame |
+| `extension/background.js` | 扩展 service worker。持久 native port + keepalive；监听 `windows.onFocusChanged` 发 `i_am_active`；监听 `tabs.onActivated` 发 `tab_changed`；收 native 的 `list_hints` 转发给 active tab 的 content script；SW 连上时主动用 `scripting.executeScript` 把脚本注入到已经存在的 tab |
+| `extension/content_script.js` | 每个 frame 都跑：top frame 处理 bg 的 `list_hints` 请求 + 递归 postMessage 询问 iframe；任何 frame 处理父 frame 的 `mouseless_hints_request`；MutationObserver 监听 "新 clickable 出现" → 发 `page_changed`；用 `chrome.windows.onFocusChanged`/AX 都监听不到的"同窗口换 tab" 走 `tabs.onActivated`，统一在 Mouseless 端 `handlePageChanged` 收敛 |
+| `extension/detector.js` | DOM 级 hint 检测：Vimium 规则改写（选择器 + ARIA roles + jsaction + ng-click + 可见性 + 5 点遮挡 + shadow DOM 递归）。接受 `viewportOriginInScreen` 参数让 iframe 用父算好的坐标 |
+| `extension/install_dev_host.sh` | 写 `~/Library/.../NativeMessagingHosts/com.mouseless.bridge.json`，把扩展 ID 跟本地 bridge binary 路径绑定 |
+| `extension/vendor/vimium/MIT-LICENSE.txt` + `NOTICE.md` | Vimium attribution（detection 规则来自 Vimium，重写为干净 JS，MIT 许可保留）|
 
 **脚本**：
 
@@ -179,7 +193,7 @@ NSApplication
 | [`specs/omniparser-fallback-design.md`](specs/omniparser-fallback-design.md) | **已实现 (P5-P6)**：OP 视觉路径，OP-default + AX whitelist 路由（非 fall-through）；baseline 过滤；OCR click-point refiner（§4.6）；PoC 数据；captioner 搁置 |
 | [`specs/omniparser-integration-roadmap.md`](specs/omniparser-integration-roadmap.md) | **实施路线图**：P0-P6 已完成（CoreML spike → 截屏 → 路由 → 集成 → 端到端 → OCR refiner），P7（数据调参）/ P8（发布）待做 |
 | [`specs/per-app-correction-design.md`](specs/per-app-correction-design.md) | **设计草稿，未实现**：per-app 修正层（模板匹配补 OP 漏检 + exclude 误报），护城河；P8 之后启动 |
-| [`specs/browser-support-design.md`](specs/browser-support-design.md) | **设计草稿，未实现**：Chrome / Safari 走"插件 + Native Messaging Host + BrowserProvider"打通 DOM 级 HINT；借鉴 Vimium 的 detection 模块（MIT），其余复用现有 mode / overlay / commit；OP 降级 |
+| [`specs/browser-support-design.md`](specs/browser-support-design.md) | **P0–P4 实现完成**（Chrome）：扩展 + Native Messaging Host + `BridgeServer`/`BrowserProvider` 打通 DOM 级 HINT；多 profile / 多浏览器路由 + `tab_changed` + 异步加载 `page_changed` 全在线；浏览器路径自治，**不 fallback 到 OP**。P5 Safari + 上架待做 |
 
 ---
 
@@ -212,7 +226,7 @@ NSApplication
 
 1. **键盘布局** —— `KeyCode.swift` 是 ANSI 物理位。非 QWERTY 字母 hint 全错。
    迁移路径：用 `UCKeyTranslate` / `CGEventKeyboardGetUnicodeString` 把 keyCode + flags 映射到字符再匹配。
-2. **浏览器 HINT（Chrome / Safari）—— 设计完成，未实现**。OP 在网页上覆盖不全（icon-only 按钮、`<div onclick>`、SPA 框架按钮），打破"一套心智模型覆盖所有 app"产品论点。方案：装 Mouseless 扩展走 DOM 级检测，扩展通过 Native Messaging 跟主进程通讯，hint 列表喂进现有 `HintOverlay`，commit 仍走 `CGEvent`。借鉴 Vimium 的 detection 模块（MIT 许可，主要是可见性 / iframe / Shadow DOM 处理）。其它 mode（SCROLL/WINDOW/DRAG/MOVE）已经在浏览器里跑得通，不依赖这条改动。预估 ~10 天到能给用户用。详见 [`specs/browser-support-design.md`](specs/browser-support-design.md)。
+2. **浏览器 HINT（Chrome）—— P0-P4 已实现**。扩展（detector.js 改写 Vimium 规则、iframe 协调走 postMessage 链、shadow DOM 递归）+ 长连接 native messaging（背景 SW + bridge CLI）+ Mouseless 端 `BrowserProvider` 接进 `HintMode`。配套补丁：多 profile / 多浏览器 `i_am_active` 路由、`tab_changed` 信号修同窗口切 tab 盲点、MutationObserver-based `page_changed` 修异步加载、SW 启动主动 inject 已开 tab。**浏览器路径自治不 fallback 到 OP**。**P5 Safari + Web Store / App Store 上架待做**。详见 [`specs/browser-support-design.md`](specs/browser-support-design.md)。
 
 3. **Electron / AX-bad app**（vs Homerow 的 wedge）—— **已实现 OmniParser 视觉路径 (P5-P6)**。
    背景：Chromium 桥暴露什么取决于 app 的 ARIA 卫生，差的（WeChat、国产 SaaS）一片
