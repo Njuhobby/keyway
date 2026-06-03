@@ -1,5 +1,6 @@
 import Foundation
 import CoreGraphics
+import AppKit   // NSWorkspace
 
 /// Browser-app hint source. When the frontmost app is in
 /// `AppRegistry.browserBundleIDs`, `HintMode` calls
@@ -36,8 +37,17 @@ enum BrowserProvider {
     ///   fit; longer than this and we'd rather show OP-based hints
     ///   than make the user wait staring at no overlay.
     static func fetchHints(timeout: TimeInterval = 0.4) async -> [Hint]? {
-        guard BridgeServer.shared.sendToActive(["cmd": "list_hints"]) else {
-            print("[browser-provider] no extension connected — skipping")
+        // Pass the frontmost bundleID so BridgeServer's send-side guard
+        // can refuse to route the request to a non-matching browser's
+        // bridge (e.g., user is on Safari but only Chrome's extension
+        // is connected — would otherwise overlay Chrome's hints on
+        // Safari's window).
+        let bundleID = await MainActor.run {
+            NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        }
+        guard BridgeServer.shared.sendToActive(["cmd": "list_hints"],
+                                                expectingBrowserBundleID: bundleID) else {
+            print("[browser-provider] no matching extension connection — skipping")
             return nil
         }
         guard let response = await BridgeServer.shared.awaitResponse(

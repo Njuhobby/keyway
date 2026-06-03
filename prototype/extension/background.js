@@ -18,6 +18,25 @@ const KEEPALIVE_MS = 20_000;
 const RECONNECT_BASE_MS = 1_000;
 const RECONNECT_MAX_MS = 30_000;
 
+// Tell Mouseless which browser binary this extension lives in. Keep
+// in sync with `browserKeyForBundleID` in BridgeServer.swift.
+function detectBrowser() {
+  const ua = navigator.userAgent || "";
+  if (/Edg\//.test(ua))   return "edge";
+  if (/OPR\//.test(ua))   return "opera";
+  if (/Brave\//.test(ua)) return "brave";
+  // Arc identifies as Chrome in UA — there's no reliable browser-side
+  // distinction. Fall through to chrome. Mouseless's bundleID guard
+  // still routes Arc-frontmost queries correctly because both
+  // com.google.Chrome and company.thebrowser.Browser map to "chrome"
+  // / "arc" respectively — we leave it as chrome here and accept that
+  // Arc will be misrouted away from Arc; not a real concern yet.
+  if (/Chrome\//.test(ua))  return "chrome";
+  if (/Safari\//.test(ua))  return "safari";
+  return "unknown";
+}
+const BROWSER = detectBrowser();
+
 let port = null;
 let keepaliveTimer = null;
 let reconnectDelay = RECONNECT_BASE_MS;
@@ -58,10 +77,20 @@ function connect() {
 
   // Send an initial ping so Mouseless knows we're alive and to
   // confirm the link end-to-end. Reset backoff once we have a port —
-  // future disconnects start their own escalation.
+  // future disconnects start their own escalation. The `browser`
+  // field is what Mouseless's bundleID-routing guard matches against.
   reconnectDelay = RECONNECT_BASE_MS;
-  port.postMessage({ cmd: "ping", note: "extension SW connected" });
-  console.log("[mouseless-bg] connected, sent initial ping");
+  port.postMessage({ cmd: "ping", note: "extension SW connected", browser: BROWSER });
+  console.log("[mouseless-bg] connected, sent initial ping (browser=" + BROWSER + ")");
+
+  // Immediately tell Mouseless if this profile happens to be the
+  // currently-focused one. SW startup doesn't trigger windows.onFocus-
+  // Changed — that's CHANGE-driven — so we have to probe explicitly
+  // for the boot case where Mouseless launches AFTER Chrome and the
+  // user's already in a focused Chrome window.
+  chrome.windows.getLastFocused().then((w) => {
+    if (w && w.focused) reportActive("initial focus check");
+  }).catch(() => { /* no windows yet — fine, will fire on first focus */ });
 
   keepaliveTimer = setInterval(() => {
     if (!port) return;
@@ -130,6 +159,33 @@ async function handleFromNative(msg) {
   // Other server-initiated messages (future: invalidate caches, etc.).
   console.log("[mouseless-bg] recv from native:", msg);
 }
+
+// "I'm active" tells Mouseless that THIS profile/browser is currently
+// the user's focused window — Mouseless routes outbound list_hints to
+// whichever client most recently reported this. Multiple Chrome
+// profiles each have their own SW + bridge, so without this Mouseless
+// can't tell them apart.
+function reportActive(reason) {
+  if (!port) return;
+  try {
+    port.postMessage({ type: "i_am_active" });
+  } catch (e) {
+    console.warn("[mouseless-bg] reportActive failed:", e.message);
+    return;
+  }
+  console.log("[mouseless-bg] reported i_am_active:", reason);
+}
+
+chrome.windows.onFocusChanged.addListener((winId) => {
+  // WINDOW_ID_NONE fires when user switches AWAY from any of this
+  // profile's windows (cross-app, or cross-profile to another Chrome
+  // profile). We don't send `i_am_inactive` — the new active profile's
+  // SW will overwrite activeFD via its own report. Sending an explicit
+  // "inactive" risks racing the other profile's "active" and leaving
+  // activeFD = -1 in the gap.
+  if (winId === chrome.windows.WINDOW_ID_NONE) return;
+  reportActive("windows.onFocusChanged winId=" + winId);
+});
 
 // Content script → bg → native: page_changed signal forwarded as-is.
 // Coalescing is the receiver's job (Mouseless cooldown), so we don't

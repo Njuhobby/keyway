@@ -36,11 +36,30 @@ final class BridgeServer: @unchecked Sendable {
     private var listenFD: Int32 = -1
     private let acceptQueue = DispatchQueue(label: "mouseless.bridge.accept", qos: .utility)
 
-    /// Most recently connected client FD. `BrowserProvider` uses this as
-    /// the destination for outbound `list_hints` requests — only the
-    /// active browser instance can reasonably answer.
+    /// FD of the client that **most recently reported user focus**
+    /// (via `{type: "i_am_active"}`). Multiple clients can connect at
+    /// once — one per Chrome profile, one per separate browser binary
+    /// — and only the one whose window the user is currently looking
+    /// at should answer hint requests. The extension's
+    /// `chrome.windows.onFocusChanged` listener tells us when this
+    /// changes; we trust it because the extension's own profile
+    /// knows what's focused in that browser, and macOS can't (Chrome
+    /// profiles share one PID, so AX can't distinguish them).
+    ///
+    /// `-1` when no client has reported activity. Cleared when the
+    /// client at this fd disconnects.
     private var activeFD: Int32 = -1
     private let stateLock = NSLock()
+
+    /// Per-client identity (browser kind + free-form session id) so
+    /// Mouseless's `sendToActive(expectingBrowser:)` can refuse to
+    /// route, e.g., Safari-frontmost hint requests to a Chrome bridge.
+    /// Populated when a client's `{cmd: "ping"}` carries a `browser`
+    /// field. Cleared on disconnect.
+    struct ClientIdentity: @unchecked Sendable {
+        let browser: String?    // "chrome" / "edge" / "brave" / "safari" / "arc" / nil
+    }
+    private var clientIdentities: [Int32: ClientIdentity] = [:]
 
     /// One-shot continuations keyed by expected `type` field of the
     /// incoming response. Each entry is (token, continuation): the
@@ -156,7 +175,11 @@ final class BridgeServer: @unchecked Sendable {
             var one: Int32 = 1
             _ = setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
             print("[bridge] client connected fd=\(client)")
-            stateLock.lock(); activeFD = client; stateLock.unlock()
+            // Don't set activeFD on accept any more. Multiple browsers /
+            // profiles can connect concurrently; only one is the user's
+            // current frontmost. The client itself signals that via
+            // `{type:"i_am_active"}` on Chrome's onFocusChanged. Until
+            // then this fd doesn't get routed any outbound traffic.
             let q = DispatchQueue(label: "mouseless.bridge.conn.\(client)", qos: .utility)
             q.async { [weak self] in
                 self?.connectionLoop(client: client)
@@ -169,6 +192,7 @@ final class BridgeServer: @unchecked Sendable {
             close(client)
             stateLock.lock()
             if activeFD == client { activeFD = -1 }
+            clientIdentities[client] = nil
             stateLock.unlock()
             print("[bridge] client disconnected fd=\(client)")
         }
@@ -214,6 +238,41 @@ final class BridgeServer: @unchecked Sendable {
                 waiter.continuation.resume(returning: ResponseBody(body: obj))
                 continue
             }
+
+            // Infrastructure messages — handled by BridgeServer
+            // itself, never escalated to the user handler.
+            //
+            // `{type: "i_am_active"}`: extension's window just gained
+            // user focus. This is the routing pointer for outbound
+            // `list_hints` requests. Without this, Mouseless can't
+            // tell which of N concurrent connections (one per Chrome
+            // profile) belongs to the user's foreground window.
+            if (obj["type"] as? String) == "i_am_active" {
+                stateLock.lock()
+                let prev = activeFD
+                activeFD = client
+                let identity = clientIdentities[client]
+                stateLock.unlock()
+                if prev != client {
+                    print("[bridge] activeFD ← fd=\(client) browser=\(identity?.browser ?? "?")")
+                }
+                continue
+            }
+
+            // Capture identity carried on the initial ping (and any
+            // later ping) so `sendToActive(expectingBrowser:)` can
+            // refuse to route to a mismatched browser (e.g., Safari
+            // is frontmost but only Chrome's bridge is connected).
+            // Falls through — user handler still gets the ping and
+            // sends pong.
+            if (obj["cmd"] as? String) == "ping",
+               let browser = obj["browser"] as? String {
+                stateLock.lock()
+                clientIdentities[client] = ClientIdentity(browser: browser)
+                stateLock.unlock()
+                print("[bridge] client identity fd=\(client) browser=\(browser)")
+            }
+
             self.handler(obj) { [weak self] reply in
                 guard let self else { return }
                 guard let replyData = try? JSONSerialization.data(withJSONObject: reply) else {
@@ -227,17 +286,53 @@ final class BridgeServer: @unchecked Sendable {
 
     // MARK: - Outbound (Mouseless → extension)
 
-    /// Send a JSON message to the most recently connected client.
-    /// Returns false if no client is connected, or the write failed.
+    /// Send a JSON message to the client that most recently reported
+    /// focus (`i_am_active`). Returns false if no active client, the
+    /// write failed, or — if `expectingBrowserBundleID` is supplied —
+    /// the active client identifies as a different browser than the
+    /// caller wants.
+    ///
+    /// The bundleID guard catches "Mouseless is on Safari but only
+    /// Chrome's bridge is connected" — we don't want to silently send
+    /// Chrome the request and overlay its hints on Safari. Returns
+    /// false instead so `BrowserProvider` can fall back to OP.
     @discardableResult
-    func sendToActive(_ message: [String: Any]) -> Bool {
+    func sendToActive(_ message: [String: Any],
+                      expectingBrowserBundleID bundleID: String? = nil) -> Bool {
         stateLock.lock()
         let fd = activeFD
+        let identity = (fd >= 0) ? clientIdentities[fd] : nil
         stateLock.unlock()
         guard fd >= 0 else { return false }
+        if let bundleID {
+            let expected = Self.browserKeyForBundleID(bundleID)
+            if let identityBrowser = identity?.browser,
+               expected != identityBrowser {
+                print("[bridge] sendToActive: bundleID=\(bundleID) wants browser=\(expected) but activeFD=\(fd) is browser=\(identityBrowser) — refusing")
+                return false
+            }
+        }
         guard let data = try? JSONSerialization.data(withJSONObject: message) else { return false }
         writeMessage(client: fd, data: data)
         return true
+    }
+
+    /// Map a macOS bundle identifier to the short browser key the
+    /// extension self-reports as. Keep in sync with the `BROWSER` const
+    /// in `extension/background.js`. Unknown bundles return a sentinel
+    /// that won't match anything — the guard then fails closed.
+    private static func browserKeyForBundleID(_ bundleID: String) -> String {
+        switch bundleID {
+        case "com.google.Chrome",
+             "com.google.Chrome.canary",
+             "com.google.Chrome.beta":
+            return "chrome"
+        case "com.microsoft.edgemac":     return "edge"
+        case "com.brave.Browser":         return "brave"
+        case "company.thebrowser.Browser": return "arc"
+        case "com.apple.Safari":          return "safari"
+        default:                          return "unknown"
+        }
     }
 
     /// Wait up to `timeout` seconds for the next incoming message whose
