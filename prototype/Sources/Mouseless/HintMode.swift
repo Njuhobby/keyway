@@ -21,7 +21,15 @@ enum HintSource {
     /// already screen-space; commit synthesizes a click at the rect's
     /// center (same as `.ax` — DOM hit-test handles routing to the
     /// actual handler).
-    case browser
+    ///
+    /// `navigates: true` flags hints whose click highly likely fires
+    /// a full-page navigation (`<a href>` with a real URL, target !=
+    /// "_blank", no `javascript:` / `#` prefix). VimSession uses this
+    /// to skip the post-commit 100ms rehint — which would race the
+    /// new page's load and hit `content_script_unavailable`. The
+    /// extension's `tabs.onUpdated` listener fires `page_changed`
+    /// when navigation completes; that's what does the real refresh.
+    case browser(navigates: Bool)
 }
 
 struct HintTarget {
@@ -134,6 +142,13 @@ final class HintMode {
     /// rehints in the middle of a label selection.
     var typedPrefix: String { typed }
 
+    /// The target that was just committed (returned with `.committed`).
+    /// Survives `deactivate()` — VimSession inspects it after the
+    /// commit to decide downstream behavior (e.g., browser anchor
+    /// commits skip the 100ms sticky rehint because the page is
+    /// navigating; `tabs.onUpdated` handles refresh when nav completes).
+    private(set) var lastCommittedTarget: HintTarget?
+
     @discardableResult
     func activate(isolateApp: Bool = false) async -> Bool {
         let collected = await Self.collectAll(isolateApp: isolateApp)
@@ -213,7 +228,7 @@ final class HintMode {
             nonDockTargets.append(HintTarget(
                 label: letterLabels[idx], rect: c.rect,
                 role: "AXBrowser-" + c.tag,
-                source: .browser
+                source: .browser(navigates: c.navigates)
             ))
             idx += 1
         }
@@ -263,6 +278,7 @@ final class HintMode {
             return .ignored
         }
         if matches.count == 1 && matches[0].label == next {
+            lastCommittedTarget = matches[0]
             commit(target: matches[0], action: action)
             deactivate()
             return .committed

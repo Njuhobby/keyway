@@ -1915,7 +1915,31 @@ final class VimSession {
                 // Re-scan and stay in TAP. Single re-hint ~100ms after the
                 // click lands (see scheduleStickyRehint). App switches are
                 // handled separately by the always-on app-switch follow.
-                scheduleStickyRehint()
+                //
+                // **Skip the 100ms rehint on browser anchor commits**: a
+                // `<a href>` click triggers a full-page navigation, the
+                // new page's content script doesn't inject until
+                // ~document_idle (200ms-2s later), and a list_hints at
+                // 100ms would race that and hit content_script_unavailable
+                // — leaving the user with just Dock + menubar hints
+                // until the next signal. The extension's
+                // `chrome.tabs.onUpdated status=complete` fires when nav
+                // completes, sending page_changed → refreshInPlace; that's
+                // the path that delivers the correct refresh. Same-page
+                // anchors (#section), javascript: URLs, target=_blank,
+                // and non-anchor hints aren't flagged `navigates` so they
+                // still get the 100ms rehint.
+                let isNavigating: Bool
+                if case .browser(let nav)? = hint.lastCommittedTarget?.source, nav {
+                    isNavigating = true
+                } else {
+                    isNavigating = false
+                }
+                if isNavigating {
+                    print("[mouseless] sticky: skip 100ms rehint (link navigation, awaiting tabs.onUpdated)")
+                } else {
+                    scheduleStickyRehint()
+                }
             } else {
                 exit()
             }

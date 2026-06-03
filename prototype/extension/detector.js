@@ -309,7 +309,36 @@
         h: Math.round(c.rect.height),
       },
       text: labelFor(c.element),
+      nav: isLikelyNavigating(c.element),
     }));
+  }
+
+  // True if clicking this element is highly likely to navigate the
+  // current tab to a different URL — used by Mouseless to skip the
+  // 100ms post-commit rehint (which would race the page load and hit
+  // content_script_unavailable). False positives here aren't fatal:
+  // they just mean we'll miss a refresh for an unusual link case;
+  // the user can re-trigger.
+  //
+  // Conservative rules — only true when:
+  //   - <a> tag with non-empty href
+  //   - href doesn't start with "#" (same-page anchor scroll, no nav)
+  //   - href doesn't start with "javascript:" (custom handler, may
+  //     or may not navigate; treat as may-not for safety)
+  //   - target is not "_blank" (opens in a new tab, current tab
+  //     doesn't navigate)
+  //
+  // Doesn't try to predict SPA pushState — those go through DOM
+  // mutation, P4 MutationObserver picks them up anyway.
+  function isLikelyNavigating(el) {
+    if (el.tagName !== "A") return false;
+    const href = el.getAttribute("href");
+    if (!href) return false;
+    if (href.startsWith("#")) return false;
+    if (href.startsWith("javascript:")) return false;
+    const target = el.getAttribute("target");
+    if (target === "_blank") return false;
+    return true;
   }
 
   window.MouselessDetector = { listHints };

@@ -24,6 +24,11 @@ enum BrowserProvider {
         let rect: CGRect
         let tag: String
         let text: String
+        /// True iff clicking this element likely fires a full-page
+        /// navigation. Set by `detector.js`'s `isLikelyNavigating`.
+        /// `VimSession` uses it to skip the 100ms post-commit rehint
+        /// (which would race the load and miss).
+        let navigates: Bool
     }
 
     /// Ask the browser extension for the active tab's hints. Returns
@@ -101,5 +106,6 @@ private extension BrowserProvider.Hint {
         self.rect = CGRect(x: x, y: y, width: w, height: h)
         self.tag = (rawDict["tag"] as? String) ?? ""
         self.text = (rawDict["text"] as? String) ?? ""
+        self.navigates = (rawDict["nav"] as? Bool) ?? false
     }
 }
