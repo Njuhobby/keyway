@@ -93,7 +93,13 @@ async function handleFromNative(msg) {
       }
       let resp;
       try {
-        resp = await chrome.tabs.sendMessage(tab.id, { type: "list_hints" });
+        // frameId: 0 — explicit top frame only. With all_frames: true
+        // in the manifest, every frame has a content script loaded;
+        // without frameId we'd be asking every frame, but only the
+        // top one (gated in content_script.js) actually responds.
+        // Being explicit makes the intent clear and skips dispatch
+        // to inner frames.
+        resp = await chrome.tabs.sendMessage(tab.id, { type: "list_hints" }, { frameId: 0 });
       } catch (e) {
         // chrome:// and Web Store pages don't allow content scripts.
         console.warn("[mouseless-bg] list_hints: tabs.sendMessage failed:", e.message);

@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Mouseless (dev)",
-  "version": "0.0.4",
-  "description": "Bridge between Chrome and the Mouseless desktop app. Dev build — P3: persistent native port + BrowserProvider integration.",
+  "version": "0.0.5",
+  "description": "Bridge between Chrome and the Mouseless desktop app. Dev build — P2 stage B: iframe hint coordination via postMessage.",
   "minimum_chrome_version": "120",
   "permissions": ["nativeMessaging"],
   "background": {
@@ -16,7 +16,8 @@
       "matches": ["<all_urls>"],
       "js": ["detector.js", "content_script.js"],
       "run_at": "document_idle",
-      "all_frames": false
+      "all_frames": true,
+      "match_about_blank": true
     }
   ]
 }

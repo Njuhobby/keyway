@@ -252,6 +252,16 @@
   }
 
   // Main entry. Returns an array of hint records in screen coords.
+  //
+  // opts.viewportOriginInScreen — when present, used verbatim instead
+  // of computing from `window.screenX/Y`. Required for **iframes**:
+  // `window.screenX` in a child frame returns the top-level window's
+  // position (not the iframe's), so the child can't compute its own
+  // screen origin alone — its parent has to supply
+  //   { x: parentOriginX + iframe.getBoundingClientRect().left,
+  //     y: parentOriginY + iframe.getBoundingClientRect().top }
+  // and pass it down through postMessage. See content_script.js
+  // `gatherHintsRecursive`.
   function listHints(opts) {
     opts = opts || {};
     if (!document.documentElement) return [];
@@ -289,7 +299,7 @@
     const visible = filtered.filter(c => !c.secondClass && isOnTop(c.element, c.rect));
     visible.reverse();   // restore document order
 
-    const origin = viewportOriginInScreen();
+    const origin = opts.viewportOriginInScreen || viewportOriginInScreen();
     return visible.map(c => ({
       tag: c.element.tagName.toLowerCase(),
       rect: {
