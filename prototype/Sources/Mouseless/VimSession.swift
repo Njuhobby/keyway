@@ -948,8 +948,17 @@ final class VimSession {
             print("[mouseless] route: frontmost app has no bundleID (pid=\(pid))")
             return
         }
+        let isBrowser = AppRegistry.isBrowserApp(bundleID: bundleID)
         let useAX = AppRegistry.shouldUseAXForFocused(bundleID: bundleID)
-        print("[mouseless] route: \(bundleID) -> \(useAX ? "AX walk (whitelist)" : "OmniParser (default)")")
+        let label: String
+        if isBrowser {
+            label = "Browser extension (DOM)"
+        } else if useAX {
+            label = "AX walk (whitelist)"
+        } else {
+            label = "OmniParser (default)"
+        }
+        print("[mouseless] route: \(bundleID) -> \(label)")
     }
 
     func exit() {

@@ -57,8 +57,27 @@ enum BrowserProvider {
             print("[browser-provider] timeout waiting for hints (>\(Int(timeout * 1000))ms)")
             return nil
         }
+        // Extension reported a fatal-for-this-tab condition — most
+        // commonly `content_script_unavailable` when the active tab is
+        // a `chrome://` / Web Store / error page. Treat as nil so
+        // HintMode.collectAll falls through to OmniParser; otherwise
+        // user would see only Dock + menubar hints with no web content
+        // hints at all (which is what they hit and got confused by).
+        if let err = response["error"] as? String {
+            print("[browser-provider] extension reported error=\(err) — falling back to OP")
+            return nil
+        }
         guard let rawHints = response["hints"] as? [[String: Any]] else {
             print("[browser-provider] response missing 'hints' array: \(response)")
+            return nil
+        }
+        // Even without an explicit error, an empty array on a browser
+        // app is suspicious (a real web page should have at least one
+        // clickable). Could be a blank page or a still-loading SPA;
+        // either way the user gets a better experience by routing to
+        // OP than by seeing empty browser hints + no content fallback.
+        if rawHints.isEmpty {
+            print("[browser-provider] empty hint array — falling back to OP")
             return nil
         }
         let hints = rawHints.compactMap { Hint(rawDict: $0) }
