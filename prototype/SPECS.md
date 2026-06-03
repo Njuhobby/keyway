@@ -226,7 +226,7 @@ NSApplication
 
 1. **键盘布局** —— `KeyCode.swift` 是 ANSI 物理位。非 QWERTY 字母 hint 全错。
    迁移路径：用 `UCKeyTranslate` / `CGEventKeyboardGetUnicodeString` 把 keyCode + flags 映射到字符再匹配。
-2. **浏览器 HINT（Chrome）—— P0-P4 已实现**。扩展（detector.js 改写 Vimium 规则、iframe 协调走 postMessage 链、shadow DOM 递归）+ 长连接 native messaging（背景 SW + bridge CLI）+ Mouseless 端 `BrowserProvider` 接进 `HintMode`。配套补丁：多 profile / 多浏览器 `i_am_active` 路由、`tab_changed` 信号修同窗口切 tab 盲点、MutationObserver-based `page_changed` 修异步加载、SW 启动主动 inject 已开 tab。**浏览器路径自治不 fallback 到 OP**。**P5 Safari + Web Store / App Store 上架待做**。详见 [`specs/browser-support-design.md`](specs/browser-support-design.md)。
+2. **浏览器 HINT（Chrome）—— P0-P4 已实现**。扩展（detector.js 改写 Vimium 规则、iframe 协调走 postMessage 链、shadow DOM 递归）+ 长连接 native messaging（背景 SW + bridge CLI）+ Mouseless 端 `BrowserProvider` 接进 `HintMode`。配套补丁：多 profile / 多浏览器 `i_am_active` 路由、`tab_changed` 信号修同窗口切 tab 盲点、MutationObserver-based `page_changed` 修异步加载、`navigation_complete` 信号修整页跳转后的刷新、anchor link commit 跳过 100ms post-commit rehint（避免 navigation 中间态错位）、SW 启动主动 inject 已开 tab。**浏览器路径自治不 fallback 到 OP**。**P5 Safari + Web Store / App Store 上架待做**。详见 [`specs/browser-support-design.md`](specs/browser-support-design.md)。
 
 3. **Electron / AX-bad app**（vs Homerow 的 wedge）—— **已实现 OmniParser 视觉路径 (P5-P6)**。
    背景：Chromium 桥暴露什么取决于 app 的 ARIA 卫生，差的（WeChat、国产 SaaS）一片

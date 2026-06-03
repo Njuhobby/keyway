@@ -13,11 +13,13 @@
 | 增量补丁：多 profile / 多浏览器 `i_am_active` 路由 | ✅ |
 | 增量补丁：同窗口换 tab 的 `tab_changed` 信号 | ✅ |
 | 增量补丁：SW 启动 auto-inject 已存在的 tab | ✅ |
+| 增量补丁：navigation_complete 信号（`tabs.onUpdated status=complete`） | ✅ |
+| 增量补丁：anchor link commit 跳过 100ms post-commit rehint | ✅ |
 | P5 Safari Web Extension + 上架 | ⏳ 未开始 |
 
 Chrome 上**功能层面已可 daily-drive**。Safari 等 P5。
 
-详细的 commit 链：`fb2ccde` (P0) → `130297e` (P1.1) → `f08a775` (P1.2) → `3c62077` (P1.3) → `a89caee` (P2-A) → `01a5fa8` (P2-B) → `59d4f54` (P3) → `fd7efa6` (P4) → `afd41bc` (multi-route) → `374ea21` (browser path 自治) → `0413c85` (auto-inject) → `76dd2a3` (tab_changed)。
+详细的 commit 链：`fb2ccde` (P0) → `130297e` (P1.1) → `f08a775` (P1.2) → `3c62077` (P1.3) → `a89caee` (P2-A) → `01a5fa8` (P2-B) → `59d4f54` (P3) → `fd7efa6` (P4) → `afd41bc` (multi-route) → `374ea21` (browser path 自治) → `0413c85` (auto-inject) → `76dd2a3` (tab_changed) → `ebcb371` (navigation_complete) → `8df297b` (anchor skip 100ms rehint)。
 
 ---
 
@@ -234,6 +236,25 @@ P4 解决了"同 tab 内 DOM 变化"，但**同窗口切 tab**（Cmd+1/2/3 / 点
 Chrome 扩展开发的 #1 footgun：**reload 扩展不会重新注入到已经打开的 tab**——manifest 的 `content_scripts` 只在 tab navigation 之后才注入。pre-existing tab 没有 content script（或者是旧版本），bg 用 `tabs.sendMessage` 失败报 `Receiving end does not exist`。
 
 **修法**：扩展 manifest 加 `"scripting"` permission + `"host_permissions": ["<all_urls>"]`。SW 连上 native bridge 时遍历所有 tab 调 `chrome.scripting.executeScript({target: {tabId, allFrames: true}, files: ["detector.js", "content_script.js"]})`。chrome:// / Web Store 等不允许 inject 的 tab 自然 reject（catch + 计数为 skipped，不算 error）。dev 迭代不再每次 reload 都要挨个刷标签页。
+
+### P4.7 — `navigation_complete` 信号（增量）✅
+
+P4 的 MutationObserver 只看"新加入 DOM 的 clickable"，但**用户点链接触发整页 navigation** 时新页面的初始 DOM 是一次性渲染齐的、不是逐步加进来的，MutationObserver fire 不了。同时 sticky 的 100ms post-commit rehint 会落在 navigation 中间，content script 尚未在新 DOM 上 inject → 收到 `content_script_unavailable` → 显示 0 web hint。
+
+**修法**：扩展端 `chrome.tabs.onUpdated` 监听 `changeInfo.status === "complete"`（页面加载完成），过滤"focused window 的 active tab"，发 `{type: "page_changed", reason: "navigation_complete", url, tabId}` 给 Mouseless。Mouseless 端走现成的 `handlePageChanged` 通路。`reason` 字段纯调试用，handler 不区分（同样 4 道闸 + refreshInPlace）。
+
+### P4.8 — Anchor link commit 跳过 100ms post-commit rehint（增量）✅
+
+承接 P4.7：即便加了 navigation_complete 通知，100ms 那次 rehint 仍然会**先**踩到 content_script_unavailable、把 overlay 替换成"只剩 Dock + menubar 的 65 个 hint"中间态，user 看到一段诡异的"只剩 Dock"窗口，过几百毫秒才被新页面 hint 覆盖。直接**跳过这次 rehint** 就好——根本不让它跑到那个失败状态。
+
+**修法分扩展端 + Mouseless 端**：
+
+- `detector.js` 给每个 hint 多带一个 `nav: bool` 字段。`isLikelyNavigating(el)` 判定：tag === "a"，href 非空且不以 `#` 开头、非 `javascript:` 开头，target ≠ `_blank`
+- `BrowserProvider.Hint` 加 `navigates: Bool`；`HintSource.browser` 改成 `case browser(navigates: Bool)` 携带
+- `HintMode` 跟踪 `lastCommittedTarget`（survives `deactivate`），让 VimSession 在 `.committed` 分派后能查
+- `VimSession` 在 sticky `.committed` 路径里：`if case .browser(true) = lastCommittedTarget.source` → 跳过 `scheduleStickyRehint`。tabs.onUpdated 完成时的 page_changed 会接管重画
+
+**不影响**：非 anchor browser hint（button / role=button / div+onclick 等）、AX hint、OP hint —— 这些 commit 后仍然走 100ms rehint（同页 DOM 变化场景需要它）。同页 `#section` anchor、`javascript:` URL、`target=_blank` 也走 100ms rehint（这些**不真 navigation**）。
 
 ### P5 — Safari 适配 + 打包上架（3-5 天）
 
