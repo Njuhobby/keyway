@@ -163,6 +163,19 @@ final class VimSession {
     private var lastWindowEdgeKeyUp: [WindowController.Edge: CFAbsoluteTime] = [:]
     private let windowReverseTapWindow: CFAbsoluteTime = 0.15
 
+    /// Same-as-WINDOW double-tap detection for **TAP cursor jump**:
+    /// `hh` / `jj` / `kk` / `ll` released-then-pressed within 150ms
+    /// teleports the cursor 1/4 of the containing screen in that
+    /// direction. Holding the second tap chains jumps via OS
+    /// key-repeat (each repeated keyDown re-triggers because we
+    /// refresh the timestamp on every jump). Single press still
+    /// starts the existing continuous `mover.start`.
+    ///
+    /// Threshold tracks `windowReverseTapWindow` (150ms) so muscle
+    /// memory is one rhythm across modes. Cleared on TAP exit and
+    /// on commit.
+    private var lastTapHjklKeyUp: [MouseMover.Direction: CFAbsoluteTime] = [:]
+
     var isActive: Bool { mode != nil }
 
     // MARK: - Lifecycle
@@ -425,6 +438,7 @@ final class VimSession {
             lastWindowEdgeKeyUp.removeAll()   // forget stale double-tap timestamps
             WindowOpOverlay.shared.hide()
         }
+        lastTapHjklKeyUp.removeAll()    // forget stale double-tap timestamps (TAP jump)
         if case .windowMove(let c) = mode {
             c.teardown()                // stops the move timer
             WindowOpOverlay.shared.hide()
@@ -1046,6 +1060,24 @@ final class VimSession {
         if allowsMoveHere, paletteBuffer == nil,
            flags.intersection([.maskCommand, .maskControl]).isEmpty,
            let dir = Self.moveDirection(for: keyCode) {
+            // Double-tap detection (TAP only, not dragging — drag wants
+            // every press to extend the held drag, jumping mid-drag
+            // would teleport the drop target unpredictably). Within
+            // 150ms of the last hjkl keyUp of the SAME direction =
+            // discrete 1/4-screen jump. Refresh timestamp on every
+            // jump so OS key-repeat from a held second tap chains
+            // more jumps. Modifiers ignored on jump — Shift held +
+            // double-tap still jumps the same 1/4 (no "double-tap
+            // + Shift = 1/2" yet; could add later if useful).
+            if !dragHeld {
+                let now = CFAbsoluteTimeGetCurrent()
+                if let lastUp = lastTapHjklKeyUp[dir],
+                   now - lastUp < windowReverseTapWindow {
+                    jumpCursor(direction: dir, fraction: 0.25)
+                    lastTapHjklKeyUp[dir] = now
+                    return true
+                }
+            }
             // Option allowed through (unlike Cmd/Ctrl) because hjkl aren't
             // hint letters, so Option+hjkl can't collide with the Option =
             // right-click hint modifier.
@@ -1738,8 +1770,14 @@ final class VimSession {
             // including the dragging sub-state (the timer is the
             // mover; the held mouseDown stays held until Enter / Esc /
             // Backspace releases it explicitly).
-            if Self.moveDirection(for: keyCode) != nil {
+            if let dir = Self.moveDirection(for: keyCode) {
                 mover.stop()
+                // Record keyUp time for double-tap → jump detection
+                // (only in normal sub-state; drag wants every press
+                // to extend the drag, not jump).
+                if case .normal = tapSub {
+                    lastTapHjklKeyUp[dir] = CFAbsoluteTimeGetCurrent()
+                }
                 return true
             }
             return false
@@ -1788,6 +1826,44 @@ final class VimSession {
         case KeyCode.l: return .right
         default: return nil
         }
+    }
+
+    /// Teleport the cursor by `fraction` of the containing screen's
+    /// dimension in the given direction. Uses the screen the cursor
+    /// is currently on so multi-display setups jump within their
+    /// active monitor (not a fixed reference). Clamps to that
+    /// screen's bounds so we don't overshoot off-screen.
+    ///
+    /// Synthesizes `.mouseMoved` (via MouseSynth.warp) rather than
+    /// a raw `CGWarpMouseCursorPosition` so the destination view
+    /// sees an event and updates cursor shape / hover state — same
+    /// reasoning as `/`-search commit.
+    private func jumpCursor(direction: MouseMover.Direction, fraction: CGFloat) {
+        let current = MouseSynth.cursorPosition()
+        // Pick the screen containing the cursor. Fallback to main
+        // when cursor sits exactly on a boundary or off all screens.
+        let screen = NSScreen.screens.first(where: { $0.frame.contains(current) })
+                    ?? NSScreen.main
+                    ?? NSScreen.screens.first
+        guard let s = screen else { return }
+        let frame = s.frame
+        var next = current
+        switch direction {
+        case .left:  next.x -= frame.width  * fraction
+        case .right: next.x += frame.width  * fraction
+        case .up:    next.y -= frame.height * fraction
+        case .down:  next.y += frame.height * fraction
+        }
+        // Clamp to screen bounds. NSScreen.frame uses bottom-left
+        // origin in screen coords, but MouseSynth.warp / cursor
+        // position use top-left (CG convention). We're using NSScreen
+        // only as a "what dimensions do I get to play with" measure,
+        // so the orientation doesn't matter — both axes have the
+        // same range. Clamp to a tight inset (3pt) so the cursor
+        // never lands on the literal edge pixel.
+        next.x = max(frame.minX + 3, min(frame.maxX - 3, next.x))
+        next.y = max(frame.minY + 3, min(frame.maxY - 3, next.y))
+        MouseSynth.warp(to: next)
     }
 
     /// US-ANSI digit key codes → 0-9. nil for non-digit keys.
