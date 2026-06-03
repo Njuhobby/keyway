@@ -17,6 +17,11 @@ import ApplicationServices
 enum HintSource {
     case ax(element: AXUIElement, sourceWindow: AXUIElement?)
     case omni(confidence: Float)
+    /// Browser hint via the extension (`BrowserProvider`). The rect is
+    /// already screen-space; commit synthesizes a click at the rect's
+    /// center (same as `.ax` — DOM hit-test handles routing to the
+    /// actual handler).
+    case browser
 }
 
 struct HintTarget {
@@ -129,6 +134,7 @@ final class HintMode {
         let collected = await Self.collectAll(isolateApp: isolateApp)
         if collected.focused.isEmpty
             && collected.focusedOmni.isEmpty
+            && collected.focusedBrowser.isEmpty
             && collected.dock.isEmpty
             && collected.menuBarExtras.isEmpty {
             return false
@@ -141,12 +147,13 @@ final class HintMode {
                        source: .ax(element: c.element, sourceWindow: c.sourceWindow))
         }
 
-        // Focused (AX + OP) and menu bar extras share the alphabetic label
-        // pool. Order: AX-windows → OP candidates → AX menubar/extras —
-        // arbitrary but deterministic so labels stay stable across rescans
-        // within the same content.
+        // Focused (AX + OP + Browser) and menu bar extras share the
+        // alphabetic label pool. Order: AX-windows → OP → Browser →
+        // AX menubar/extras — arbitrary but deterministic so labels
+        // stay stable across rescans within the same content.
         let totalLetters = collected.focused.count
                          + collected.focusedOmni.count
+                         + collected.focusedBrowser.count
                          + collected.menuBarExtras.count
         let letterLabels = Self.generateLabels(count: totalLetters)
         var nonDockTargets: [HintTarget] = []
@@ -166,6 +173,14 @@ final class HintMode {
             ))
             idx += 1
         }
+        for c in collected.focusedBrowser {
+            nonDockTargets.append(HintTarget(
+                label: letterLabels[idx], rect: c.rect,
+                role: "AXBrowser-" + c.tag,
+                source: .browser
+            ))
+            idx += 1
+        }
         for c in collected.menuBarExtras {
             nonDockTargets.append(HintTarget(
                 label: letterLabels[idx], rect: c.rect, role: c.role,
@@ -175,11 +190,13 @@ final class HintMode {
         }
 
         targets = dockTargets + nonDockTargets
-        focusedTargetCount = collected.focused.count + collected.focusedOmni.count
+        focusedTargetCount = collected.focused.count
+                           + collected.focusedOmni.count
+                           + collected.focusedBrowser.count
         typed = ""
         isActiveFlag = true
         HintOverlay.shared.show(targets: targets, typed: "")
-        print("[mouseless] hint: \(targets.count) targets (focusedAX: \(collected.focused.count), focusedOP: \(collected.focusedOmni.count), dock: \(collected.dock.count), extras: \(collected.menuBarExtras.count))")
+        print("[mouseless] hint: \(targets.count) targets (focusedAX: \(collected.focused.count), focusedOP: \(collected.focusedOmni.count), focusedBrowser: \(collected.focusedBrowser.count), dock: \(collected.dock.count), extras: \(collected.menuBarExtras.count))")
         return true
     }
 
@@ -249,7 +266,10 @@ final class HintMode {
         //     click handler. Containment-aware: filters out text that
         //     belongs to OP boxes contained within this one.
         switch target.source {
-        case .ax:
+        case .ax, .browser:
+            // Browser hints carry screen-space rects from `detector.js`;
+            // synth click at center delegates to the browser's normal
+            // hit-test pipeline, exactly the same as an AX hint commit.
             let center = CGPoint(x: target.rect.midX, y: target.rect.midY)
             MouseSynth.click(at: center, button: buttonForAction(action),
                              count: countForAction(action))
@@ -334,6 +354,7 @@ final class HintMode {
     private struct CollectedElements {
         let focused: [ElementCandidate]                       // AX (windows + menu bar)
         let focusedOmni: [OmniParserPath.OmniCandidate]       // OP (default path only)
+        let focusedBrowser: [BrowserProvider.Hint]            // browser extension (Chrome/Safari)
         let dock: [ElementCandidate]
         let menuBarExtras: [ElementCandidate]
     }
@@ -368,6 +389,7 @@ final class HintMode {
         let t0 = Date()
         var focusedOut: [ElementCandidate] = []
         var focusedOmniOut: [OmniParserPath.OmniCandidate] = []
+        var focusedBrowserOut: [BrowserProvider.Hint] = []
         var focusedIPC = 0
         var cacheHits = 0
         var routeLabel = "no-app"
@@ -378,10 +400,27 @@ final class HintMode {
             focusedIPC += 1
 
             let bundleID = NSRunningApplication(processIdentifier: focusedPID)?.bundleIdentifier
+            let isBrowser = bundleID.map { AppRegistry.isBrowserApp(bundleID: $0) } ?? false
             let useAX = bundleID.map { AppRegistry.shouldUseAXForFocused(bundleID: $0) } ?? false
-            routeLabel = useAX ? "AX(whitelist)" : "OP(default)"
 
-            if useAX {
+            if isBrowser {
+                // Browser path: ask the extension for DOM-level hints.
+                // Returns nil if the extension isn't connected (the
+                // user hasn't installed it yet, the SW went idle, etc.)
+                // — fall back to OP in that case so we degrade gracefully
+                // instead of leaving the user with no hints at all.
+                routeLabel = "Browser(ext)"
+                if let hints = await BrowserProvider.fetchHints() {
+                    focusedBrowserOut = hints
+                } else {
+                    routeLabel = "Browser→OP(fallback)"
+                    focusedOmniOut = await OmniParserPath.collect(isolateApp: isolateApp)
+                }
+            } else {
+                routeLabel = useAX ? "AX(whitelist)" : "OP(default)"
+            }
+
+            if !isBrowser && useAX {
                 // Whitelist path: AX walk the focused app's **focused
                 // window only**, not all windows. Matches the OP path's
                 // scope (it only captures the focused window) and stops
@@ -437,13 +476,14 @@ final class HintMode {
                         focusedOut.append(contentsOf: fresh)
                     }
                 }
-            } else {
+            } else if !isBrowser {
                 // Default path: skip the focused-app window AX walk,
                 // call OmniParser visual path instead. P4 stub returns
                 // []; real implementation in P5/P6.
                 focusedOmniOut = await OmniParserPath.collect(isolateApp: isolateApp)
                 // No cache to populate — OP candidates are ephemeral.
             }
+            // Browser path handled above before the AX/OP branch.
 
             // Focused app's AXMenuBar — always walked regardless of route.
             // Specialized walk that short-circuits the (overwhelmingly
@@ -489,13 +529,14 @@ final class HintMode {
         }
         let t3 = Date()
 
-        print(String(format: "[mouseless] collect timings: focused=%.0fms [%@] (%d IPC, %d window cache hit, ax=%d op=%d) dock=%.0fms (%d IPC) extras=%.0fms",
+        print(String(format: "[mouseless] collect timings: focused=%.0fms [%@] (%d IPC, %d window cache hit, ax=%d op=%d browser=%d) dock=%.0fms (%d IPC) extras=%.0fms",
                      t1.timeIntervalSince(t0) * 1000, routeLabel, focusedIPC, cacheHits,
-                     focusedOut.count, focusedOmniOut.count,
+                     focusedOut.count, focusedOmniOut.count, focusedBrowserOut.count,
                      t2.timeIntervalSince(t1) * 1000, dockIPC,
                      t3.timeIntervalSince(t2) * 1000))
 
         return CollectedElements(focused: focusedOut, focusedOmni: focusedOmniOut,
+                                 focusedBrowser: focusedBrowserOut,
                                  dock: dockOut, menuBarExtras: extrasOut)
     }
 

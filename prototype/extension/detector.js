@@ -231,7 +231,27 @@
     return (t || "").trim().replace(/\s+/g, " ").slice(0, 60);
   }
 
-  // Main entry. Returns an array of hint records.
+  // Translate viewport-space coords to macOS screen-space (points).
+  //
+  // `window.screenX/screenY` is the OS window's top-left in CSS px.
+  // CSS px on macOS = points, so no DPR conversion. The viewport (web
+  // content area) sits INSIDE the window with Chrome's tab bar + URL
+  // bar + (optional) bookmarks bar above it; in Chrome on macOS all
+  // chrome is at the top, so:
+  //   viewportLeftInScreen = window.screenX  (no left chrome to speak of)
+  //   viewportTopInScreen  = window.screenY + (outerHeight - innerHeight)
+  // Approximate — ignores devtools-docked-right (would shift content
+  // left) and the small bottom status-bar slice some browsers draw.
+  // Good enough for v1; Mouseless can refine using AX window rect
+  // diffing if labels drift on real pages.
+  function viewportOriginInScreen() {
+    return {
+      x: window.screenX,
+      y: window.screenY + (window.outerHeight - window.innerHeight),
+    };
+  }
+
+  // Main entry. Returns an array of hint records in screen coords.
   function listHints(opts) {
     opts = opts || {};
     if (!document.documentElement) return [];
@@ -269,11 +289,12 @@
     const visible = filtered.filter(c => !c.secondClass && isOnTop(c.element, c.rect));
     visible.reverse();   // restore document order
 
+    const origin = viewportOriginInScreen();
     return visible.map(c => ({
       tag: c.element.tagName.toLowerCase(),
       rect: {
-        x: Math.round(c.rect.left),
-        y: Math.round(c.rect.top),
+        x: Math.round(origin.x + c.rect.left),
+        y: Math.round(origin.y + c.rect.top),
         w: Math.round(c.rect.width),
         h: Math.round(c.rect.height),
       },

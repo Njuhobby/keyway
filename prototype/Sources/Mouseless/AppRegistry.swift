@@ -78,4 +78,26 @@ enum AppRegistry {
     static func shouldUseAXForFocused(bundleID: String) -> Bool {
         return axFocusedWhitelist.contains(bundleID)
     }
+
+    /// Browser apps whose hints come from our extension (via
+    /// `BrowserProvider`), not from AX walk or OmniParser. Web content's
+    /// AX tree is broken under default Chrome (lazy renderer-side AX)
+    /// and OP-on-OCR misses icon-only buttons / dynamic SPAs — the
+    /// extension reads the DOM directly and returns precise hints.
+    /// Mouseless main process picks `.browser` over AX / OP when
+    /// frontmost is in this set; falls back to OP if the extension
+    /// isn't connected. See `specs/browser-support-design.md`.
+    static let browserBundleIDs: Set<String> = [
+        "com.google.Chrome",
+        "com.google.Chrome.canary",
+        "com.google.Chrome.beta",
+        "com.brave.Browser",
+        "com.microsoft.edgemac",
+        "com.apple.Safari",
+        "company.thebrowser.Browser",   // Arc
+    ]
+
+    static func isBrowserApp(bundleID: String) -> Bool {
+        return browserBundleIDs.contains(bundleID)
+    }
 }

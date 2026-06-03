@@ -1,70 +1,145 @@
 // Mouseless extension — background service worker.
 //
-// Two trigger paths to the native host:
-//   - `onInstalled` / `onStartup` — one ping, sanity check that the
-//     bridge is reachable.
-//   - `action.onClicked` — ask the active tab's content script for
-//     a hint list (via chrome.tabs.sendMessage → detector.js → result),
-//     then forward to the native host. This is what P2 actually
-//     validates: clickable hints flow from DOM → Mouseless main
-//     process in <100ms.
+// Persistent native-messaging connection to `com.mouseless.bridge`.
+// The Mouseless main process sends `{cmd:"list_hints"}` over the port
+// whenever the user enters TAP on a browser window; we forward to the
+// active tab's content script, get the hint list back, and ship it
+// over the port. The SW also pings every 20s — keeps the port alive
+// AND prevents the SW itself from being culled under MV3's idle rule.
 //
-// MV3 service workers are non-persistent. We open a fresh
-// `connectNative` per trigger rather than keeping a long-lived port —
-// good enough for P1/P2 testing; P3 wraps this in a connection manager
-// with reconnect.
+// MV3 SWs are non-persistent: any event listener (port.onMessage,
+// alarms, runtime.onStartup) wakes them. Idle timeout is ~30s. With
+// keepalive activity every 20s the SW survives indefinitely while a
+// browser window is open. If the port DOES die (network error, OS
+// suspend, etc.) we reconnect with exponential backoff.
 
 const HOST = "com.mouseless.bridge";
+const KEEPALIVE_MS = 20_000;
+const RECONNECT_BASE_MS = 1_000;
+const RECONNECT_MAX_MS = 30_000;
 
-function postOnce(payload, reason) {
-  console.log("[mouseless-bg]", reason, "— connecting to", HOST);
-  const port = chrome.runtime.connectNative(HOST);
-  port.onMessage.addListener((msg) => {
-    console.log("[mouseless-bg] recv from native:", msg);
-  });
-  port.onDisconnect.addListener(() => {
-    const err = chrome.runtime.lastError;
-    if (err) console.warn("[mouseless-bg] port disconnected:", err.message);
-    else console.log("[mouseless-bg] port disconnected cleanly");
-  });
-  port.postMessage(payload);
-  console.log("[mouseless-bg] sent:", payload);
+let port = null;
+let keepaliveTimer = null;
+let reconnectDelay = RECONNECT_BASE_MS;
+
+function disconnectPort(reason) {
+  if (keepaliveTimer) { clearInterval(keepaliveTimer); keepaliveTimer = null; }
+  if (port) {
+    try { port.disconnect(); } catch (e) { /* already dead */ }
+    port = null;
+  }
+  if (reason) console.log("[mouseless-bg] disconnected:", reason);
 }
 
-chrome.runtime.onInstalled.addListener(() => {
-  postOnce({ cmd: "ping", note: "onInstalled" }, "onInstalled");
-});
+function scheduleReconnect() {
+  const wait = Math.min(reconnectDelay, RECONNECT_MAX_MS);
+  reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
+  console.log("[mouseless-bg] reconnect in", wait + "ms");
+  setTimeout(connect, wait);
+}
 
-chrome.runtime.onStartup.addListener(() => {
-  postOnce({ cmd: "ping", note: "onStartup" }, "onStartup");
-});
-
-// On user click: query the active tab for hints, ship them off.
-chrome.action.onClicked.addListener(async (tab) => {
-  if (!tab || !tab.id) {
-    console.warn("[mouseless-bg] action.onClicked but no active tab");
-    return;
-  }
-  console.log("[mouseless-bg] action.onClicked — requesting hints from tab", tab.id);
-  let response;
+function connect() {
+  if (port) return;
+  console.log("[mouseless-bg] connecting to", HOST);
   try {
-    response = await chrome.tabs.sendMessage(tab.id, { type: "list_hints" });
+    port = chrome.runtime.connectNative(HOST);
   } catch (e) {
-    console.warn("[mouseless-bg] tabs.sendMessage failed:", e.message,
-      "(content script not injected on this page? chrome:// / store pages are off-limits)");
+    console.warn("[mouseless-bg] connectNative threw:", e.message);
+    scheduleReconnect();
     return;
   }
-  if (!response || response.type !== "hints") {
-    console.warn("[mouseless-bg] unexpected response shape:", response);
+
+  port.onMessage.addListener(handleFromNative);
+  port.onDisconnect.addListener(() => {
+    const err = chrome.runtime.lastError;
+    disconnectPort(err ? err.message : "clean");
+    scheduleReconnect();
+  });
+
+  // Send an initial ping so Mouseless knows we're alive and to
+  // confirm the link end-to-end. Reset backoff once we have a port —
+  // future disconnects start their own escalation.
+  reconnectDelay = RECONNECT_BASE_MS;
+  port.postMessage({ cmd: "ping", note: "extension SW connected" });
+  console.log("[mouseless-bg] connected, sent initial ping");
+
+  keepaliveTimer = setInterval(() => {
+    if (!port) return;
+    try {
+      port.postMessage({ cmd: "keepalive", at: Date.now() });
+    } catch (e) {
+      console.warn("[mouseless-bg] keepalive write failed:", e.message);
+      disconnectPort("keepalive write failed");
+      scheduleReconnect();
+    }
+  }, KEEPALIVE_MS);
+}
+
+// Mouseless → extension router. The only inbound message we currently
+// handle from native is `{cmd:"list_hints"}` (Mouseless wants the
+// active tab's clickable list). pong / keepalive_ack ignored.
+async function handleFromNative(msg) {
+  if (!msg || typeof msg !== "object") {
+    console.log("[mouseless-bg] recv non-object from native:", msg);
     return;
   }
-  console.log("[mouseless-bg] got", response.hints.length, "hints in",
-    response.ms + "ms — forwarding to native");
-  postOnce({
-    cmd: "hints",
-    url: response.url,
-    viewport: response.viewport,
-    ms: response.ms,
-    hints: response.hints,
-  }, "action.onClicked");
+  if (msg.cmd === "list_hints") {
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      if (!tab || !tab.id) {
+        console.warn("[mouseless-bg] list_hints: no active tab");
+        port?.postMessage({ type: "hints", url: null, hints: [], error: "no_active_tab" });
+        return;
+      }
+      let resp;
+      try {
+        resp = await chrome.tabs.sendMessage(tab.id, { type: "list_hints" });
+      } catch (e) {
+        // chrome:// and Web Store pages don't allow content scripts.
+        console.warn("[mouseless-bg] list_hints: tabs.sendMessage failed:", e.message);
+        port?.postMessage({
+          type: "hints", url: tab.url, hints: [],
+          error: "content_script_unavailable",
+        });
+        return;
+      }
+      if (!resp || resp.type !== "hints") {
+        console.warn("[mouseless-bg] list_hints: bad cs response:", resp);
+        port?.postMessage({ type: "hints", url: tab.url, hints: [], error: "bad_response" });
+        return;
+      }
+      port?.postMessage({
+        type: "hints",
+        url: resp.url,
+        viewport: resp.viewport,
+        ms: resp.ms,
+        hints: resp.hints,
+      });
+      console.log("[mouseless-bg] list_hints →", resp.hints.length, "hints, sent to native");
+    } catch (e) {
+      console.warn("[mouseless-bg] list_hints handler threw:", e);
+    }
+    return;
+  }
+  // Other server-initiated messages (future: invalidate caches, etc.).
+  console.log("[mouseless-bg] recv from native:", msg);
+}
+
+// Open the port the first time the SW wakes for any reason. Re-fired
+// on each cold start.
+chrome.runtime.onInstalled.addListener(connect);
+chrome.runtime.onStartup.addListener(connect);
+
+// Action click: still useful as a manual "kick the connection" — if
+// the user thinks the bridge is wedged, clicking the toolbar icon
+// forces a reconnect.
+chrome.action.onClicked.addListener(() => {
+  console.log("[mouseless-bg] action.onClicked — forcing reconnect");
+  disconnectPort("manual reconnect");
+  connect();
 });
+
+// SW could load mid-flight (e.g., chrome resumed from sleep, event
+// fired). If no port exists by the time module top-level runs,
+// connect now too.
+if (!port) connect();

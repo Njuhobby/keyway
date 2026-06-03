@@ -32,12 +32,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 print("[mouseless] DEBUG overlay enabled (MOUSELESS_DEBUG_OVERLAY=1) — /tmp/mouseless-focused.png written on every OP scan, +30-80ms background")
             }
 
-            // Browser-extension bridge (P1: ping/pong only — see
-            // specs/browser-support-design.md). Handler echoes
-            // received message back; once the bridge CLI and
-            // extension land, this becomes the real "list_hints"
-            // routing surface.
+            // Browser-extension bridge. Incoming messages:
+            //   - cmd:"ping"      → reply with pong (sanity check)
+            //   - cmd:"keepalive" → no reply (silent ack, just keeps
+            //                       the SW + port alive)
+            //   - type:"hints"    → consumed by BridgeServer's
+            //                       awaitResponse path before this
+            //                       handler sees it (BrowserProvider)
             BridgeServer.shared.start { msg, reply in
+                let cmd = msg["cmd"] as? String
+                if cmd == "keepalive" { return }
                 reply([
                     "type": "pong",
                     "echo": msg,

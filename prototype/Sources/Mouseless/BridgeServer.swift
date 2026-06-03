@@ -36,6 +36,33 @@ final class BridgeServer: @unchecked Sendable {
     private var listenFD: Int32 = -1
     private let acceptQueue = DispatchQueue(label: "mouseless.bridge.accept", qos: .utility)
 
+    /// Most recently connected client FD. `BrowserProvider` uses this as
+    /// the destination for outbound `list_hints` requests — only the
+    /// active browser instance can reasonably answer.
+    private var activeFD: Int32 = -1
+    private let stateLock = NSLock()
+
+    /// One-shot continuations keyed by expected `type` field of the
+    /// incoming response. Each entry is (token, continuation): the
+    /// token disambiguates the timeout path from the response path
+    /// when two waiters for the same type churn quickly. Single
+    /// waiter per type — a second `awaitResponse(ofType:)` for the
+    /// same type while one is pending displaces the prior (which
+    /// resolves with nil).
+    /// Sendable wrapper so the `[String: Any]` payload (which contains
+    /// JSON-deserialized Foundation values — thread-safe in practice
+    /// but invisible to Swift's checker) can ride across a continuation
+    /// without tripping the `sending` diagnostic.
+    struct ResponseBody: @unchecked Sendable {
+        let body: [String: Any]
+    }
+    private struct Waiter {
+        let token: UInt64
+        let continuation: CheckedContinuation<ResponseBody?, Never>
+    }
+    private var waiters: [String: Waiter] = [:]
+    private var nextWaiterToken: UInt64 = 1
+
     private static var socketPath: String {
         let dir = NSHomeDirectory() + "/Library/Application Support/Mouseless"
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
@@ -129,6 +156,7 @@ final class BridgeServer: @unchecked Sendable {
             var one: Int32 = 1
             _ = setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
             print("[bridge] client connected fd=\(client)")
+            stateLock.lock(); activeFD = client; stateLock.unlock()
             let q = DispatchQueue(label: "mouseless.bridge.conn.\(client)", qos: .utility)
             q.async { [weak self] in
                 self?.connectionLoop(client: client)
@@ -139,16 +167,19 @@ final class BridgeServer: @unchecked Sendable {
     private func connectionLoop(client: Int32) {
         defer {
             close(client)
+            stateLock.lock()
+            if activeFD == client { activeFD = -1 }
+            stateLock.unlock()
             print("[bridge] client disconnected fd=\(client)")
         }
         while true {
             var lenBytes = [UInt8](repeating: 0, count: 4)
             guard readFull(client, into: &lenBytes, count: 4) else { return }
             let len = lenBytes.withUnsafeBytes { $0.load(as: UInt32.self) }
-            // Sanity cap. 1 MB is far above any realistic hint list
-            // and protects against a misbehaving client sending
-            // garbage length prefixes.
-            if len == 0 || len > 1024 * 1024 {
+            // Sanity cap raised to 16 MB because hint lists for big SPA
+            // pages (e.g., GitHub PR diff with many comments) can run
+            // 200-500 KB; 1 MB was fine for ping but tight for hints.
+            if len == 0 || len > 16 * 1024 * 1024 {
                 print("[bridge] bad message length \(len) fd=\(client) — closing")
                 return
             }
@@ -159,7 +190,30 @@ final class BridgeServer: @unchecked Sendable {
                 print("[bridge] bad JSON fd=\(client)")
                 return
             }
-            print("[bridge] recv fd=\(client) msg=\(obj)")
+            // Cheap log line: full dict for small messages, type+size
+            // for big ones so a 500 KB hint dump doesn't smear stdout.
+            // Keepalive pings (every 20s from extension SW) skipped —
+            // not interesting noise.
+            let isKeepalive = (obj["cmd"] as? String) == "keepalive"
+            if !isKeepalive {
+                let preview: String
+                if body.count < 256 {
+                    preview = "\(obj)"
+                } else {
+                    preview = "\(obj["type"] ?? obj["cmd"] ?? "?") (\(body.count) bytes)"
+                }
+                print("[bridge] recv fd=\(client) msg=\(preview)")
+            }
+
+            // If this message is a response someone is awaiting
+            // (matched by `type`), resume the continuation and skip
+            // the user handler. Otherwise treat it as a request and
+            // let the handler decide whether to reply.
+            if let type = obj["type"] as? String,
+               let waiter = takeWaiter(forType: type) {
+                waiter.continuation.resume(returning: ResponseBody(body: obj))
+                continue
+            }
             self.handler(obj) { [weak self] reply in
                 guard let self else { return }
                 guard let replyData = try? JSONSerialization.data(withJSONObject: reply) else {
@@ -169,6 +223,60 @@ final class BridgeServer: @unchecked Sendable {
                 self.writeMessage(client: client, data: replyData)
             }
         }
+    }
+
+    // MARK: - Outbound (Mouseless → extension)
+
+    /// Send a JSON message to the most recently connected client.
+    /// Returns false if no client is connected, or the write failed.
+    @discardableResult
+    func sendToActive(_ message: [String: Any]) -> Bool {
+        stateLock.lock()
+        let fd = activeFD
+        stateLock.unlock()
+        guard fd >= 0 else { return false }
+        guard let data = try? JSONSerialization.data(withJSONObject: message) else { return false }
+        writeMessage(client: fd, data: data)
+        return true
+    }
+
+    /// Wait up to `timeout` seconds for the next incoming message whose
+    /// `type` field equals `type`. Returns the message dict or nil on
+    /// timeout. A new awaiter for the same type displaces the old one
+    /// (old resolves nil).
+    func awaitResponse(ofType type: String, timeout: TimeInterval) async -> [String: Any]? {
+        let resp: ResponseBody? = await withCheckedContinuation { (cont: CheckedContinuation<ResponseBody?, Never>) in
+            stateLock.lock()
+            let token = nextWaiterToken
+            nextWaiterToken &+= 1
+            let prior = waiters[type]
+            waiters[type] = Waiter(token: token, continuation: cont)
+            stateLock.unlock()
+            // Resolve any displaced waiter so its caller doesn't hang.
+            prior?.continuation.resume(returning: nil)
+
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                guard let self else { return }
+                if let stale = self.takeWaiter(forType: type, withToken: token) {
+                    stale.continuation.resume(returning: nil)
+                }
+            }
+        }
+        return resp?.body
+    }
+
+    /// Atomically remove + return the waiter for `type`. If `withToken`
+    /// is supplied, only return the waiter when its token matches
+    /// (timeout path so it doesn't yank a newer waiter that displaced
+    /// the one whose deadline we're firing).
+    private func takeWaiter(forType type: String, withToken token: UInt64? = nil) -> Waiter? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard let w = waiters[type] else { return nil }
+        if let token, w.token != token { return nil }
+        waiters[type] = nil
+        return w
     }
 
     private func readFull(_ fd: Int32, into buf: inout [UInt8], count: Int) -> Bool {
