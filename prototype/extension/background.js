@@ -92,6 +92,15 @@ function connect() {
     if (w && w.focused) reportActive("initial focus check");
   }).catch(() => { /* no windows yet — fine, will fire on first focus */ });
 
+  // Inject content scripts into tabs that were already open before
+  // this SW load. Chrome's content_scripts manifest only inject on
+  // tab navigation AFTER extension install/reload — pre-existing
+  // tabs are otherwise left without our scripts, and tabs.sendMessage
+  // fails with "Receiving end does not exist". Auto-refreshing them
+  // here removes the "reload extension → must manually refresh every
+  // open tab" footgun.
+  refreshExistingTabs();
+
   keepaliveTimer = setInterval(() => {
     if (!port) return;
     try {
@@ -114,9 +123,20 @@ async function handleFromNative(msg) {
   }
   if (msg.cmd === "list_hints") {
     try {
-      const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      // Find the user-visible active tab. `lastFocusedWindow: true` is
+      // the precise filter most of the time, but occasionally (e.g.,
+      // DevTools popped out, sw just woke) it returns empty even with
+      // the user squarely on a normal tab. Fall back through cheaper
+      // queries before giving up.
+      let tab = (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0];
+      if (!tab) tab = (await chrome.tabs.query({ active: true, currentWindow: true }))[0];
+      if (!tab) {
+        const win = await chrome.windows.getLastFocused({ populate: true }).catch(() => null);
+        tab = win?.tabs?.find((t) => t.active);
+      }
+      if (!tab) tab = (await chrome.tabs.query({ active: true }))[0];
       if (!tab || !tab.id) {
-        console.warn("[mouseless-bg] list_hints: no active tab");
+        console.warn("[mouseless-bg] list_hints: no active tab found via any query");
         port?.postMessage({ type: "hints", url: null, hints: [], error: "no_active_tab" });
         return;
       }
@@ -174,6 +194,40 @@ function reportActive(reason) {
     return;
   }
   console.log("[mouseless-bg] reported i_am_active:", reason);
+}
+
+async function refreshExistingTabs() {
+  if (!chrome.scripting) {
+    console.warn("[mouseless-bg] no chrome.scripting (missing permission?) — skipping refresh");
+    return;
+  }
+  let tabs = [];
+  try {
+    tabs = await chrome.tabs.query({});
+  } catch (e) {
+    console.warn("[mouseless-bg] tabs.query failed:", e.message);
+    return;
+  }
+  let injected = 0, skipped = 0, failed = 0;
+  for (const tab of tabs) {
+    if (!tab.id) { skipped++; continue; }
+    // url may be undefined without "tabs" permission, but chrome://,
+    // chrome-extension://, edge://, file:// without permission, etc.
+    // would all fail anyway — let executeScript reject and count.
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id, allFrames: true },
+        files: ["detector.js", "content_script.js"],
+      });
+      injected++;
+    } catch (e) {
+      // chrome:// pages, Web Store, error pages, and the like —
+      // executeScript throws. Not actually an error.
+      failed++;
+    }
+  }
+  console.log("[mouseless-bg] refreshed existing tabs:",
+              injected, "injected,", failed, "rejected (chrome:// etc),", skipped, "skipped");
 }
 
 chrome.windows.onFocusChanged.addListener((winId) => {
