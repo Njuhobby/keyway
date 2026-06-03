@@ -27,58 +27,54 @@ enum BrowserProvider {
     }
 
     /// Ask the browser extension for the active tab's hints. Returns
-    /// `nil` if no extension is connected, the request times out, or
-    /// the response is malformed — caller decides whether to fall back
-    /// to OP.
+    /// the (possibly empty) list of hints — **the extension's answer
+    /// is authoritative for browser apps**.
     ///
-    /// - parameter timeout: how long to wait for the extension's
-    ///   response before giving up. 400ms is comfortable: P2 stage A
-    ///   measured ~35ms on GitHub front page, so even big SPAs should
-    ///   fit; longer than this and we'd rather show OP-based hints
-    ///   than make the user wait staring at no overlay.
-    static func fetchHints(timeout: TimeInterval = 0.4) async -> [Hint]? {
-        // Pass the frontmost bundleID so BridgeServer's send-side guard
-        // can refuse to route the request to a non-matching browser's
-        // bridge (e.g., user is on Safari but only Chrome's extension
-        // is connected — would otherwise overlay Chrome's hints on
-        // Safari's window).
+    /// Design decision: once we route to the browser branch, no OP
+    /// fallback. Cases:
+    ///   - extension not connected / bundleID mismatch / timeout:
+    ///     returns []. User sees 0 web hints. They get Dock + menubar
+    ///     hints only.
+    ///   - extension returns `error: content_script_unavailable`
+    ///     (active tab is `chrome://` / Web Store / etc. — content
+    ///     scripts can't inject there): returns []. Same outcome.
+    ///   - extension returns empty hint list (blank tab, fully-OCR-
+    ///     resistant page, etc.): returns []. Accept it.
+    ///   - extension returns N hints: returns them.
+    ///
+    /// Rationale: keeping the two paths decoupled is cleaner than
+    /// mixing OCR-based hints with DOM-based hints on the same page —
+    /// users learn one mental model per app (browser apps = DOM
+    /// truth; non-browser apps = AX/OP).
+    ///
+    /// - parameter timeout: how long to wait. 400ms is generous;
+    ///   P2 stage A measured ~35ms on GitHub front page.
+    static func fetchHints(timeout: TimeInterval = 0.4) async -> [Hint] {
         let bundleID = await MainActor.run {
             NSWorkspace.shared.frontmostApplication?.bundleIdentifier
         }
+        // sendToActive returns false if extension isn't connected OR
+        // is connected but for a different browser than the frontmost.
+        // In either case, no extension to ask → accept 0 hints.
         guard BridgeServer.shared.sendToActive(["cmd": "list_hints"],
                                                 expectingBrowserBundleID: bundleID) else {
-            print("[browser-provider] no matching extension connection — skipping")
-            return nil
+            print("[browser-provider] no matching extension connection — 0 hints")
+            return []
         }
         guard let response = await BridgeServer.shared.awaitResponse(
             ofType: "hints",
             timeout: timeout
         ) else {
-            print("[browser-provider] timeout waiting for hints (>\(Int(timeout * 1000))ms)")
-            return nil
+            print("[browser-provider] timeout waiting for hints (>\(Int(timeout * 1000))ms) — 0 hints")
+            return []
         }
-        // Extension reported a fatal-for-this-tab condition — most
-        // commonly `content_script_unavailable` when the active tab is
-        // a `chrome://` / Web Store / error page. Treat as nil so
-        // HintMode.collectAll falls through to OmniParser; otherwise
-        // user would see only Dock + menubar hints with no web content
-        // hints at all (which is what they hit and got confused by).
         if let err = response["error"] as? String {
-            print("[browser-provider] extension reported error=\(err) — falling back to OP")
-            return nil
+            print("[browser-provider] extension reported error=\(err) — accepting 0 hints")
+            return []
         }
         guard let rawHints = response["hints"] as? [[String: Any]] else {
-            print("[browser-provider] response missing 'hints' array: \(response)")
-            return nil
-        }
-        // Even without an explicit error, an empty array on a browser
-        // app is suspicious (a real web page should have at least one
-        // clickable). Could be a blank page or a still-loading SPA;
-        // either way the user gets a better experience by routing to
-        // OP than by seeing empty browser hints + no content fallback.
-        if rawHints.isEmpty {
-            print("[browser-provider] empty hint array — falling back to OP")
-            return nil
+            print("[browser-provider] malformed response (no 'hints' array) — 0 hints")
+            return []
         }
         let hints = rawHints.compactMap { Hint(rawDict: $0) }
         print("[browser-provider] received \(hints.count) hints from extension")

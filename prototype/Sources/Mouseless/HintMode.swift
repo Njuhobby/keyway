@@ -437,18 +437,14 @@ final class HintMode {
             let useAX = bundleID.map { AppRegistry.shouldUseAXForFocused(bundleID: $0) } ?? false
 
             if isBrowser {
-                // Browser path: ask the extension for DOM-level hints.
-                // Returns nil if the extension isn't connected (the
-                // user hasn't installed it yet, the SW went idle, etc.)
-                // — fall back to OP in that case so we degrade gracefully
-                // instead of leaving the user with no hints at all.
+                // Browser path is **authoritative** for browser apps.
+                // No OmniParser fallback: the extension's answer wins
+                // even when it's empty (chrome://, content-script-blocked
+                // tabs, blank pages, extension not installed). Keeping
+                // the two paths decoupled preserves one mental model
+                // per app — browser = DOM truth.
                 routeLabel = "Browser(ext)"
-                if let hints = await BrowserProvider.fetchHints() {
-                    focusedBrowserOut = hints
-                } else {
-                    routeLabel = "Browser→OP(fallback)"
-                    focusedOmniOut = await OmniParserPath.collect(isolateApp: isolateApp)
-                }
+                focusedBrowserOut = await BrowserProvider.fetchHints()
             } else {
                 routeLabel = useAX ? "AX(whitelist)" : "OP(default)"
             }
