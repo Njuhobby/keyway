@@ -43,6 +43,7 @@ enum HintResult {
     case pending    // 前缀匹配多个 hint，等更多字符（typed 已更新）
     case committed  // 唯一匹配，已点击
     case ignored    // 不匹配任何 hint 前缀：误按，吞掉不退出（typed 不变）
+    case moved      // 唯一匹配 + move-armed：光标已 warp，hints 留着、会话不结束
 }
 
 enum ClickAction {
@@ -306,11 +307,21 @@ final class HintMode {
             return .ignored
         }
         if matches.count == 1 && matches[0].label == next {
-            // Move-armed (`'` prefix) overrides the modifier-derived
-            // action: the pick warps the cursor instead of clicking.
-            let effectiveAction: ClickAction = moveArmed ? .move : action
             lastCommittedTarget = matches[0]
-            commit(target: matches[0], action: effectiveAction)
+            if moveArmed {
+                // Move pick = navigation, not a terminal action. Warp
+                // the cursor, then **stay active**: the cursor moved
+                // but page content didn't, so the same targets are
+                // still valid — just reset typed + disarm and re-show
+                // (no re-scan, instant, no flash). Caller keeps the
+                // TAP/sticky session alive instead of exiting.
+                commit(target: matches[0], action: .move)
+                typed = ""
+                moveArmed = false
+                renderOverlay()
+                return .moved
+            }
+            commit(target: matches[0], action: action)
             deactivate()
             return .committed
         }

@@ -2237,6 +2237,14 @@ final class VimSession {
         switch hint.handle(char: ch, action: action) {
         case .pending, .ignored:
             break   // .ignored = misfire, swallowed; stay in TAP
+        case .moved:
+            // Move-only pick: cursor warped, hints stay shown (HintMode
+            // already re-rendered them, disarmed, cleared typed). Stay
+            // in TAP regardless of sticky — a move is navigation, not a
+            // terminal action, so the user keeps working (pick again,
+            // hjkl fine-tune, c to click). Refresh HUD to drop the
+            // "· move" suffix now that the arm consumed itself.
+            renderModeHUD()
         case .committed:
             if sticky {
                 // Re-scan and stay in TAP. Single re-hint ~100ms after the
