@@ -1060,23 +1060,14 @@ final class VimSession {
         if allowsMoveHere, paletteBuffer == nil,
            flags.intersection([.maskCommand, .maskControl]).isEmpty,
            let dir = Self.moveDirection(for: keyCode) {
-            // Double-tap detection (TAP only, not dragging — drag wants
-            // every press to extend the held drag, jumping mid-drag
-            // would teleport the drop target unpredictably). Within
-            // 150ms of the last hjkl keyUp of the SAME direction =
-            // discrete 1/4-screen jump. Refresh timestamp on every
-            // jump so OS key-repeat from a held second tap chains
-            // more jumps. Modifiers ignored on jump — Shift held +
-            // double-tap still jumps the same 1/4 (no "double-tap
-            // + Shift = 1/2" yet; could add later if useful).
-            if !dragHeld {
-                let now = CFAbsoluteTimeGetCurrent()
-                if let lastUp = lastTapHjklKeyUp[dir],
-                   now - lastUp < windowReverseTapWindow {
-                    jumpCursor(direction: dir, fraction: 0.25)
-                    lastTapHjklKeyUp[dir] = now
-                    return true
-                }
+            // Double-tap detection (TAP normal here; SCROLL uses the
+            // same helper in handleScrollNormal — hjkl is unified
+            // across both modes so the jump gesture must be too).
+            // Excluded in drag sub-state: every press there extends
+            // the held drag, jumping mid-drag would teleport the drop
+            // target unpredictably.
+            if !dragHeld && maybeJumpOnDoubleTap(direction: dir) {
+                return true
             }
             // Option allowed through (unlike Cmd/Ctrl) because hjkl aren't
             // hint letters, so Option+hjkl can't collide with the Option =
@@ -1714,8 +1705,11 @@ final class VimSession {
 
         // h/j/k/l → move the cursor (Shift fast / Option slow) — SAME
         // keys as TAP (unified, vim hjkl). j/k are free for move here
-        // because SCROLL scrolls with d/u.
+        // because SCROLL scrolls with d/u. Double-tap → 1/4-screen
+        // jump goes through the same helper as TAP so the gesture is
+        // consistent across modes.
         if let dir = Self.moveDirection(for: keyCode) {
+            if maybeJumpOnDoubleTap(direction: dir) { return true }
             mover.start(direction: dir, speed: Self.moveSpeed(from: flags))
             return true
         }
@@ -1773,8 +1767,13 @@ final class VimSession {
                 controller.stop()           // stop continuous scroll (vertical or horizontal)
                 return true
             }
-            if Self.moveDirection(for: keyCode) != nil {
+            if let dir = Self.moveDirection(for: keyCode) {
                 mover.stop()                // stop continuous cursor move (hjkl)
+                // Record keyUp for double-tap → jump detection. Shared
+                // dictionary with TAP (`lastTapHjklKeyUp`); 150ms window
+                // naturally filters cross-mode chaining (Caps Lock chord
+                // to switch modes always takes >150ms).
+                lastTapHjklKeyUp[dir] = CFAbsoluteTimeGetCurrent()
                 return true
             }
             return false
@@ -1841,6 +1840,26 @@ final class VimSession {
         case KeyCode.l: return .right
         default: return nil
         }
+    }
+
+    /// `hh` / `jj` / `kk` / `ll` (release-then-press within
+    /// `windowReverseTapWindow` = 150ms) → discrete 1/4-screen jump
+    /// in that direction. Returns true if a jump fired (caller skips
+    /// the regular continuous mover.start). Refreshes the timestamp
+    /// so OS key-repeat from a held second tap chains more jumps.
+    ///
+    /// Called from both TAP (handle's early intercept) and SCROLL
+    /// (handleScrollNormal) so the gesture matches the modes.md §4/§5
+    /// "hjkl unified across TAP and SCROLL" promise.
+    private func maybeJumpOnDoubleTap(direction: MouseMover.Direction) -> Bool {
+        let now = CFAbsoluteTimeGetCurrent()
+        guard let lastUp = lastTapHjklKeyUp[direction],
+              now - lastUp < windowReverseTapWindow else {
+            return false
+        }
+        jumpCursor(direction: direction, fraction: 0.25)
+        lastTapHjklKeyUp[direction] = now
+        return true
     }
 
     /// Teleport the cursor by `fraction` of the containing screen's

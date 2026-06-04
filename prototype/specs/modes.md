@@ -237,6 +237,7 @@ MouseSynth.click(at: MouseSynth.cursorPosition(), button: .left, count: 1)
 | `G` (Shift+g) | 跳到选中区域**底部**（仅垂直） |
 | `h/j/k/l` (bare) | 移光标 左/下/上/右（vim hjkl，**与 TAP 统一**，按住连续） |
 | `Shift + hjkl` / `Option + hjkl` | 加速 / 精细移光标 |
+| **双击** `hh` / `jj` / `kk` / `ll` | 跳跃 1/4 当前屏方向距离（跟 TAP §4.3 一样的双击-跳跃机制，共用 `maybeJumpOnDoubleTap` helper + `lastTapHjklKeyUp` 字典；150ms 内连按） |
 | `c` (bare) | 当前光标位置左键单击（留在 SCROLL） |
 | `Shift / Option + c` | 当前光标位置 双击 / 右键 |
 | `Enter` | **放行**给焦点 app（与 TAP normal §4 统一） |
