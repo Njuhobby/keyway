@@ -1,226 +1,307 @@
-# Per-App 修正层设计（模板匹配 + OCR landmark）
+# Per-App 修正层设计（AX walker 覆写为主）
 
-> **状态：设计草稿，暂不实现**。这是 OmniParser 集成（P0-P6）之后规划的一个**重要独立模块**。本文固化设计推理 + 被否决的方案，等优先级到了直接照此实现。
+> **状态：设计草稿，暂不实现**。OmniParser 集成（P0-P6）之后规划的**重要独立模块**，也是 Mouseless 主要的**护城河**。本文固化设计推理 + 被否决/降级的方案，等优先级到了直接照此实现。
 >
-> 相关：`omniparser-fallback-design.md`（OP 路径主体）、`omniparser-integration-roadmap.md`。
+> 相关：`omniparser-fallback-design.md`（OP 视觉路径主体）、`browser-support-design.md`（浏览器走扩展 DOM，是这套思路在浏览器域的对应物）。
 
-## 1. 动机：没有通用的最强标准
+---
 
-OmniParser 路径上线后暴露的根本问题：
+## 0. TL;DR — 三层防线
 
-- **OP 不是 100% 准确**——对不同 app 召回率/精度有差别（WeChat 上漏了相机 icon、左下角三横杠菜单；标题栏文字被误标）
-- **confidence 阈值不通用**——0.3 这个值，不要说每个 app 不一样，**同一个 app 内**有些 <0.3 该忽略、有些该保留
-- **OP 的 box 是匿名的**——只知道"这是 interactive element"+ confidence，**不知道这是相机还是文件夹**
+```
+1. per-app AX walker 覆写（主力）  —— 80%+ 长尾 app，声明式 JSON 规则，~1-5ms
+2. OmniParser 视觉路径（fallback） —— 真·AX 黑洞 app（纯 canvas / 自绘），已实现
+3. pattern exclude / threshold override（辅助） —— OP/AX 误报与调参
+```
 
-结论：要让 Mouseless 成熟，**必须有 per-app 个性化修正**。这个修正能力本身可能是产品的护城河。
+**护城河 = 社区共建的、每个 app 的 AX 适配规则库** —— 把每个 app 怪异的 accessibility 树翻译成精确的可点元素。纯文本、可 diff、可 review、零模型维护、贡献门槛低到任何能用 AX Inspector 戳一下的人都能提 PR。
+
+NCC 模板匹配从早期设计的"主力"**降级到附录**（§A1）——重新分析后它的适用面被 AX 覆写从上面挤掉、被 OP 从下面盖住，夹在中间几乎没有立足之地。**v1 不实现，大概率永不实现。**
+
+---
+
+## 1. 动机：AX-bad ≠ AX-absent
+
+OmniParser 路径上线后的根本问题：OP 不是 100% 准确（漏 icon-only 按钮、误标标题栏文字）、confidence 阈值不通用、box 是匿名的（不知道是相机还是文件夹）。所以 Mouseless 成熟必须有 **per-app 个性化修正**。
+
+但关键的二次洞察（决定了主力机制）：**绝大多数"OP-bad"的 app,其实 AX 不是"没有",而是"不规范"**。
+
+例子 —— Slack 的 Compose 按钮在 AX 树里是：
+
+```
+AXGroup (subrole=nil, action=nil)
+  └── AXGroup
+        └── AXImage (action=AXPress, title="Compose")   ← 在这里!
+```
+
+我们的通用 walker 跑 role 白名单 + depth 限制时跳过了这种"罩在两层 AXGroup 里、role 是 AXImage 但带 AXPress action"的元素。**App 是有信息的,我们没读到。**
+
+真·视觉零 AX 的 app（WeChat 聊天自绘区、Figma canvas、网页游戏）是**少数**。Slack / Notion / Linear / Discord / Cursor / 大多数 Electron 和 SwiftUI app 都有相当程度的 AX，只是结构怪。
+
+**结论:对长尾 app 做深度适配,"customize AX 规则"是比"视觉补漏"更好的路** —— 所有规则都能用文字表示、便宜、抗 app 升级、社区可贡献。只有 app AX 真的啥都没有时才退回 OP。
+
+---
 
 ## 2. 为什么不是 per-app 模型 fine-tuning
 
-直觉上"为每个 app 训练/微调一套 OP 模型，教它相机可点"——**否决，这是错误的第一步**。
+直觉上"为每个 app 微调一套 OP 模型，教它相机可点"——**否决**。
 
 | 维度 | per-app 模型 fine-tuning |
 | --- | --- |
-| 标注 | 人工框出 app **所有界面状态**的每个可点元素，几百-几千张/app |
+| 标注 | 人工框出 app 所有界面状态的每个可点元素，几百-几千张/app |
 | 训练 | GPU + 管线 + 调参，per app 重来 |
-| 体积 | 每个 fine-tuned 模型 ~38MB，100 app = **3.8 GB** |
+| 体积 | 每个 ~38MB，100 app = **3.8 GB** |
 | 维护 | **app 一更新 UI 模型就过时** → 重标注 + 重训 |
-| 讽刺点 | 你标注"相机可点"的那个框，**AX / 模板匹配本来就免费能拿到** |
+| 讽刺点 | 你标注"相机可点"的那个框，**AX 本来就免费能拿到**（只是 walker 没收）|
 
-fine-tuning 是"完全没有结构化信息、只能从像素学"时的最后手段。我们对很多 app 有更便宜的信息来源（外观模板、文字、几何），不该一上来就丢掉走纯视觉学习。
+fine-tuning 是"完全没有结构化信息、只能从像素学"时的最后手段。我们对绝大多数 app 有更便宜的信息源（AX 树本身）。真要训模型，也该是拿**聚合** UI 数据训一个更强的**通用**检测器替换 OmniParser，不是 per-app 一个模型。
 
-**真正想训模型的话**，也应该是拿**聚合**的 UI 数据训一个**更强的通用检测器**（替换当前 OmniParser），而不是 per-app 一个模型。那是长期后台投资，不是 per-app 定制的手段。
+---
 
-## 3. 核心洞察：landmark 自我门控，绕开窗口分类
+## 3. 核心洞察：self-gating，绕开窗口分类
 
-最初的修正方案想法是"修正 JSON"：per-app 配置 include（补 OP 漏的）+ exclude（删 OP 误报的）。但撞到一个**死结**：
+修正方案的第一个死结：**一个 app 不止一种窗口布局**（WeChat 有主窗口、通讯录、朋友圈、设置、图片预览……）。一条"左下角有相机"的规则套到设置窗口就凭空造假 hint。
 
-**一个 app 不止一种窗口布局**。WeChat 有主窗口、通讯录、朋友圈、设置、小程序、图片预览……每个布局不同。一条"左下角有相机"的规则套到设置窗口就凭空造个假 hint。
+试图做"窗口分类器"（靠标题/尺寸/AXIdentifier 判断布局）是死结：标题会变、用户会 resize、很多 app 不设 AXIdentifier。
 
-这逼出子问题："运行时怎么知道我在哪个布局？" 试图做"窗口分类器"（靠窗口标题/尺寸/AXIdentifier 判断布局）是**死结**：标题会变（聊天名）、用户会 resize、很多 app 不设 AXIdentifier——没有可靠信号。
+**破解：不分类窗口。让规则锚到一个可判定的条件，条件的"成不成立"本身充当 gate。** 对 AX 覆写来说尤其干净 —— 规则是"AX 树里存在满足 predicate 的元素"，predicate 匹配不到就自动静默，零误报。设置窗口里没有那个 Compose 结构 → 规则自然不产出 hint。**分类窗口这一步直接消失。**
 
-**破解：不要分类窗口。把修正锚到 landmark，让 landmark 的"在不在"本身充当条件（self-gating）**。
+---
 
-```
-不是：判断"我在主窗口" → 套"左下角加相机"规则
-而是：找"相机这个 landmark"在不在 → 在就加 hint，不在就静默
-```
+## 4. AX walker 覆写：主力机制
 
-landmark 在 → 规则生效；不在（设置窗口没相机）→ 规则自动失效，零误报。**分类窗口这一步直接消失**。
+要救的是"**AX 树里有这个元素,只是通用 walker 没收**"。覆写 = 一份声明式 JSON,告诉 walker 在某个 app 里**额外**把满足某些条件的元素算作可点。
 
-## 4. include 机制：模板匹配（唯一主力）
+### 4.1 数据形态
 
-要**补一个 OP 没检测到的特定元素**（相机 icon），必须告诉系统"它长什么样"——OP 帮不上（它就是没检测到）、几何帮不上（匿名框）。**唯一的信息来源是外观**。所以 include 几乎只能靠**视觉模板匹配**。
-
-### 4.1 算法：NCC（归一化互相关）
-
-在截图里找小模板（相机 icon 36×36）出现在哪：模板在截图上逐位置滑动，每位置算相似度，找峰值。
+每个 app 一份 `patch.json` + 可选 README：
 
 ```
-NCC(x,y) = Σ[(图像块 - 均值)·(模板 - 均值)] / (σ_图 · σ_模板 · N)
-结果 ∈ [-1,1]，1 = 完美吻合
+patches/com.tinyspeck.slackmacgap/
+├── patch.json
+└── README.md          # 维护者备注（哪个版本 teach 的、截图示例）
 ```
 
-**归一化的意义**：除掉均值+方差，匹配**图案**而非绝对亮度。暗色模式 / 半透明背景下，同一 icon 也能认出。max NCC > 阈值（~0.85）→ icon 在那；低于 → 不在这张图（self-gating）。
+`patch.json`（schema 草稿）：
 
-### 4.2 性能：别扫全图
+```jsonc
+{
+  "schema_version": 1,
+  "bundle_id": "com.tinyspeck.slackmacgap",
+  "app_name": "Slack",
+  "maintainer": "@njuhobby",
+  "verified_against": ["4.36.x", "4.37.x"],
 
-朴素全图 `2000×1500×36×36 ≈ 40 亿次` 太慢。三个加速：
+  "additional_clickable": [
+    {
+      "role": "AXImage",
+      "must_have_action": "AXPress",
+      "comment": "侧栏 Compose / Threads / Mentions icon"
+    },
+    {
+      "role": "AXGroup",
+      "must_have_subrole": "AXButton",
+      "comment": "自定义按钮 wrap 在 group 里"
+    }
+  ],
 
-- **限定搜索区域**：icon 在 chrome 区，只搜 ~200×800 带 → 几十 ms CPU / 几 ms GPU
-- **降采样**：模板 + 截图缩 2× → 运算降 16 倍
-- **存上次位置 + 小窗搜索**：只在 icon 上次出现处附近找 → 几乎免费
+  "exclude": [
+    { "role": "AXStaticText", "title_equals_window": true,
+      "comment": "标题栏文字" }
+  ],
 
-叠加后 **~5ms / 模板**。
-
-### 4.3 macOS 实现路径（无第三方依赖）
-
-| 路径 | 框架 | 评 |
-| --- | --- | --- |
-| **A. Accelerate (vImage/vDSP)** | 系统自带 | CPU SIMD，box filter 算均值 + 卷积算相关项，~50-100 行。**推荐起步** |
-| B. Metal Performance Shaders | 系统自带 | GPU 最快，setup 多 |
-| C. Vision feature print | 系统自带 | `VNGenerateImageFeaturePrintRequest`，对外观变化更鲁棒，但是"整块相似度"不擅长定位 |
-
-OpenCV 有现成 `matchTemplate` 但要背 ~30MB 依赖，不符合"只 bundle CoreML 模型、其余系统 API"路线。
-
-### 4.4 resize / 尺寸处理
-
-resize 改两样：**位置**（NCC 区域搜索处理）+ **尺寸**（NCC 不抗尺度）。
-
-关键事实：**macOS chrome icon resize 时尺寸固定**——工具栏相机永远 28×28，只是位置变。而我们 match 的恰是 chrome icon，不是会缩放的内容。所以**常规 resize 下 NCC 够用**。
-
-真会改尺寸的边缘 case：
-
-| 场景 | 处理 |
-| --- | --- |
-| 跨 retina ↔ 非 retina 屏 | 按 display backing scale factor 缩放模板，确定性解决 |
-| 系统"更大 UI"辅助设置 | 罕见，要扛上 multi-scale 匹配（×5 尺度，区域限定下仍可控）|
-
-### 4.5 teach 闭环（捕获模板）
-
-```
-教学（每 icon 一次性）：
-  1. 用户在 WeChat，OP 漏了相机
-  2. 触发 teach 模式（某热键）
-  3. 用户指向相机 icon
-  4. crop 周围 40×40 → 存模板 PNG
-  5. 记录 bundleID + 大致区域（"左侧栏 y≈40%"，给区域限定搜索用）
-
-运行时（每次扫描）：
-  1. OP 跑完产出 boxes
-  2. 加载该 app 模板库
-  3. 每模板在记录区域内 NCC 匹配
-  4. 匹配 > 阈值 → 合成 hint target
-  5. 跟 OP boxes 合并去重（IoU）
+  "fallback_op": false
+}
 ```
 
-教学者 = 我们（预置热门 app）+ 用户（自建，回流我们的库）。
+**格式决策（v1 拍板）**：
 
-### 4.6 安装包体积非问题
+- **JSON 不用 YAML** —— Foundation 原生 parse、零依赖、CI 工具好写。可读性对这种扁平结构够用。
+- **predicate 扁平、不做 role_path** —— 一条 rule 内字段 AND（role=AXImage 且 has AXPress）；多条 rule 之间 OR。不支持祖先链（"AXGroup → AXGroup → AXImage 才算"）。绝大多数 case 扁平 predicate 够；真需要路径精准防误命中再在 v2 加。
+- **二值判定、不做 score** —— rule `matches → clickable`，纯布尔。文本规则没必要装小数。
+- **`fallback_op` 默认 false** —— patch 存在即表示"这 app 走 AX 自洽,不需要 OP"。设 true 才在 AX 收完后再叠 OP 补漏（给"AX 拿到大部分 + 动态内容如聊天气泡需要视觉兜底"的混合 app 用）。默认 false 避免开发者忘记关、白付 OP 的 ~95ms。
 
-模板是极小 PNG（40×40 ≈ 1-4 KB）。每 app 5-15 个 chrome icon = 10-30 KB。
+predicate 可用字段（v1）：`role` / `subrole` / `must_have_action`（"AXPress"/"AXShowMenu"）/ `must_not_have_action` / `title_matches`（正则）等，按需扩。
 
-```
-100 app × 30 KB = 3 MB        ← 远小于已 bundle 的 39MB CoreML 模型
-1000 app × 30 KB = 30 MB
-对比 per-app 模型：100 app = 3.8 GB（1000 倍差距）
-```
+### 4.2 接入现有 walker
 
-且不用全 bundle：**curated 预置**（几 MB）+ **按需下载**长尾（安装包零增长）+ **用户生成**。模板匹配是 per-app 方案里**最省体积**的，小三个数量级。
-
-## 5. exclude 机制：pattern-based + 位置规则
-
-删 OP 误报（标题栏文字被标 hint）。
-
-**优先 pattern-based（跨布局通用）**：
+现状路由（`HintMode.collectAll`）：
 
 ```
-exclude: { ocrTextEquals: "$WINDOW_TITLE" }   // 删 OCR 文字 == 窗口标题的 box
+frontmost.bundleID
+   ├─ isBrowserApp → BrowserProvider（扩展 DOM）
+   ├─ shouldUseAXForFocused → AX walk（hardcoded whitelist）
+   └─ 其它 → OmniParser
 ```
 
-标题栏文字 == 窗口标题，这条**所有窗口布局通用**，不用 per-layout 配。位置 anchored 规则作后备。
+加 patch 后变成：
 
-（exclude 比 include 容易——它作用在 OP **已有**的 box 上，能做模式匹配；include 要凭空加，没法基于 OP 输出匹配。）
-
-## 6. OCR-text-landmark：降级的 fallback
-
-"可点元素在文字 'Search' 右边"——靠 OCR 找文字 landmark 定位。
-
-**成本是它的软肋**：要在 collect 时找 landmark 文字。
-
-| 做法 | 成本 |
-| --- | --- |
-| 全窗口 OCR | 50-200ms ← 太贵，**禁止** |
-| 区域限定 OCR（规则指定 landmark 在哪片）| ~5-10ms |
-
-**强制区域限定**。即便如此仍是三种里最贵。
-
-而且要跟 P6 的 commit-time OCR 区分清楚——那个是偶发（仅 center-in-inner 的点击）、影响单次点击延迟；这个是**每次 collect** 都跑、影响 hint 显示延迟，对延迟更敏感。
-
-**定位：只在模板匹配做不到时用**（靶子外观会变、没法存模板、但附近有稳定文字）。罕见。
-
-## 7. 被否决：OP-相对锚定
-
-曾设想"相机在文件夹 icon 右边"——**否决**。OP 的 box 是**匿名的**，不知道哪个是文件夹 icon，无法解析"相对某个有身份的框"。
-
-唯一不靠身份能成立的形式是**纯几何缺口检测**：
-
-```
-OP 检测到等间距图标行：[框][框][框][  ][框]
-中间有洞 → 推断漏了一个 → 补 hint
+```swift
+if let patch = AppPatchRegistry.shared.patch(for: bundleID) {
+    walker.run(window: focusedWindow, augmentedBy: patch)   // AX walk + 额外规则
+    if patch.fallbackOP { mergeOP(...) }                    // 默认不跑
+} else if AppRegistry.shouldUseAXForFocused(bundleID) {
+    walker.run(window: focusedWindow)                       // 原通用 walk
+} else {
+    OmniParserPath.collect()                                // 无 patch + 非白名单 → OP
+}
 ```
 
-但**又窄又险**：缺口可能是故意间距（分隔），补了就误报；只对规则排列有效；命中无保证。**大概率不值得做**。
+walker 判"某元素是否 clickable"时多过一遍 patch 的 `additional_clickable` 规则：
 
-一旦要身份，就塌回模板匹配（看长相）或 OCR（看旁边文字）——不是独立的第三种方法。
+```swift
+func isClickable(element, patch) -> Bool {
+    if defaultClickableHeuristics(element) { return true }   // 已有通用判定
+    if let patch, patch.additionalClickable.contains(where: { $0.matches(element) }) {
+        return true                                          // app-specific 补充
+    }
+    return false
+}
+```
 
-## 8. 工具-靶子分工表
+简单的 forward-chaining，零黑魔法。原 `AX_FOCUSED_WHITELIST` 语义保留 —— 那是"这 app **不用 patch** 也信通用 walker"（Finder / Mail / Notes 这种规范 a11y app）。**二分（AX whitelist vs OP）变三分（patch app / vanilla whitelist app / OP-only app）**，绝大多数长尾 app 从 OP 迁到 patch。
 
-没有单一银弹，按靶子类型分工：
+### 4.3 teach 闭环（抓 AX predicate）
 
-| 靶子类型 | 最佳工具 | 成本 |
-| --- | --- | --- |
-| 固定 chrome icon（相机、菜单）| **模板匹配** | ~5ms/模板 |
-| 动态内容（聊天气泡、列表项）| **OP 本身** | 已有 |
-| OP 误报（标题栏文字）| **pattern-based exclude** | ~0 |
-| per-app 阈值不对 | **confidence override** | ~0 |
-| 外观会变、附近有稳定文字 | OCR-landmark（区域限定）| ~5-10ms，慎用 |
-| 规则排列里的缺口 | 几何缺口检测 | 窄+险，大概率不做 |
+```
+教学（每条规则一次性）：
+  1. 用户在 Slack，Compose 按钮没 hint
+  2. 触发 teach（menu bar "Teach a missing hint…" 选项）
+  3. 用户把鼠标指向 Compose 按钮
+  4. Mouseless 用 AXUIElementCopyElementAtPosition 拿那个元素
+  5. 读它的 role / subrole / actions → 生成一条候选 predicate
+     （"role=AXImage, must_have_action=AXPress"）
+  6. 存进本地 patch.json
+运行时：加载 patch → walk 时套用 → 命中 → 合成 hint
+```
 
-**include 的唯一主力是模板匹配**。其余是附属轻量规则。
+teach 产物**从"截 icon PNG"变成"抓一条 AX predicate"** —— 这是主力换成 AX 覆写后 teach 的关键变化。门槛更低、PR 是几行 JSON 而非 PNG+JSON、review 更快、不存在"icon 改版模板失效"。
 
-## 9. 护城河：累积的修正数据，不是模型
+teach 入口走 **menu bar 下拉选项**（"Teach a missing hint…"），不抢 chord —— 一次性操作不值得占按键。
 
-- **数据护城河**：随使用积累的 per-app 模板库 + exclude 规则——别人从零积累
-- **不背训练/维护天文成本**：模板是几 KB PNG，过时了换一张；不是重训模型
-- **用户教学闭环**：一键 teach → 模板回流 → 预置库变强 → 越用越准
-- Homerow 没 fine-tune 任何模型（纯 AX）；我们的护城河是**用最便宜的可靠方法搞定 AX 瞎的 app**
+---
 
-护城河形态是**结构化修正数据**，不是模型权重。
+## 5. exclude / threshold override（辅助）
 
-## 10. v1 scope（实现时）
+**exclude** —— 删 OP/AX 误报（标题栏文字被标 hint）。优先 pattern-based（跨布局通用）：
+
+```jsonc
+{ "role": "AXStaticText", "title_equals_window": true }   // 删文字 == 窗口标题的
+```
+
+标题栏文字 == 窗口标题这条所有布局通用，不用 per-layout 配。exclude 比 include 容易 —— 它作用在**已有** candidate 上，能做模式匹配。
+
+**threshold override** —— 某 app OP confidence 默认 0.3 不对，patch 里调一行。纯配置，~0 成本。仅对 `fallback_op: true` 或 OP-only 的 app 有意义。
+
+---
+
+## 6. 分发飞轮：L0 → L1 → L2
+
+护城河要转起来，靠社区共建。按复杂度递进，**做 L0→L1→L2，跳过 L3**：
+
+| 阶段 | 机制 | 消费门槛 | 贡献门槛 | 飞轮 |
+|---|---|---|---|---|
+| **L0** 自带 curated | top ~30 app 的 patch 打包进 .app | 0 操作 | （我们手写）| 不增长 |
+| **L1** GitHub repo + 自动 pull | `Njuhobby/mouseless-patches` 公开 repo，启动时 pull 最新 + 本地 cache + 离线 fallback | 0 操作 | 懂 PR | 慢飞轮 |
+| **L2** 一键分享 | app 内 teach 完点"分享" → GitHub OAuth 自动提 PR（patch.json + 截图） | 0 操作 | **0 摩擦** | 真飞轮 |
+| L3 marketplace | 类 VS Code 扩展商店（搜/装/评分）| 完全消费式 | — | 强但工程量大,**不做** |
+
+L3 工程量太大、收益不匹配当前规模。L2 已经能让任何 macOS 用户（不懂 git）贡献。
+
+repo 结构：`patches/<bundleID>/{patch.json, README.md}`。
+
+---
+
+## 7. 治理 / 抗噪 / 隐私
+
+| 风险 | 缓解 |
+|---|---|
+| **规则过时**（Slack v5 改了 AX 结构）| `verified_against` 记版本；app 版本号变了 UI 上 flag "可能需要重 teach"。AX role 命名通常很稳，比 PNG 模板抗升级得多 |
+| **误命中**（predicate 太宽，把不该点的标成可点）| teach 时生成的 predicate 尽量带约束（role + action 一起）；PR review 配套截图人眼对；CI 可在 reference 截图上跑"命中数是否爆炸"启发式 |
+| **质量参差** | CI 自动校验 patch.json schema + 在维护者提供的 reference AX dump 上跑规则、统计命中 |
+| **流量攻击** | GitHub Actions + CODEOWNERS 标准防护 |
+| **隐私** | teach 抓的是 AX role/action/title 文本,可能含用户数据（如窗口标题里的人名）→ teach UI 让用户预览 + 编辑后再存/提交;截图（仅 L2 分享时）强制让用户涂抹敏感区 |
+
+**信任分级**：高风险 app（银行、1Password、密码管理器）的 patch 走人工审；普通 app CI 通过即可 merge。贡献多了引入 trusted contributor（贡献过高质量 PR 的用户授 merge 权）。
+
+---
+
+## 8. Bootstrapping（鸡生蛋）
+
+**0 用户阶段（我们 seed）**：手动 teach ~30 个高频 app —— Slack / Discord / Notion / Linear / Figma / Zoom / Spotify / Music / Mail / Calendar / Notes / Telegram / Bear / Obsidian / Cursor / Warp / iTerm / Postman / Things / Excel / Numbers / Keynote / Pages / Sketch / TablePlus 之类。这波直接是产品 day-1 价值（装完主力 app 立刻好用）。
+
+**100 用户阶段**：激活 L2 一键 PR，我们每天 review 几个，catalog 从 30 → 100+。
+
+**1000+ 用户阶段**：trusted contributors + CI 自动化（schema 校验、staleness 检测、命中回归）。
+
+---
+
+## 9. 护城河
+
+- **数据护城河**：随使用积累的 per-app AX 规则库 —— 别人从零积累一千个 app 的适配
+- **形态是结构化文本,不是模型权重**：纯 JSON predicate,可 diff / review / 手编,过时改一行;不背训练 + 重训 + 体积成本
+- **贡献门槛极低**：teach 一键抓 predicate → PR 几行 JSON,任何能用 AX Inspector 的人都能贡献
+- **越用越准的闭环**：teach → PR → 预置库变强 → 新用户开箱即用
+- 对标 Vimium：它真正的护城河不是技术,是 15 年沉淀的每个网站的处理细节。我们是**OS 层**的对应物 —— 每个 app 的 AX 适配。竞品想追要从零积累。
+- Homerow 纯 AX、不做任何 per-app 适配；我们的差异化是**把每个 app 的 AX 怪癖都驯服**。
+
+---
+
+## 10. v1 scope
 
 做：
-- 模板匹配引擎（Accelerate NCC，区域限定）
-- teach 捕获流程 + 模板存储格式
-- 运行时：加载模板 → 匹配 → 跟 OP 合并去重
-- pattern-based exclude（窗口标题）
-- per-app confidence override
-- curated 预置（几个热门 app）+ 按需下载脚手架
 
-暂不做（defer 到有数据/需求）：
-- OCR-landmark（除非确认有模板匹配搞不定的高频 case）
-- 几何缺口检测
-- multi-scale 匹配（除非确认跨 DPI / UI 缩放是高频痛点）
-- 暗色模式多模板（先用 NCC 归一化扛，不够再说）
+- `AppPatchRegistry` —— 加载 + 索引 patch.json（bundleID → patch）
+- AX walker 接 `additional_clickable` predicate（扁平、二值、AND/OR）
+- `exclude`（pattern-based，先做 title_equals_window）
+- `fallback_op` 开关（默认 false）
+- teach 流程：menu bar 入口 → `AXUIElementCopyElementAtPosition` 抓元素 → 生成 predicate → 写本地 patch
+- L0 curated 预置（~30 app）+ L1 GitHub pull 脚手架
 
-## 11. 历史决策（这套设计的推翻链）
+暂不做（defer）：
 
-1. **"per-app fine-tune 模型"** → 否决（标注/训练/维护/体积天文成本，且 AX/模板免费能拿到的信息没必要用模型学）
-2. **"修正 JSON + 窗口分类器"** → 死结（窗口布局多、无可靠分类信号）→ 改成 **landmark 自我门控**
-3. **三种 landmark 锚定平等** → 经成本/可行性分析收敛：
-   - OP-相对：**否决**（匿名框无身份）
-   - OCR-landmark：**降级**（collect-time OCR 贵，仅 region-restricted fallback）
-   - 模板匹配：**唯一 include 主力**
-4. **"模板会让安装包巨大"** → 证伪（模板 KB 级，比 per-app 模型小 1000 倍，且可按需下载）
+- L2 一键 PR（先 L1 手动 PR 跑通飞轮再做）
+- threshold override（仅 fallback_op app 需要，量出来再做）
+- role_path 路径化 predicate（扁平不够用再加）
+- **NCC 模板匹配 + OCR-landmark + 几何缺口检测**（见 §A 附录，大概率永不做）
 
-留这条链是为了**防止以后重走**：想要 per-app 精度时，第一反应不该是"训模型"或"做窗口分类器"，而是"模板匹配 + 自我门控"。
+---
+
+## 附录 A：被砍 / 降级的方案
+
+### A1. NCC 模板匹配 —— 从"主力"降到"附录脚注"
+
+早期设计把 NCC 视觉模板匹配当 include 主力（teach 一张 icon PNG，运行时在截图里 NCC 匹配补 hint）。重新分析后**砍掉**：
+
+NCC 唯一站得住的场景是"**目标可见可点、但 AX 树里压根没有这个 node**"。但这个场景：
+- 从上面被 **AX 覆写**挤掉（AX 里有 node 的，覆写就搞定，不用视觉）
+- 从下面被 **OmniParser** 盖住（AX 真没有的，OP 的通用视觉检测已经在兜）
+
+NCC 想占的是"AX 没有 + OP 也漏 + 但又是视觉稳定固定 icon"的三重交集 —— **面积极小**。当初它是"补 OP 漏检"，但 OP 自己已退居 fallback（只服务真黑洞 app），NCC 就成了 fallback 的 fallback，性价比不成立。
+
+附带好处：砍掉 NCC，护城河数据更纯（全是文本 JSON，无 PNG 库）、体积更小、贡献门槛更低、没有"icon 改版模板失效"的维护负担。
+
+（NCC 技术本身的设计 —— Accelerate vImage 实现、归一化抗暗色模式、区域限定 ~5ms、DPR 缩放 —— 如果将来真碰到非做不可的 canvas-app icon 场景，git 历史里有完整推理可捞。）
+
+### A2. OCR-text-landmark —— defer
+
+"可点元素在文字 'Search' 右边"，靠区域限定 OCR 找文字 landmark 定位。成本是软肋（每次 collect 跑 region OCR ~5-10ms）。只在 AX 覆写也搞不定（元素 AX 没有、外观会变、但附近有稳定文字）时才有意义 —— 罕见，defer。
+
+### A3. OP-相对锚定 —— 否决
+
+"相机在文件夹 icon 右边"：OP 的 box 是匿名的，不知道哪个是文件夹，无法解析"相对某个有身份的框"。唯一不靠身份的形式是纯几何缺口检测（等间距图标行里推断"中间有洞 → 漏了一个"），但又窄又险（缺口可能是故意分隔 → 误报），大概率不做。
+
+### A4. 窗口分类器 —— 死结
+
+见 §3。靠标题/尺寸/AXIdentifier 判断"我在哪个布局"没有可靠信号。被 self-gating 取代。
+
+---
+
+## 附录 B：决策史（防止重走弯路）
+
+1. **per-app fine-tune 模型** → 否决（标注/训练/维护/体积天文成本，AX 免费能拿到的没必要用模型学）
+2. **修正 JSON + 窗口分类器** → 死结（布局多、无可靠分类信号）→ 改成 **self-gating**
+3. **NCC 模板匹配当 include 主力** → 重新定位后**降级到附录**（被 AX 覆写从上挤、被 OP 从下盖，交集极小）
+4. **主力改为 per-app AX walker 覆写** → 关键洞察"AX-bad 多半是 AX-irregular 不是 AX-absent"，大多数长尾 app 有 AX 只是结构怪，声明式规则比视觉补漏更便宜/更稳/更易贡献
+
+想要 per-app 精度时，第一反应应该是 **"写一条 AX predicate 覆写"**，不是"训模型" / "做窗口分类器" / "存 icon 模板"。

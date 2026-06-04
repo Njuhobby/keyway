@@ -192,7 +192,7 @@ NSApplication
 | [`specs/hint-rendering.md`](specs/hint-rendering.md) | 标签生成、typing → commit、**统一合成点击**（AX action 已弃）、`HintOverlay` 多屏窗口、坐标系转换、badge 排版（inside / Dock / 级联）、HUD |
 | [`specs/omniparser-fallback-design.md`](specs/omniparser-fallback-design.md) | **已实现 (P5-P6)**：OP 视觉路径，OP-default + AX whitelist 路由（非 fall-through）；baseline 过滤；OCR click-point refiner（§4.6）；PoC 数据；captioner 搁置 |
 | [`specs/omniparser-integration-roadmap.md`](specs/omniparser-integration-roadmap.md) | **实施路线图**：P0-P6 已完成（CoreML spike → 截屏 → 路由 → 集成 → 端到端 → OCR refiner），P7（数据调参）/ P8（发布）待做 |
-| [`specs/per-app-correction-design.md`](specs/per-app-correction-design.md) | **设计草稿，未实现**：per-app 修正层（模板匹配补 OP 漏检 + exclude 误报），护城河；P8 之后启动 |
+| [`specs/per-app-correction-design.md`](specs/per-app-correction-design.md) | **设计草稿，未实现 —— 主要护城河**：per-app **AX walker 覆写**（声明式 JSON predicate，把长尾 app 怪异 AX 树翻译成可点元素）为主力，OP 为 fallback，NCC 模板匹配降级到附录（大概率永不做）。含 L0→L2 社区飞轮 + 治理 + teach 闭环 |
 | [`specs/browser-support-design.md`](specs/browser-support-design.md) | **P0–P4 实现完成**（Chrome）：扩展 + Native Messaging Host + `BridgeServer`/`BrowserProvider` 打通 DOM 级 HINT；多 profile / 多浏览器路由 + `tab_changed` + 异步加载 `page_changed` 全在线；浏览器路径自治，**不 fallback 到 OP**。P5 Safari + 上架待做 |
 
 ---
