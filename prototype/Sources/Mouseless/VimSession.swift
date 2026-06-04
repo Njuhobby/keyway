@@ -1091,23 +1091,59 @@ final class VimSession {
     /// massive AX tree can't blow up the app-switch latency.
     private static func firstTextInputInWindow(_ window: AXUIElement, inside windowRect: CGRect) -> CGRect? {
         var visited = 0
-        return walkForTextInput(window, depth: 0, visited: &visited, windowRect: windowRect)
+        var rolesSeen: [String: Int] = [:]      // role → count, for diagnostic
+        var editableCandidates: [(role: String, rect: CGRect)] = []
+        let result = walkForTextInput(window, depth: 0,
+                                       visited: &visited,
+                                       rolesSeen: &rolesSeen,
+                                       editableCandidates: &editableCandidates,
+                                       windowRect: windowRect)
+        if result == nil {
+            let rolesSummary = rolesSeen.sorted { $0.value > $1.value }
+                .prefix(10)
+                .map { "\($0.key):\($0.value)" }.joined(separator: " ")
+            print("[mouseless] focusedInput: walk visited \(visited) nodes, no text-input role matched. roles seen: \(rolesSummary)")
+            if !editableCandidates.isEmpty {
+                let cands = editableCandidates.prefix(5)
+                    .map { "\($0.role)@\(Int($0.rect.minX)),\(Int($0.rect.minY)) \(Int($0.rect.width))x\(Int($0.rect.height))" }
+                    .joined(separator: " | ")
+                print("[mouseless] focusedInput: editable (AXValue settable) candidates: \(cands)")
+            }
+        }
+        return result
     }
 
     private static func walkForTextInput(_ root: AXUIElement, depth: Int,
                                           visited: inout Int,
+                                          rolesSeen: inout [String: Int],
+                                          editableCandidates: inout [(role: String, rect: CGRect)],
                                           windowRect: CGRect) -> CGRect? {
         visited += 1
-        if visited > 200 || depth > 10 { return nil }
+        if visited > 400 || depth > 12 { return nil }
 
         var roleRef: CFTypeRef?
-        if AXUIElementCopyAttributeValue(root, "AXRole" as CFString, &roleRef) == .success,
-           let role = roleRef as? String,
-           role == "AXTextField" || role == "AXTextArea" || role == "AXSearchField" {
+        let roleOK = AXUIElementCopyAttributeValue(root, "AXRole" as CFString, &roleRef) == .success
+        let role = (roleRef as? String) ?? "?"
+        if roleOK { rolesSeen[role, default: 0] += 1 }
+
+        if role == "AXTextField" || role == "AXTextArea" || role == "AXSearchField" {
             if let rect = AXWindowOps.readRect(root),
                rect.width >= 30, rect.height >= 12,
                windowRect.intersects(rect) {
                 return rect
+            }
+        } else {
+            // Also collect "anything with settable AXValue" candidates
+            // for diagnostic. NOT returned as match yet — too risky
+            // without seeing what they actually are. After we see real
+            // data from a few apps we can decide whether to promote
+            // them.
+            var settable: DarwinBoolean = false
+            AXUIElementIsAttributeSettable(root, "AXValue" as CFString, &settable)
+            if settable.boolValue, let rect = AXWindowOps.readRect(root),
+               rect.width >= 30, rect.height >= 12,
+               windowRect.intersects(rect) {
+                editableCandidates.append((role: role, rect: rect))
             }
         }
 
@@ -1119,6 +1155,8 @@ final class VimSession {
         for child in children {
             if let found = walkForTextInput(child, depth: depth + 1,
                                             visited: &visited,
+                                            rolesSeen: &rolesSeen,
+                                            editableCandidates: &editableCandidates,
                                             windowRect: windowRect) {
                 return found
             }
