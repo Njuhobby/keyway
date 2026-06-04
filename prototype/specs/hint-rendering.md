@@ -46,19 +46,25 @@ if matches.isEmpty {
     return .ignored          // 误按：吞掉，typed 不变，留在 TAP
 }
 if matches.count == 1 && matches[0].label == next {
+    if moveArmed {                         // `'` 前缀武装了 move-only
+        commit(target: matches[0], action: .move)   // warp 不点击
+        typed = ""; moveArmed = false; renderOverlay()
+        return .moved                      // 留在 TAP，hints 不撤
+    }
     commit(target: matches[0], action: action)
     deactivate()
     return .committed
 }
 typed = next
-HintOverlay.shared.show(targets: targets, typed: typed)
+renderOverlay()
 return .pending
 ```
 
-三种返回值由 `VimSession.handleTap` 处理：
+四种返回值由 `VimSession.handleTap` 处理：
 - `.pending` —— 啥也不做，等下一个键
 - `.committed` —— 看 sticky：true 则 re-scan 进新 HintMode；false 则 exit
 - `.ignored` —— 误按（不匹配任何 hint 前缀）：吞掉不退出，typed 保持上一个有效值。退出只靠 Esc。（另有 `backspace()` 撤销已输入的前缀字符。）
+- `.moved` —— move-only pick（`'` 前缀，见 `modes.md` §4.3.5）：光标已 warp，hints 留着、**不管 sticky 都留在 TAP**（move 是导航不是终结）。移完内容没变 → 不重扫，同一批 targets 瞬间重显示。
 
 ---
 
@@ -74,11 +80,13 @@ private func commit(target: HintTarget, action: ClickAction) {
         synthesizeClick(at: center, button: .right, count: 1)
     case .double:
         synthesizeClick(at: center, button: .left,  count: 2)
+    case .move:
+        MouseSynth.warp(to: center)   // 只移光标不点击（`'` 前缀，见 modes.md §4.3.5）
     }
 }
 ```
 
-**唯一通用 commit 机制 = 合成 mouse event 到 rect 中心**。简单、可预测、跟用户的心智模型 ("按 hint = 鼠标点这里") 一致。
+**唯一通用 commit 机制 = 合成 mouse event 到 rect 中心**。简单、可预测、跟用户的心智模型 ("按 hint = 鼠标点这里") 一致。`.move` 是例外:`MouseSynth.warp`(`.mouseMoved` 合成)把光标挪过去但不点击,把 hint 当成光标传送锚点。OP 源的 `.move` 同样先 OCR-refine 再 warp。
 
 ### 3.1 为什么不用 AX 动作
 
