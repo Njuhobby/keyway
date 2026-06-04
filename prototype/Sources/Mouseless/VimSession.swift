@@ -984,43 +984,80 @@ final class VimSession {
     /// rect (screen coords, AX top-left origin). Returns nil otherwise
     /// — caller should fall back to title-bar landing.
     ///
-    /// Role allow-list keeps this defensive: we only auto-park into
-    /// **text** inputs, not into focused buttons or list items, to
-    /// avoid clicks-on-Cmd+Tab accidentally activating something the
-    /// user didn't intend.
+    /// Two detection paths (either is sufficient):
+    ///   1. Role allow-list match (AXTextField, AXTextArea, AXSearchField,
+    ///      AXComboBox) — standard well-behaved native apps.
+    ///   2. `AXValue` is settable — heuristic for Electron-ish apps
+    ///      whose text-input controls report weird roles (e.g.,
+    ///      AXGenericElement / AXGroup) but whose values are
+    ///      programmatically writable, i.e., it's accepting keyboard input.
+    ///
+    /// Logs the observed role/subrole so when this fails to detect a
+    /// real input on a new app we can extend the rules.
     private static func focusedTextInputRect(inside windowRect: CGRect) -> CGRect? {
-        guard let (app, _) = FocusedApp.current() else { return nil }
+        guard let (app, _) = FocusedApp.current() else {
+            print("[mouseless] focusedInput: no frontmost app")
+            return nil
+        }
         var focusedRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
-                app, "AXFocusedUIElement" as CFString, &focusedRef
-              ) == .success,
-              let raw = focusedRef else { return nil }
+        let readResult = AXUIElementCopyAttributeValue(
+            app, "AXFocusedUIElement" as CFString, &focusedRef
+        )
+        guard readResult == .success, let raw = focusedRef else {
+            print("[mouseless] focusedInput: AXFocusedUIElement read failed (err=\(readResult.rawValue))")
+            return nil
+        }
         let element = raw as! AXUIElement
 
         var roleRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
-                element, "AXRole" as CFString, &roleRef
-              ) == .success,
-              let role = roleRef as? String else { return nil }
+        AXUIElementCopyAttributeValue(element, "AXRole" as CFString, &roleRef)
+        let role = (roleRef as? String) ?? "?"
+        var subroleRef: CFTypeRef?
+        AXUIElementCopyAttributeValue(element, "AXSubrole" as CFString, &subroleRef)
+        let subrole = (subroleRef as? String) ?? "nil"
 
-        // Text-input-like AX roles. Excludes AXButton (focused buttons
-        // shouldn't drag the cursor there), AXLink, AXMenuItem, etc.
         let textInputRoles: Set<String> = [
             "AXTextField",       // single-line NSTextField, HTML <input type="text">
             "AXTextArea",        // multi-line NSTextView, HTML <textarea>, contenteditable
             "AXSearchField",     // NSSearchField, HTML <input type="search">
             "AXComboBox",        // editable popup; mostly text input semantics
         ]
-        guard textInputRoles.contains(role) else { return nil }
+        let matchedByRole = textInputRoles.contains(role)
 
-        guard let rect = AXWindowOps.readRect(element) else { return nil }
-        // Stay within (or at least touching) the focused window. Guards
-        // against weird popovers / floating widgets in another window
-        // that happen to hold focus.
-        guard windowRect.intersects(rect) else { return nil }
-        // Pathological tiny rects (some apps return 0×0 for collapsed
-        // search bars) → ignore and fall back.
-        guard rect.width >= 4, rect.height >= 4 else { return nil }
+        // Fallback: AXValue is settable → some kind of editable. Catches
+        // Electron / Web Components / custom inputs that don't advertise
+        // a standard role. Filter out buttons by also requiring there
+        // to be an AXValue attribute at all (buttons usually don't have
+        // it; text inputs do).
+        var valueSettable: DarwinBoolean = false
+        AXUIElementIsAttributeSettable(element, "AXValue" as CFString, &valueSettable)
+        var hasValue: CFTypeRef?
+        let hasValueResult = AXUIElementCopyAttributeValue(
+            element, "AXValue" as CFString, &hasValue
+        )
+        let matchedByEditableValue =
+            valueSettable.boolValue && hasValueResult == .success
+
+        guard matchedByRole || matchedByEditableValue else {
+            print("[mouseless] focusedInput: skipped role=\(role) subrole=\(subrole) " +
+                  "valueSettable=\(valueSettable.boolValue) hasValue=\(hasValueResult == .success)")
+            return nil
+        }
+
+        guard let rect = AXWindowOps.readRect(element) else {
+            print("[mouseless] focusedInput: role=\(role) matched but no rect")
+            return nil
+        }
+        guard windowRect.intersects(rect) else {
+            print("[mouseless] focusedInput: role=\(role) rect outside window (input=\(rect) window=\(windowRect))")
+            return nil
+        }
+        guard rect.width >= 4, rect.height >= 4 else {
+            print("[mouseless] focusedInput: role=\(role) rect too small (\(rect.width)x\(rect.height))")
+            return nil
+        }
+        let how = matchedByRole ? "role" : "editable-value"
+        print("[mouseless] focusedInput: match via \(how) — role=\(role) subrole=\(subrole) rect=\(rect)")
         return rect
     }
 
