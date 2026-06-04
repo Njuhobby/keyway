@@ -3,6 +3,8 @@
 > **状态：设计草稿，暂不实现**。OmniParser 集成（P0-P6）之后规划的**重要独立模块**，也是 Mouseless 主要的**护城河**。本文固化设计推理 + 被否决/降级的方案，等优先级到了直接照此实现。
 >
 > 相关：`omniparser-fallback-design.md`（OP 视觉路径主体）、`browser-support-design.md`（浏览器走扩展 DOM，是这套思路在浏览器域的对应物）。
+>
+> **§11 是 scale 的关键** —— template 自动生成 pipeline（AX dump × 视觉 × walker 三方 diff → LLM/启发式合成 patch），不靠人力一条条写。
 
 ---
 
@@ -264,6 +266,62 @@ repo 结构：`patches/<bundleID>/{patch.json, README.md}`。
 - threshold override（仅 fallback_op app 需要，量出来再做）
 - role_path 路径化 predicate（扁平不够用再加）
 - **NCC 模板匹配 + OCR-landmark + 几何缺口检测**（见 §A 附录，大概率永不做）
+
+---
+
+## 11. template 自动生成 pipeline（scale 的关键）
+
+纯人力写 predicate 不现实。但**生成 patch 这件事本身高度可自动化**,因为我们手里有 walker 没用到的 ground truth。
+
+### 11.1 核心洞察:三份对照数据,walker 只用了第一份
+
+| 数据 | walker 用了? | 告诉我们 |
+|---|---|---|
+| **walker 输出**(当前 hint) | ✅ | "现在收了哪些" |
+| **完整 AX 树 dump**(所有 role/action/subrole/rect,不过滤) | ❌ | "AX 里**到底有什么**" |
+| **视觉**(截图 + OmniParser/VLM 检测的可点框) | ❌ | "屏幕上**实际哪些**可点"(ground truth) |
+
+**生成 template = 做这三份的 diff**:视觉说"这里可点" + AX dump 说"这里有个 AXImage+AXPress" + walker 说"我没收它" → 自动得出一条 include 规则。
+
+### 11.2 分层自动化(零 ML → 全自动)
+
+**Tier 0:纯 AX 启发式(零 ML,覆盖大半)**
+
+dump 完整 AX 树 → 筛"有可点信号(AXPress/AXOpen action,或按钮类 subrole)但被 walker 拒了"的元素 → 按 `(role, action)` 签名聚类 → 每聚类提一条 include 规则。Slack 的 `AXImage+AXPress` 案例**零 ML 即可自动提出** `{role: AXImage, must_have_action: AXPress}`。估计能解决 60-70% 的 AX-irregular app。
+
+**Tier 1:AX × 视觉 交叉验证(过滤误报 + 判定 fallback_op)**
+
+Tier 0 风险:装饰性 `AXImage+AXPress`(no-op handler)收进来变误报。用视觉层校验:候选元素 rect 跟某个视觉可点框重合 → 确认是真按钮、保留;不重合 → 丢。反向:视觉可点框**没有任何 AX 元素对应** → 这块是真·AX 黑洞 → 自动标记走 OP fallback(`fallback_op: true`),不是 include 能救的。
+
+**Tier 2:AI 合成(现在就能跑,无需自训模型)**
+
+Mouseless 加 debug 命令,在问题 app 里一键导出 bundle:`{完整 AX 树 JSON, 截图 PNG, walker 输出, OP 输出}`。把 bundle 交给一个 vision-capable LLM(开发期 = Claude),它看截图 + AX dump + walker gap **直接写 patch.json** —— 在结构化数据里找模式 + 判断"该可点 vs 装饰",是 LLM 擅长的合成任务。闭环:问题 app 按热键 → 导出 bundle → LLM 出 patch → 验证 → commit。
+
+**Tier 3:把合成烤进 app(终极 scale)**
+
+把 Tier 2 的合成换成 app 内调 VLM(API 或本地模型):用户在任何 app 点"自动生成适配" → app 自己 dump + 调模型 + 出 patch + 本地验证。完全自助,是 §6 L2 飞轮的 AI 加持版。
+
+### 11.3 验证 harness(生成只是一半)
+
+每个 Tier 出的候选 patch 用同一个客观函数打分:
+
+```
+应用候选 patch → 重跑 walker:
+  recall    = 视觉可点框被覆盖的比例 ↑（漏的修好没）
+  precision = hint 总数没爆炸 ↑（没过度匹配收一堆垃圾）
+```
+
+有了这个客观函数,甚至能**自动搜索 predicate 变体**(加 region 收紧 / 换 action 约束)挑 recall/precision 最优,人只需最后 approve。
+
+### 11.4 边界(诚实)
+
+- 视觉框 bbox 精度有限 → AX-rect 匹配留容差
+- 真·canvas app(Figma 画布)AX 啥都没有 → 没有 predicate 能救,pipeline 自动暴露成"OP-only",这是正确结果不是失败
+- 过度泛化(一条规则收了 compose + 50 个 emoji)→ 验证 harness 的 precision 项专门兜
+
+### 11.5 实施顺序
+
+先做三件零 ML、互相独立的:**① bundle 导出工具 ② Tier 0 启发式生成器 ③ 验证 harness**。三件做完,立刻能用 LLM 当 Tier 2 引擎跑通"问题 app → patch.json"完整闭环。Tier 3(in-app VLM)等闭环验证有效再投。这三件也是 v1 实现里 teach 流程(§4.3)的自然超集 —— teach 是"人指一个元素",pipeline 是"自动找所有该指的元素"。
 
 ---
 
