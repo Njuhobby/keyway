@@ -2023,6 +2023,28 @@ final class VimSession {
         return true
     }
 
+    /// Return the CG-coord rect of the display containing `cursor`.
+    /// Uses `CGDisplayBounds` (CG space, top-left origin) instead of
+    /// `NSScreen.frame` (NS space, bottom-left origin), so multi-
+    /// display containment works correctly. Falls back to main display
+    /// when no display contains the cursor (degenerate but possible
+    /// during display sleep / wake transitions).
+    private static func cgBoundsForCursorScreen(cursor: CGPoint) -> CGRect {
+        // CGGetDisplaysWithPoint gives us the display(s) under a CG
+        // point directly — exactly what we need. Two-call pattern:
+        // first call with max=0 to get count, second to fetch IDs.
+        var count: UInt32 = 0
+        CGGetDisplaysWithPoint(cursor, 0, nil, &count)
+        if count > 0 {
+            var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+            CGGetDisplaysWithPoint(cursor, count, &ids, &count)
+            if let id = ids.first {
+                return CGDisplayBounds(id)
+            }
+        }
+        return CGDisplayBounds(CGMainDisplayID())
+    }
+
     /// Teleport the cursor by `fraction` of the containing screen's
     /// dimension in the given direction. Uses the screen the cursor
     /// is currently on so multi-display setups jump within their
@@ -2035,30 +2057,30 @@ final class VimSession {
     /// reasoning as `/`-search commit.
     private func jumpCursor(direction: MouseMover.Direction, fraction: CGFloat,
                             dragHeld: Bool = false) {
-        let current = MouseSynth.cursorPosition()
-        // Pick the screen containing the cursor. Fallback to main
-        // when cursor sits exactly on a boundary or off all screens.
-        let screen = NSScreen.screens.first(where: { $0.frame.contains(current) })
-                    ?? NSScreen.main
-                    ?? NSScreen.screens.first
-        guard let s = screen else { return }
-        let frame = s.frame
+        let current = MouseSynth.cursorPosition()   // CG coords (top-left origin)
+
+        // Find the display containing the cursor **in CG coords**.
+        // `NSScreen.frame` is in NS coords (bottom-left origin) and
+        // gives wrong containment on multi-display setups — a cursor
+        // on a secondary display below the main one would have
+        // `current.y > 1080` (CG) which doesn't fall inside any
+        // NSScreen.frame (NS y of that secondary is negative), so
+        // selection silently fell back to NSScreen.main and clamping
+        // pulled cursor across screens to the main display.
+        // CGDisplayBounds returns CG-space rect directly, no
+        // conversion needed.
+        let bounds = Self.cgBoundsForCursorScreen(cursor: current)
         var next = current
         switch direction {
-        case .left:  next.x -= frame.width  * fraction
-        case .right: next.x += frame.width  * fraction
-        case .up:    next.y -= frame.height * fraction
-        case .down:  next.y += frame.height * fraction
+        case .left:  next.x -= bounds.width  * fraction
+        case .right: next.x += bounds.width  * fraction
+        case .up:    next.y -= bounds.height * fraction
+        case .down:  next.y += bounds.height * fraction
         }
-        // Clamp to screen bounds. NSScreen.frame uses bottom-left
-        // origin in screen coords, but MouseSynth.warp / cursor
-        // position use top-left (CG convention). We're using NSScreen
-        // only as a "what dimensions do I get to play with" measure,
-        // so the orientation doesn't matter — both axes have the
-        // same range. Clamp to a tight inset (3pt) so the cursor
-        // never lands on the literal edge pixel.
-        next.x = max(frame.minX + 3, min(frame.maxX - 3, next.x))
-        next.y = max(frame.minY + 3, min(frame.maxY - 3, next.y))
+        // Clamp inside this screen's CG bounds with a 3pt inset so
+        // the cursor never lands on the literal edge pixel.
+        next.x = max(bounds.minX + 3, min(bounds.maxX - 3, next.x))
+        next.y = max(bounds.minY + 3, min(bounds.maxY - 3, next.y))
 
         // Edge-case: cursor was already past the inset on this axis,
         // so the clamp pulled `next` back toward (or past) `current`.
