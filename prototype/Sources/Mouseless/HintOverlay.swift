@@ -10,10 +10,11 @@ final class HintOverlay {
     /// principal display. One window per screen sidesteps that.
     private var windows: [NSWindow] = []
 
-    func show(targets: [HintTarget], typed: String) {
+    func show(targets: [HintTarget], typed: String, moveArmed: Bool = false) {
         ensureWindows()
         for w in windows {
-            (w.contentView as? HintOverlayView)?.update(targets: targets, typed: typed)
+            (w.contentView as? HintOverlayView)?.update(targets: targets, typed: typed,
+                                                        moveArmed: moveArmed)
             w.orderFrontRegardless()
         }
     }
@@ -64,10 +65,12 @@ final class HintOverlay {
 final class HintOverlayView: NSView {
     private var targets: [HintTarget] = []
     private var typed: String = ""
+    private var moveArmed: Bool = false
 
-    func update(targets: [HintTarget], typed: String) {
+    func update(targets: [HintTarget], typed: String, moveArmed: Bool = false) {
         self.targets = targets
         self.typed = typed
+        self.moveArmed = moveArmed
         needsDisplay = true
     }
 
@@ -88,7 +91,12 @@ final class HintOverlayView: NSView {
             .font: labelFont,
             .foregroundColor: NSColor.black.withAlphaComponent(0.30),
         ]
-        let bg = NSColor(red: 1.0, green: 0.84, blue: 0.0, alpha: 0.95)
+        // Default hint chip is saturated yellow. When move-armed (`'`
+        // prefix), use a paler yellow so the user can see at a glance
+        // that the next pick warps the cursor rather than clicking.
+        let bg = moveArmed
+            ? NSColor(red: 1.0, green: 0.95, blue: 0.70, alpha: 0.95)
+            : NSColor(red: 1.0, green: 0.84, blue: 0.0, alpha: 0.95)
         let labelW: CGFloat = 22
         let labelH: CGFloat = 16
 

@@ -49,6 +49,7 @@ enum ClickAction {
     case left      // bare hint letter
     case right     // Shift + hint letter
     case double    // Option + hint letter
+    case move      // move-armed (`'` prefix): warp cursor, no click
 }
 
 @MainActor
@@ -149,13 +150,39 @@ final class HintMode {
     /// navigating; `tabs.onUpdated` handles refresh when nav completes).
     private(set) var lastCommittedTarget: HintTarget?
 
+    /// One-shot "move-only" flag, armed by the `'` prefix in TAP normal.
+    /// When set, the next committed hint **warps the cursor** to the
+    /// target (no click) — turning hints into cursor-teleport anchors
+    /// (pairs with hjkl fine-tune / double-tap jump). Resets after one
+    /// pick or on deactivate. Drives the overlay's light-yellow tint
+    /// so the user can see the next pick won't click. NOT a mode — no
+    /// session state beyond this bool; cleared whenever the hint
+    /// session ends.
+    private(set) var moveArmed = false
+
+    /// Centralized overlay refresh so all callers carry `moveArmed`
+    /// into the render (for the light-yellow tint). Replaces scattered
+    /// `HintOverlay.shared.show(...)` calls.
+    private func renderOverlay() {
+        HintOverlay.shared.show(targets: targets, typed: typed, moveArmed: moveArmed)
+    }
+
+    /// Toggle the one-shot move-only arm. `'` in TAP normal calls this;
+    /// pressing `'` again cancels. Re-renders the overlay so the tint
+    /// flips immediately.
+    func toggleMoveArmed() {
+        moveArmed.toggle()
+        renderOverlay()
+    }
+
     @discardableResult
     func activate(isolateApp: Bool = false) async -> Bool {
         let collected = await Self.collectAll(isolateApp: isolateApp)
         guard applyCollected(collected) else { return false }
         typed = ""
         isActiveFlag = true
-        HintOverlay.shared.show(targets: targets, typed: "")
+        moveArmed = false
+        renderOverlay()
         return true
     }
 
@@ -174,7 +201,7 @@ final class HintMode {
     func refreshInPlace(isolateApp: Bool = false) async -> Bool {
         let collected = await Self.collectAll(isolateApp: isolateApp)
         guard applyCollected(collected) else { return false }
-        HintOverlay.shared.show(targets: targets, typed: typed)
+        renderOverlay()
         return true
     }
 
@@ -252,6 +279,7 @@ final class HintMode {
         targets = []
         typed = ""
         isActiveFlag = false
+        moveArmed = false
         HintOverlay.shared.hide()
     }
 
@@ -264,7 +292,7 @@ final class HintMode {
 
     func showOverlay() {
         guard isActiveFlag else { return }
-        HintOverlay.shared.show(targets: targets, typed: typed)
+        renderOverlay()
     }
 
     func handle(char: Character, action: ClickAction = .left) -> HintResult {
@@ -278,13 +306,16 @@ final class HintMode {
             return .ignored
         }
         if matches.count == 1 && matches[0].label == next {
+            // Move-armed (`'` prefix) overrides the modifier-derived
+            // action: the pick warps the cursor instead of clicking.
+            let effectiveAction: ClickAction = moveArmed ? .move : action
             lastCommittedTarget = matches[0]
-            commit(target: matches[0], action: action)
+            commit(target: matches[0], action: effectiveAction)
             deactivate()
             return .committed
         }
         typed = next
-        HintOverlay.shared.show(targets: targets, typed: typed)
+        renderOverlay()
         return .pending
     }
 
@@ -292,7 +323,7 @@ final class HintMode {
     func backspace() {
         guard !typed.isEmpty else { return }
         typed.removeLast()
-        HintOverlay.shared.show(targets: targets, typed: typed)
+        renderOverlay()
     }
 
     private func commit(target: HintTarget, action: ClickAction) {
@@ -314,14 +345,23 @@ final class HintMode {
         //     box; the text's center is almost always inside the real
         //     click handler. Containment-aware: filters out text that
         //     belongs to OP boxes contained within this one.
+        let isMove = (action == .move)
         switch target.source {
         case .ax, .browser:
             // Browser hints carry screen-space rects from `detector.js`;
             // synth click at center delegates to the browser's normal
             // hit-test pipeline, exactly the same as an AX hint commit.
             let center = CGPoint(x: target.rect.midX, y: target.rect.midY)
-            MouseSynth.click(at: center, button: buttonForAction(action),
-                             count: countForAction(action))
+            if isMove {
+                // Move-only: warp cursor (synthesized .mouseMoved so
+                // hover / cursor-shape update at the destination), no
+                // click. Element-rect center is plenty precise for
+                // "park the cursor here, I'll fine-tune with hjkl".
+                MouseSynth.warp(to: center)
+            } else {
+                MouseSynth.click(at: center, button: buttonForAction(action),
+                                 count: countForAction(action))
+            }
         case .omni:
             // OCR refiner needs to re-screencap + OCR (~60-90ms total).
             // Dispatch as a Task so the keyboard event tap callback can
@@ -338,22 +378,27 @@ final class HintMode {
             }
             let boxRect = target.rect
             Task { @MainActor in
-                let clickPoint = await OCRRefiner.refine(
+                let point = await OCRRefiner.refine(
                     boxScreenRect: boxRect,
                     innerBoxes: innerBoxes
                 )
-                MouseSynth.click(at: clickPoint, button: buttonForAction(action),
-                                 count: countForAction(action))
+                if isMove {
+                    MouseSynth.warp(to: point)
+                } else {
+                    MouseSynth.click(at: point, button: buttonForAction(action),
+                                     count: countForAction(action))
+                }
             }
         }
 
-        // The click may have changed the source window's contents (list
-        // selection, disclosure, pane reload, ...). Mark it dirty so the
-        // next sticky rescan walks this window fresh while reusing the
-        // cache for untouched sibling windows. nil for dock/menu-extra/
-        // menu-bar items — they don't belong to any AXWindow. OP-sourced
-        // targets have no AXWindow either — the cache is AX-only.
-        if case .ax(_, let window?) = target.source {
+        // A move doesn't change content, so skip the dirty-marking — only
+        // a click might have mutated the window (list selection, disclosure,
+        // pane reload, ...). Mark dirty so the next sticky rescan walks this
+        // window fresh while reusing the cache for untouched sibling
+        // windows. nil for dock/menu-extra/menu-bar items — they don't
+        // belong to any AXWindow. OP-sourced targets have no AXWindow
+        // either — the cache is AX-only.
+        if !isMove, case .ax(_, let window?) = target.source {
             HintWindowCache.shared.markDirty(window: window)
         }
     }
@@ -362,6 +407,7 @@ final class HintMode {
         switch action {
         case .left, .double: return .left
         case .right: return .right
+        case .move: return .left   // unused (move warps, never clicks)
         }
     }
 
@@ -369,6 +415,7 @@ final class HintMode {
         switch action {
         case .left, .right: return 1
         case .double: return 2
+        case .move: return 1       // unused (move warps, never clicks)
         }
     }
 

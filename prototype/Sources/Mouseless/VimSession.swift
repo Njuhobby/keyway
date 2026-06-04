@@ -2158,6 +2158,21 @@ final class VimSession {
             return true
         }
 
+        // bare `'` → toggle one-shot "move-only" arm. While armed, the
+        // next hint pick warps the cursor to the target instead of
+        // clicking (hints become cursor-teleport anchors; pair with
+        // hjkl fine-tune). Labels turn pale yellow while armed. Pressing
+        // `'` again cancels. Not a mode — it auto-resets after one pick
+        // / on exit. `'` is not in the hint pool, so no label collision.
+        // vim-mark mnemonic ("jump to"). Chosen over a modifier because
+        // Cmd/Ctrl conflict with system shortcuts and Shift/Option are
+        // already taken by double/right-click.
+        if keyCode == KeyCode.quote && bareModifiers {
+            hint.toggleMoveArmed()
+            renderModeHUD()
+            return true
+        }
+
         // bare `c` — click at the current cursor position. Modifier
         // picks the click kind, same mapping as hint commits: bare =
         // single left, Shift = double, Option = right. Pairs with
@@ -2358,11 +2373,14 @@ final class VimSession {
         guard let m = mode else { return }
         let label: String
         switch m {
-        case .tap:
+        case .tap(let h):
             // TAP label depends on the active sub-state.
             switch tapSub {
             case .normal:
-                label = sticky ? "TAP · sticky" : "TAP"
+                // `· move` suffix when the `'` prefix has armed move-only
+                // (next pick warps the cursor, no click).
+                let base = sticky ? "TAP · sticky" : "TAP"
+                label = h.moveArmed ? base + " · move" : base
             case .dragging:
                 label = sticky ? "TAP · sticky · dragging" : "TAP · dragging"
             case .searchTyping(let buffer):
