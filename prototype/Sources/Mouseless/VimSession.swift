@@ -2059,6 +2059,24 @@ final class VimSession {
         // never lands on the literal edge pixel.
         next.x = max(frame.minX + 3, min(frame.maxX - 3, next.x))
         next.y = max(frame.minY + 3, min(frame.maxY - 3, next.y))
+
+        // Edge-case: cursor was already past the inset on this axis,
+        // so the clamp pulled `next` back toward (or past) `current`.
+        // Without this guard we'd warp REVERSE 1-2 px, producing the
+        // "press jj near screen bottom and cursor jitters in place"
+        // bug. Treat "didn't actually advance in the requested
+        // direction" as no-op — gesture quietly maxes out at the edge.
+        let advanced: Bool
+        switch direction {
+        case .left:  advanced = next.x < current.x - 0.5
+        case .right: advanced = next.x > current.x + 0.5
+        case .up:    advanced = next.y < current.y - 0.5
+        case .down:  advanced = next.y > current.y + 0.5
+        }
+        guard advanced else {
+            print("[mouseless] jumpCursor: at screen edge, no-op (direction=\(direction))")
+            return
+        }
         MouseSynth.warp(to: next, dragging: dragHeld)
     }
 
