@@ -1178,7 +1178,7 @@ final class VimSession {
             // `dragHeld` makes jumpCursor post `.leftMouseDragged`, so
             // the teleport drags the grabbed object 1/4-screen rather
             // than dropping it — same gesture, drag-aware.
-            if maybeJumpOnDoubleTap(direction: dir, dragHeld: dragHeld) {
+            if maybeJumpOnDoubleTap(direction: dir, flags: flags, dragHeld: dragHeld) {
                 return true
             }
             // Option allowed through (unlike Cmd/Ctrl) because hjkl aren't
@@ -1861,7 +1861,7 @@ final class VimSession {
         // jump goes through the same helper as TAP so the gesture is
         // consistent across modes.
         if let dir = Self.moveDirection(for: keyCode) {
-            if maybeJumpOnDoubleTap(direction: dir) { return true }
+            if maybeJumpOnDoubleTap(direction: dir, flags: flags) { return true }
             mover.start(direction: dir, speed: Self.moveSpeed(from: flags))
             return true
         }
@@ -2004,13 +2004,21 @@ final class VimSession {
     /// (handleScrollNormal) so the gesture matches the modes.md §4/§5
     /// "hjkl unified across TAP and SCROLL" promise.
     private func maybeJumpOnDoubleTap(direction: MouseMover.Direction,
+                                      flags: CGEventFlags = [],
                                       dragHeld: Bool = false) -> Bool {
         let now = CFAbsoluteTimeGetCurrent()
         guard let lastUp = lastTapHjklKeyUp[direction],
               now - lastUp < windowReverseTapWindow else {
             return false
         }
-        jumpCursor(direction: direction, fraction: 0.25, dragHeld: dragHeld)
+        // Shift held during the second tap → **half-screen jump**;
+        // unshifted → quarter-screen. Lets users dial big vs small
+        // teleport off one gesture (Shift+hh = far, hh = medium)
+        // without learning new keys. Option / Cmd / Ctrl don't
+        // modify the jump distance — they have other semantics
+        // elsewhere and would overload poorly here.
+        let fraction: CGFloat = flags.contains(.maskShift) ? 0.5 : 0.25
+        jumpCursor(direction: direction, fraction: fraction, dragHeld: dragHeld)
         lastTapHjklKeyUp[direction] = now
         return true
     }

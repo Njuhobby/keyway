@@ -262,10 +262,10 @@ MouseSynth.click(at: MouseSynth.cursorPosition(), button: .left, count: 1)
 
 - **`c`** = 在**当前鼠标光标位置**合成点击。修饰键选类型，跟 hint commit 一致：bare = 左键单击、`Shift+c` = 双击、`Option+c` = 右键（共用 `clickKind(from:)`）。落点 = 光标现在在哪。`c` 已从 hint 池移除（同 `v`），所以不会和 hint label 冲突。
 - **`h/j/k/l`** = 移光标（vim hjkl：h 左、j 下、k 上、l 右），按住连续（60fps timer 合成 `.mouseMoved`，hover 状态会更新），Shift 加速 / Option 精细。实现见 `MouseMover.swift`。**TAP 与 SCROLL 共用同一套 hjkl**（`VimSession.moveDirection(for:)` 单一映射）。
-- **双击 `hh` / `jj` / `kk` / `ll`**（150ms 内释放后再按，跟 WINDOW resize 用同一个 `windowReverseTapWindow`）= **光标一口气跳 1/4 当前屏幕**该方向距离。第二下按住不放 → OS key-repeat 让每次 repeat 都过双击窗口（每跳一次刷新 `lastTapHjklKeyUp` 时间戳），**连续跳**直到松手。多屏环境下取**光标当前所在那块屏**的尺寸作为 1/4 的基准，clamp 到那块屏边界（3pt 内缩）。
+- **双击 `hh` / `jj` / `kk` / `ll`**（150ms 内释放后再按，跟 WINDOW resize 用同一个 `windowReverseTapWindow`）= **光标一口气跳 1/4 当前屏幕**该方向距离。**Shift+双击 = 跳 1/2 屏**（远距离一发到位）。第二下按住不放 → OS key-repeat 让每次 repeat 都过双击窗口（每跳一次刷新 `lastTapHjklKeyUp` 时间戳），**连续跳**直到松手。多屏环境下取**光标当前所在那块屏**的尺寸作为基准，clamp 到那块屏边界（3pt 内缩）。
   - 用 `MouseSynth.warp`（synthesize `.mouseMoved`）而不是 raw `CGWarpMouseCursorPosition`——同 `/`-search commit 的理由，让目标 view 收到事件、更新 cursor shape / hover state
   - drag 子状态下**禁用**（每按一下都要延续 held drag，跳跃会让 drop target 不可预测）；search 子状态本来就吃掉 hjkl，自然不影响
-  - 修饰键忽略（Shift/Option 在双击场景没语义；将来要做"Shift+hh = 1/2 屏"再说）
+  - Shift 决定 1/4 vs 1/2；Option / Cmd / Ctrl 不影响跳距（它们在别处有语义，叠加在 jump 上语义不清）
 - 合成点击/移动统一走 `MouseSynth`（HintMode 的 hint-commit 点击也用它）。
 
 **为什么不是 Enter**：早期版本用 `Enter` 当点击键，但 Enter 在 app 里**经常有自己的语义**——典型场景是按 ↑↓ 在菜单里 nav、然后 Enter 确认选中那一项。配上 §11 的箭头键放行后，用户预期 Enter 也能透传给 app。把"点击"挪到 `c` 上让两边都成立：Enter 永远放行、`c` 永远 click。
@@ -287,7 +287,7 @@ MouseSynth.click(at: MouseSynth.cursorPosition(), button: .left, count: 1)
 | `G` (Shift+g) | 跳到选中区域**底部**（仅垂直） |
 | `h/j/k/l` (bare) | 移光标 左/下/上/右（vim hjkl，**与 TAP 统一**，按住连续） |
 | `Shift + hjkl` / `Option + hjkl` | 加速 / 精细移光标 |
-| **双击** `hh` / `jj` / `kk` / `ll` | 跳跃 1/4 当前屏方向距离（跟 TAP §4.3 一样的双击-跳跃机制，共用 `maybeJumpOnDoubleTap` helper + `lastTapHjklKeyUp` 字典；150ms 内连按） |
+| **双击** `hh` / `jj` / `kk` / `ll` | 跳跃 **1/4** 当前屏方向距离；**Shift+双击 = 1/2** 屏（跟 TAP §4.3 一样的双击-跳跃机制，共用 `maybeJumpOnDoubleTap` helper + `lastTapHjklKeyUp` 字典；150ms 内连按） |
 | `c` (bare) | 当前光标位置左键单击（留在 SCROLL） |
 | `Shift / Option + c` | 当前光标位置 双击 / 右键 |
 | `Enter` | **放行**给焦点 app（与 TAP normal §4 统一） |

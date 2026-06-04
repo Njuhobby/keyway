@@ -14,13 +14,19 @@ final class MouseMover {
 
     enum Speed { case slow, normal, fast }
 
-    /// Pixels per tick. Tuned by feel. `slow` (Option) is for landing on
-    /// small icons precisely; `fast` (Shift) for crossing the screen.
-    /// slow = 2px/tick so a quick Option-tap nudges two pixels (fine
-    /// aiming) and a held Option creeps at ~120px/s.
+    /// Pixels per tick. Tuned by feel.
+    ///   slow (Option)  = 2 px/tick  ≈  120 px/s   fine aim
+    ///   normal (bare)  = 6 px/tick  ≈  360 px/s   short hops
+    ///   fast (Shift)   = 18 px/tick ≈ 1080 px/s   medium runs
+    /// **For cross-screen movement use the double-tap jump (hh/jj/
+    /// kk/ll) — Shift+double-tap teleports 1/2 screen.** With the
+    /// jump available, continuous Shift no longer has to do the
+    /// heavy lifting alone, so this speed is tuned for controlled
+    /// fine-grained traversal rather than blink-and-cursor-on-the-
+    /// other-monitor velocity.
     private let slowStep: CGFloat = 2
-    private let normalStep: CGFloat = 10
-    private let fastStep: CGFloat = 34
+    private let normalStep: CGFloat = 6
+    private let fastStep: CGFloat = 18
     private let tickInterval: TimeInterval = 1.0 / 60.0
 
     private var timer: Timer?
