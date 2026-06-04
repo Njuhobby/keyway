@@ -951,10 +951,65 @@ final class VimSession {
             // the user had it.
             return true
         }
-        // Outside the window — warp to title-bar midpoint.
+        // Outside the window. Preferred landing: the currently-focused
+        // text input (Slack's compose box, Chrome's URL bar / form
+        // field, Mail's compose field, etc.) — the OS already tracks
+        // "what was the user typing into" via AXFocusedUIElement, so
+        // restoring cursor there matches user intent after a Cmd+Tab
+        // back. Falls back to title-bar midpoint when there's no
+        // focused text input.
+        if let inputRect = Self.focusedTextInputRect(inside: rect) {
+            MouseSynth.warp(to: CGPoint(x: inputRect.midX, y: inputRect.midY))
+            return true
+        }
         let landing = CGPoint(x: rect.midX, y: rect.minY + 6)
         MouseSynth.warp(to: landing)
         return true
+    }
+
+    /// If the frontmost app's `AXFocusedUIElement` is a text-input-like
+    /// element AND its rect intersects the focused window, returns its
+    /// rect (screen coords, AX top-left origin). Returns nil otherwise
+    /// — caller should fall back to title-bar landing.
+    ///
+    /// Role allow-list keeps this defensive: we only auto-park into
+    /// **text** inputs, not into focused buttons or list items, to
+    /// avoid clicks-on-Cmd+Tab accidentally activating something the
+    /// user didn't intend.
+    private static func focusedTextInputRect(inside windowRect: CGRect) -> CGRect? {
+        guard let (app, _) = FocusedApp.current() else { return nil }
+        var focusedRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+                app, "AXFocusedUIElement" as CFString, &focusedRef
+              ) == .success,
+              let raw = focusedRef else { return nil }
+        let element = raw as! AXUIElement
+
+        var roleRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+                element, "AXRole" as CFString, &roleRef
+              ) == .success,
+              let role = roleRef as? String else { return nil }
+
+        // Text-input-like AX roles. Excludes AXButton (focused buttons
+        // shouldn't drag the cursor there), AXLink, AXMenuItem, etc.
+        let textInputRoles: Set<String> = [
+            "AXTextField",       // single-line NSTextField, HTML <input type="text">
+            "AXTextArea",        // multi-line NSTextView, HTML <textarea>, contenteditable
+            "AXSearchField",     // NSSearchField, HTML <input type="search">
+            "AXComboBox",        // editable popup; mostly text input semantics
+        ]
+        guard textInputRoles.contains(role) else { return nil }
+
+        guard let rect = AXWindowOps.readRect(element) else { return nil }
+        // Stay within (or at least touching) the focused window. Guards
+        // against weird popovers / floating widgets in another window
+        // that happen to hold focus.
+        guard windowRect.intersects(rect) else { return nil }
+        // Pathological tiny rects (some apps return 0×0 for collapsed
+        // search bars) → ignore and fall back.
+        guard rect.width >= 4, rect.height >= 4 else { return nil }
+        return rect
     }
 
     /// P3 debug: print whether the currently focused app would route
@@ -1063,10 +1118,11 @@ final class VimSession {
             // Double-tap detection (TAP normal here; SCROLL uses the
             // same helper in handleScrollNormal — hjkl is unified
             // across both modes so the jump gesture must be too).
-            // Excluded in drag sub-state: every press there extends
-            // the held drag, jumping mid-drag would teleport the drop
-            // target unpredictably.
-            if !dragHeld && maybeJumpOnDoubleTap(direction: dir) {
+            // In the drag sub-state the jump rides the held button:
+            // `dragHeld` makes jumpCursor post `.leftMouseDragged`, so
+            // the teleport drags the grabbed object 1/4-screen rather
+            // than dropping it — same gesture, drag-aware.
+            if maybeJumpOnDoubleTap(direction: dir, dragHeld: dragHeld) {
                 return true
             }
             // Option allowed through (unlike Cmd/Ctrl) because hjkl aren't
@@ -1891,13 +1947,14 @@ final class VimSession {
     /// Called from both TAP (handle's early intercept) and SCROLL
     /// (handleScrollNormal) so the gesture matches the modes.md §4/§5
     /// "hjkl unified across TAP and SCROLL" promise.
-    private func maybeJumpOnDoubleTap(direction: MouseMover.Direction) -> Bool {
+    private func maybeJumpOnDoubleTap(direction: MouseMover.Direction,
+                                      dragHeld: Bool = false) -> Bool {
         let now = CFAbsoluteTimeGetCurrent()
         guard let lastUp = lastTapHjklKeyUp[direction],
               now - lastUp < windowReverseTapWindow else {
             return false
         }
-        jumpCursor(direction: direction, fraction: 0.25)
+        jumpCursor(direction: direction, fraction: 0.25, dragHeld: dragHeld)
         lastTapHjklKeyUp[direction] = now
         return true
     }
@@ -1912,7 +1969,8 @@ final class VimSession {
     /// a raw `CGWarpMouseCursorPosition` so the destination view
     /// sees an event and updates cursor shape / hover state — same
     /// reasoning as `/`-search commit.
-    private func jumpCursor(direction: MouseMover.Direction, fraction: CGFloat) {
+    private func jumpCursor(direction: MouseMover.Direction, fraction: CGFloat,
+                            dragHeld: Bool = false) {
         let current = MouseSynth.cursorPosition()
         // Pick the screen containing the cursor. Fallback to main
         // when cursor sits exactly on a boundary or off all screens.
@@ -1937,7 +1995,7 @@ final class VimSession {
         // never lands on the literal edge pixel.
         next.x = max(frame.minX + 3, min(frame.maxX - 3, next.x))
         next.y = max(frame.minY + 3, min(frame.maxY - 3, next.y))
-        MouseSynth.warp(to: next)
+        MouseSynth.warp(to: next, dragging: dragHeld)
     }
 
     /// US-ANSI digit key codes → 0-9. nil for non-digit keys.

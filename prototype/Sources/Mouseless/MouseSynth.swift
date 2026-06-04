@@ -77,9 +77,15 @@ enum MouseSynth {
     /// is the opposite of what we want for a "teleport cursor to
     /// this text" gesture. Same `.cghidEventTap` posting +
     /// `syntheticMarker` stamping as the other helpers here.
-    static func warp(to point: CGPoint) {
+    ///
+    /// `dragging`: a left button is held (DRAG mode), so post
+    /// `.leftMouseDragged` instead of `.mouseMoved` — same reasoning
+    /// as `MouseMover`'s `dragHeld`: the target app must see the
+    /// teleport as a continuation of the drag, not a stray hover.
+    static func warp(to point: CGPoint, dragging: Bool = false) {
+        let type: CGEventType = dragging ? .leftMouseDragged : .mouseMoved
         guard let src = CGEventSource(stateID: .privateState),
-              let ev = CGEvent(mouseEventSource: src, mouseType: .mouseMoved,
+              let ev = CGEvent(mouseEventSource: src, mouseType: type,
                                mouseCursorPosition: point, mouseButton: .left)
         else { return }
         ev.setIntegerValueField(.eventSourceUserData, value: HotkeyTap.syntheticMarker)

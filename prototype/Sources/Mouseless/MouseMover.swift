@@ -16,7 +16,9 @@ final class MouseMover {
 
     /// Pixels per tick. Tuned by feel. `slow` (Option) is for landing on
     /// small icons precisely; `fast` (Shift) for crossing the screen.
-    private let slowStep: CGFloat = 3
+    /// slow = 2px/tick so a quick Option-tap nudges two pixels (fine
+    /// aiming) and a held Option creeps at ~120px/s.
+    private let slowStep: CGFloat = 2
     private let normalStep: CGFloat = 10
     private let fastStep: CGFloat = 34
     private let tickInterval: TimeInterval = 1.0 / 60.0
