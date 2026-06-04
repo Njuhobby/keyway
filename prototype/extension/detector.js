@@ -432,5 +432,93 @@
     return matches;
   }
 
-  window.MouselessDetector = { listHints, findTextMatches };
+  // ---------- App-switch cursor park (browser path) ----------
+  //
+  // Mouseless drops the cursor into a text input on app activation
+  // when the user was last typing there. Chrome's AX is unreliable
+  // for web content focus (renderer accessibility is off by default)
+  // — DOM resolves this in microseconds with 100% accuracy. Same
+  // priorities as the native AX path:
+  //   1. document.activeElement, if it's a text input
+  //   2. First visible <input> / <textarea> / contenteditable in
+  //      the top frame's viewport
+  //   3. nil → caller falls back to title-bar landing
+  //
+  // Top-frame only for v1 — iframe-hosted main inputs (Notion, Figma)
+  // would need postMessage recursion; defer until that case matters.
+
+  function isTextInputEl(el) {
+    if (!el || el.nodeType !== 1) return false;
+    if (el.disabled || el.readOnly) return false;
+    const tag = el.tagName;
+    if (tag === "INPUT") {
+      const type = (el.getAttribute("type") || "text").toLowerCase();
+      // Non-text input types — clicking them doesn't help a keyboard
+      // user resume typing.
+      const NON_TEXT = new Set([
+        "hidden", "button", "submit", "reset",
+        "checkbox", "radio", "image", "file",
+        "color", "range",
+      ]);
+      return !NON_TEXT.has(type);
+    }
+    if (tag === "TEXTAREA") return true;
+    if (el.isContentEditable) return true;
+    return false;
+  }
+
+  function isElVisible(el) {
+    const cs = getComputedStyle(el);
+    if (cs.visibility === "hidden" || cs.display === "none") return false;
+    return true;
+  }
+
+  function rectInScreen(r, origin) {
+    if (r.width < 4 || r.height < 4) return null;
+    if (r.bottom < 0 || r.top > innerHeight) return null;
+    if (r.right < 0 || r.left > innerWidth) return null;
+    const left = Math.max(0, r.left);
+    const top = Math.max(0, r.top);
+    const right = Math.min(innerWidth, r.right);
+    const bottom = Math.min(innerHeight, r.bottom);
+    return {
+      x: Math.round(origin.x + left),
+      y: Math.round(origin.y + top),
+      w: Math.round(right - left),
+      h: Math.round(bottom - top),
+    };
+  }
+
+  function findFirstInput(opts) {
+    opts = opts || {};
+    const origin = opts.viewportOriginInScreen || viewportOriginInScreen();
+
+    // (1) document.activeElement — the canonical "last edited here"
+    // signal. Works on the top frame; iframe-internal active elements
+    // surface here as the iframe element itself (we'd need to recurse
+    // into the iframe via postMessage to drill in; deferred).
+    const focused = document.activeElement;
+    if (focused && focused !== document.body && isTextInputEl(focused) && isElVisible(focused)) {
+      const r = rectInScreen(focused.getBoundingClientRect(), origin);
+      if (r) {
+        return { rect: r, source: "activeElement" };
+      }
+    }
+
+    // (2) First visible text input in document order.
+    const candidates = document.querySelectorAll(
+      "input, textarea, [contenteditable=true], [contenteditable='']"
+    );
+    for (const el of candidates) {
+      if (!isTextInputEl(el)) continue;
+      if (!isElVisible(el)) continue;
+      const r = rectInScreen(el.getBoundingClientRect(), origin);
+      if (r) {
+        return { rect: r, source: "first_visible" };
+      }
+    }
+    return null;
+  }
+
+  window.MouselessDetector = { listHints, findTextMatches, findFirstInput };
 })();

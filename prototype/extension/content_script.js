@@ -174,6 +174,23 @@
         });
         return true;
       }
+
+      if (msg.type === "find_first_input") {
+        // Synchronous — detector returns immediately. Reports the
+        // input that's currently focused (document.activeElement), or
+        // first visible <input>/<textarea>/contenteditable in
+        // document order. Top frame only for v1.
+        const result = window.MouselessDetector?.findFirstInput({
+          viewportOriginInScreen: topOrigin(),
+        });
+        sendResponse({
+          type: "first_input",
+          url: location.href,
+          rect: result?.rect || null,
+          source: result?.source || null,
+        });
+        return false;   // synchronous response, no async work
+      }
     });
   }
 

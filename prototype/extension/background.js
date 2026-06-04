@@ -229,6 +229,48 @@ async function handleFromNative(msg) {
     return;
   }
 
+  // `find_first_input` — TAP cursor-park on app-switch routes here
+  // when frontmost is a browser (Chrome's AX can't be trusted for
+  // web content focus). Same active-tab routing as list_hints.
+  if (msg.cmd === "find_first_input") {
+    try {
+      let tab = (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0];
+      if (!tab) tab = (await chrome.tabs.query({ active: true, currentWindow: true }))[0];
+      if (!tab) {
+        const win = await chrome.windows.getLastFocused({ populate: true }).catch(() => null);
+        tab = win?.tabs?.find((t) => t.active);
+      }
+      if (!tab) tab = (await chrome.tabs.query({ active: true }))[0];
+      if (!tab || !tab.id) {
+        port?.postMessage({ type: "first_input", rect: null, error: "no_active_tab" });
+        return;
+      }
+      let resp;
+      try {
+        resp = await chrome.tabs.sendMessage(
+          tab.id, { type: "find_first_input" }, { frameId: 0 }
+        );
+      } catch (e) {
+        port?.postMessage({ type: "first_input", rect: null, error: "content_script_unavailable" });
+        return;
+      }
+      if (!resp || resp.type !== "first_input") {
+        port?.postMessage({ type: "first_input", rect: null, error: "bad_response" });
+        return;
+      }
+      port?.postMessage({
+        type: "first_input",
+        url: resp.url,
+        rect: resp.rect,
+        source: resp.source,
+      });
+      console.log("[mouseless-bg] find_first_input → " + (resp.rect ? resp.source : "null"));
+    } catch (e) {
+      console.warn("[mouseless-bg] find_first_input handler threw:", e);
+    }
+    return;
+  }
+
   // Other server-initiated messages (future: invalidate caches, etc.).
   console.log("[mouseless-bg] recv from native:", msg);
 }

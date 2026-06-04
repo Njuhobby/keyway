@@ -405,7 +405,7 @@ final class VimSession {
                 // HUD note but stay in TAP (Dock / menu bar / menu
                 // extras hints from `activate` are still usable, so
                 // exiting OFF would be too aggressive).
-                if !self.parkCursorOnFrontmostWindowIfOutside() {
+                if !(await self.parkCursorOnFrontmostWindowIfOutside()) {
                     HUD.shared.show("TAP: no frontmost window")
                 }
             } else {
@@ -519,7 +519,7 @@ final class VimSession {
                 // since those hints are still useful interaction
                 // targets.
                 if fromAppSwitch {
-                    if !self.parkCursorOnFrontmostWindowIfOutside() {
+                    if !(await self.parkCursorOnFrontmostWindowIfOutside()) {
                         HUD.shared.show("TAP: no frontmost window")
                     }
                 }
@@ -941,7 +941,7 @@ final class VimSession {
     /// otherwise — caller can then show "TAP: no frontmost window"
     /// HUD on `false`.
     @discardableResult
-    private func parkCursorOnFrontmostWindowIfOutside() -> Bool {
+    private func parkCursorOnFrontmostWindowIfOutside() async -> Bool {
         guard let window = AXWindowOps.frontmostWindow(),
               let rect = AXWindowOps.readRect(window)
         else { return false }
@@ -951,14 +951,26 @@ final class VimSession {
             // the user had it.
             return true
         }
-        // Outside the window. Preferred landing: the currently-focused
-        // text input (Slack's compose box, Chrome's URL bar / form
-        // field, Mail's compose field, etc.) — the OS already tracks
-        // "what was the user typing into" via AXFocusedUIElement, so
-        // restoring cursor there matches user intent after a Cmd+Tab
-        // back. Falls back to title-bar midpoint when there's no
-        // focused text input.
-        if let inputRect = Self.focusedTextInputRect(inside: rect) {
+        // Outside the window. Preferred landing: a text input the
+        // user was last interacting with. Two paths:
+        //   - Browser: ask extension (DOM `document.activeElement`,
+        //     then first visible input). Chrome's AX is unreliable
+        //     for web content focus state.
+        //   - Native AX-walkable app: read `AXFocusedUIElement`,
+        //     filter to text-input roles.
+        // Both fall back to title-bar midpoint when no input found.
+        let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        let isBrowser = bundleID.map { AppRegistry.isBrowserApp(bundleID: $0) } ?? false
+        var inputRect: CGRect? = nil
+        if isBrowser {
+            if let r = await BrowserProvider.findFirstInputRect(),
+               rect.intersects(r) {
+                inputRect = r
+            }
+        } else {
+            inputRect = Self.focusedTextInputRect(inside: rect)
+        }
+        if let inputRect {
             MouseSynth.warp(to: CGPoint(x: inputRect.midX, y: inputRect.midY))
             return true
         }

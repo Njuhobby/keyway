@@ -88,6 +88,39 @@ enum BrowserProvider {
 }
 
 extension BrowserProvider {
+    /// Active tab's "best cursor landing spot" for app-switch park.
+    /// Priority:
+    ///   1. `document.activeElement` if it's a text input
+    ///   2. First visible `<input>` / `<textarea>` / contenteditable
+    /// Returns nil when no candidate found, extension unreachable, etc.
+    /// Caller (VimSession) falls back to title-bar landing.
+    static func findFirstInputRect(timeout: TimeInterval = 0.3) async -> CGRect? {
+        let bundleID = await MainActor.run {
+            NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        }
+        guard BridgeServer.shared.sendToActive(
+            ["cmd": "find_first_input"],
+            expectingBrowserBundleID: bundleID
+        ) else {
+            return nil
+        }
+        guard let response = await BridgeServer.shared.awaitResponse(
+            ofType: "first_input", timeout: timeout
+        ) else { return nil }
+        guard let rectDict = response["rect"] as? [String: Any] else { return nil }
+        func num(_ key: String) -> CGFloat? {
+            if let d = rectDict[key] as? Double { return CGFloat(d) }
+            if let i = rectDict[key] as? Int    { return CGFloat(i) }
+            return nil
+        }
+        guard let x = num("x"), let y = num("y"),
+              let w = num("w"), let h = num("h"),
+              w > 0, h > 0 else { return nil }
+        let source = (response["source"] as? String) ?? "?"
+        print("[browser-provider] find_first_input → (\(Int(x)),\(Int(y))) \(Int(w))x\(Int(h)) source=\(source)")
+        return CGRect(x: x, y: y, width: w, height: h)
+    }
+
     /// One text-substring match for TAP `/`-search routed through the
     /// extension instead of OCR. `rect` is already in screen coords.
     struct TextMatch: Sendable {
