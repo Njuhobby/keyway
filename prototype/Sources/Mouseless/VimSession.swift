@@ -968,18 +968,14 @@ final class VimSession {
                 inputRect = r
             }
         } else {
-            // Primary: AXFocusedUIElement on the app.
+            // Native AX path. If the app exposes AXFocusedUIElement
+            // (well-behaved native apps + WeChat-style apps), great —
+            // we land in the input. If not (Electron apps like Slack /
+            // Discord / VS Code where AXFocusedUIElement is empty),
+            // accept the title-bar fallback. No deeper AX tree walking
+            // — the marginal complexity isn't worth handful of apps it
+            // might salvage.
             inputRect = Self.focusedTextInputRect(inside: rect)
-            // Fallback: walk the focused window for the first text input.
-            // Catches Electron apps (Slack, Discord, VS Code) that
-            // don't expose AXFocusedUIElement but DO have the compose
-            // box somewhere in the AX tree.
-            if inputRect == nil {
-                if let walked = Self.firstTextInputInWindow(window, inside: rect) {
-                    print("[mouseless] focusedInput: fallback walk found \(walked)")
-                    inputRect = walked
-                }
-            }
         }
         if let inputRect {
             MouseSynth.warp(to: CGPoint(x: inputRect.midX, y: inputRect.midY))
@@ -1070,98 +1066,6 @@ final class VimSession {
         let how = matchedByRole ? "role" : "editable-value"
         print("[mouseless] focusedInput: match via \(how) — role=\(role) subrole=\(subrole) rect=\(rect)")
         return rect
-    }
-
-    /// Fallback when `AXFocusedUIElement` fails or doesn't match:
-    /// walk the focused window's AX subtree looking for the first
-    /// text-input-like element with a reasonable rect.
-    ///
-    /// Electron apps (Slack, Discord, VS Code) frequently don't
-    /// expose `AXFocusedUIElement` at all (`kAXErrorNoValue` /
-    /// -25212), but their compose / search inputs are often still in
-    /// the AX tree at some depth. This catches those without needing
-    /// per-app rules.
-    ///
-    /// "First in tree order" usually = visually top-to-bottom, which
-    /// for chat apps lands in search box rather than compose box.
-    /// Acceptable v1; if real-world feedback says "always want
-    /// compose", switch heuristic to bottom-most or largest-area.
-    ///
-    /// Depth + visit-count capped so a misbehaving app with a
-    /// massive AX tree can't blow up the app-switch latency.
-    private static func firstTextInputInWindow(_ window: AXUIElement, inside windowRect: CGRect) -> CGRect? {
-        var visited = 0
-        var rolesSeen: [String: Int] = [:]      // role → count, for diagnostic
-        var editableCandidates: [(role: String, rect: CGRect)] = []
-        let result = walkForTextInput(window, depth: 0,
-                                       visited: &visited,
-                                       rolesSeen: &rolesSeen,
-                                       editableCandidates: &editableCandidates,
-                                       windowRect: windowRect)
-        if result == nil {
-            let rolesSummary = rolesSeen.sorted { $0.value > $1.value }
-                .prefix(10)
-                .map { "\($0.key):\($0.value)" }.joined(separator: " ")
-            print("[mouseless] focusedInput: walk visited \(visited) nodes, no text-input role matched. roles seen: \(rolesSummary)")
-            if !editableCandidates.isEmpty {
-                let cands = editableCandidates.prefix(5)
-                    .map { "\($0.role)@\(Int($0.rect.minX)),\(Int($0.rect.minY)) \(Int($0.rect.width))x\(Int($0.rect.height))" }
-                    .joined(separator: " | ")
-                print("[mouseless] focusedInput: editable (AXValue settable) candidates: \(cands)")
-            }
-        }
-        return result
-    }
-
-    private static func walkForTextInput(_ root: AXUIElement, depth: Int,
-                                          visited: inout Int,
-                                          rolesSeen: inout [String: Int],
-                                          editableCandidates: inout [(role: String, rect: CGRect)],
-                                          windowRect: CGRect) -> CGRect? {
-        visited += 1
-        if visited > 400 || depth > 12 { return nil }
-
-        var roleRef: CFTypeRef?
-        let roleOK = AXUIElementCopyAttributeValue(root, "AXRole" as CFString, &roleRef) == .success
-        let role = (roleRef as? String) ?? "?"
-        if roleOK { rolesSeen[role, default: 0] += 1 }
-
-        if role == "AXTextField" || role == "AXTextArea" || role == "AXSearchField" {
-            if let rect = AXWindowOps.readRect(root),
-               rect.width >= 30, rect.height >= 12,
-               windowRect.intersects(rect) {
-                return rect
-            }
-        } else {
-            // Also collect "anything with settable AXValue" candidates
-            // for diagnostic. NOT returned as match yet — too risky
-            // without seeing what they actually are. After we see real
-            // data from a few apps we can decide whether to promote
-            // them.
-            var settable: DarwinBoolean = false
-            AXUIElementIsAttributeSettable(root, "AXValue" as CFString, &settable)
-            if settable.boolValue, let rect = AXWindowOps.readRect(root),
-               rect.width >= 30, rect.height >= 12,
-               windowRect.intersects(rect) {
-                editableCandidates.append((role: role, rect: rect))
-            }
-        }
-
-        var childrenRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(root, "AXChildren" as CFString, &childrenRef) == .success,
-              let children = childrenRef as? [AXUIElement]
-        else { return nil }
-
-        for child in children {
-            if let found = walkForTextInput(child, depth: depth + 1,
-                                            visited: &visited,
-                                            rolesSeen: &rolesSeen,
-                                            editableCandidates: &editableCandidates,
-                                            windowRect: windowRect) {
-                return found
-            }
-        }
-        return nil
     }
 
     /// P3 debug: print whether the currently focused app would route
