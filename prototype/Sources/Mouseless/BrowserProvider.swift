@@ -87,6 +87,64 @@ enum BrowserProvider {
     }
 }
 
+extension BrowserProvider {
+    /// One text-substring match for TAP `/`-search routed through the
+    /// extension instead of OCR. `rect` is already in screen coords.
+    struct TextMatch: Sendable {
+        let rect: CGRect
+        let text: String
+    }
+
+    /// Ask the extension to find `query` as a substring in the active
+    /// tab's currently-visible text. Returns an empty array when
+    /// extension not connected / wrong browser / timeout / page has
+    /// no matches. Same "browser path is authoritative" stance as
+    /// `fetchHints` — no OCR fallback when the browser branch is
+    /// taken.
+    static func findText(query: String, timeout: TimeInterval = 0.4) async -> [TextMatch] {
+        let bundleID = await MainActor.run {
+            NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        }
+        guard BridgeServer.shared.sendToActive(
+            ["cmd": "find_text", "query": query],
+            expectingBrowserBundleID: bundleID
+        ) else {
+            print("[browser-provider] find_text: no matching extension connection — 0 matches")
+            return []
+        }
+        guard let response = await BridgeServer.shared.awaitResponse(
+            ofType: "text_matches", timeout: timeout
+        ) else {
+            print("[browser-provider] find_text: timeout (>\(Int(timeout * 1000))ms)")
+            return []
+        }
+        if let err = response["error"] as? String {
+            print("[browser-provider] find_text: extension error=\(err)")
+            return []
+        }
+        guard let raw = response["matches"] as? [[String: Any]] else { return [] }
+        let matches = raw.compactMap { TextMatch(rawDict: $0) }
+        print("[browser-provider] find_text q=\"\(query)\" → \(matches.count) matches")
+        return matches
+    }
+}
+
+private extension BrowserProvider.TextMatch {
+    init?(rawDict: [String: Any]) {
+        guard let rectDict = rawDict["rect"] as? [String: Any] else { return nil }
+        func num(_ key: String) -> CGFloat? {
+            if let d = rectDict[key] as? Double { return CGFloat(d) }
+            if let i = rectDict[key] as? Int    { return CGFloat(i) }
+            return nil
+        }
+        guard let x = num("x"), let y = num("y"),
+              let w = num("w"), let h = num("h"),
+              w > 0, h > 0 else { return nil }
+        self.rect = CGRect(x: x, y: y, width: w, height: h)
+        self.text = (rawDict["text"] as? String) ?? ""
+    }
+}
+
 private extension BrowserProvider.Hint {
     /// Parse one element of the `hints` array as produced by
     /// `detector.js`. Defensive: any missing field → drop the hint

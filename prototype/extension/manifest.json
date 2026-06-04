@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Mouseless (dev)",
-  "version": "0.0.11",
+  "version": "0.0.12",
   "description": "Bridge between Chrome and the Mouseless desktop app. Dev build — multi-profile / multi-browser active routing.",
   "minimum_chrome_version": "120",
   "permissions": ["nativeMessaging", "scripting"],

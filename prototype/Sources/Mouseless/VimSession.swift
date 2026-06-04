@@ -1379,24 +1379,65 @@ final class VimSession {
         }
     }
 
-    /// Trigger OCR + match discovery. Switches to `.searchSearching`
-    /// transient state, kicks off an async Task that captures the
-    /// focused window, runs Vision OCR, finds substring matches, and
-    /// transitions to `.searchPicking` (or back to `.normal` if no
-    /// matches).
+    /// Trigger match discovery for the user's query. **Routes** by
+    /// frontmost app:
+    ///   - browser app → ask the extension's DOM-level
+    ///     `findTextMatches` (≈5-20ms, exact text, no OCR errors)
+    ///   - everything else → existing Vision OCR pipeline
+    ///     (ScreenCapture + recognizeText + findMatches)
+    /// Switches to `.searchSearching` transient state during the
+    /// async work, transitions to `.searchPicking` (or back to
+    /// `.normal` if no matches).
     private func kickoffSearch(query: String) {
         setSearchPhase(.searching)
         renderModeHUD()
-        print("[mouseless] search: query=\"\(query)\" — capturing + OCR'ing focused window")
+        let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        let useBrowser = bundleID.map { AppRegistry.isBrowserApp(bundleID: $0) } ?? false
+        if useBrowser {
+            print("[mouseless] search: query=\"\(query)\" — DOM match via extension")
+            kickoffSearchViaBrowser(query: query)
+        } else {
+            print("[mouseless] search: query=\"\(query)\" — capturing + OCR'ing focused window")
+            kickoffSearchViaOCR(query: query)
+        }
+    }
+
+    private func kickoffSearchViaBrowser(query: String) {
+        Task { @MainActor in
+            let tStart = Date()
+            let raw = await BrowserProvider.findText(query: query)
+            // Cancel guard, same pattern as OCR path.
+            guard case .searching = self.searchPhase else {
+                print("[mouseless] search: cancelled during DOM match")
+                return
+            }
+            let tEnd = Date()
+            let ms = Int(tEnd.timeIntervalSince(tStart) * 1000)
+            print("[mouseless] search: DOM → \(raw.count) matches in \(ms)ms")
+            if raw.isEmpty {
+                searchFailed(reason: "no matches for \"\(query)\"")
+                return
+            }
+            let cap = HintMode.alphabet.count * HintMode.alphabet.count
+            let capped = Array(raw.prefix(cap))
+            let labels = HintMode.generateLabels(count: capped.count)
+            let labeled = zip(labels, capped).map { (label, m) in
+                SearchMatch(label: label, rect: m.rect, text: m.text)
+            }
+            setSearchPhase(.picking(matches: labeled, typed: ""))
+            let overlayMatches = labeled.map { SearchOverlay.Match(label: $0.label, rect: $0.rect) }
+            SearchOverlay.shared.show(matches: overlayMatches, typed: "")
+            renderModeHUD()
+        }
+    }
+
+    private func kickoffSearchViaOCR(query: String) {
         Task { @MainActor in
             let tStart = Date()
             guard let captured = await ScreenCapture.captureFocusedWindow() else {
                 searchFailed(reason: "no focused window")
                 return
             }
-            // Guard against the user cancelling / mode-switching while
-            // OCR is in flight. `searchPhase` reads from whichever host
-            // sub-state is active (TAP or SCROLL).
             guard case .searching = self.searchPhase else {
                 print("[mouseless] search: cancelled during capture")
                 return
@@ -1416,7 +1457,6 @@ final class VimSession {
                 searchFailed(reason: "no matches for \"\(query)\"")
                 return
             }
-            // Cap to alphabet² so labels stay ≤2 chars even on huge results.
             let cap = HintMode.alphabet.count * HintMode.alphabet.count
             let capped = Array(matches.prefix(cap))
             let labels = HintMode.generateLabels(count: capped.count)

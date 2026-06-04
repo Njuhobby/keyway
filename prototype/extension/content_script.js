@@ -87,38 +87,93 @@
     }
   });
 
+  // ---------- (2b) Frame role: respond to parent's text-search request ----------
+  //
+  // Parallel to hints request but for /-search. Iframes get queried
+  // with (query, parent-computed origin), recurse into their own
+  // iframes, return all matches flattened.
+
+  window.addEventListener("message", async (e) => {
+    const data = e.data;
+    if (!data || typeof data !== "object") return;
+    if (data.type !== "mouseless_text_request") return;
+    if (typeof data.id !== "string") return;
+    if (typeof data.query !== "string") return;
+    if (!data.origin || typeof data.origin.x !== "number" || typeof data.origin.y !== "number") return;
+
+    let textMatches = [];
+    try {
+      textMatches = await gatherTextMatchesRecursive(data.query, data.origin);
+    } catch (err) { /* swallow */ }
+    try {
+      e.source.postMessage({
+        type: "mouseless_text_response",
+        id: data.id,
+        matches: textMatches,
+      }, "*");
+    } catch (err) { /* parent gone — caller timeout handles */ }
+  });
+
   // ---------- (1) Top frame: bg → CS bridge entry point ----------
 
   if (IS_TOP) {
     chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-      if (!msg || msg.type !== "list_hints") return;
-      const t0 = performance.now();
-      // Top frame computes its own viewport origin in screen coords.
-      // Heuristic: window.screenX is the window's left in CSS px;
-      // `outerHeight - innerHeight` is the vertical chrome (tab bar +
-      // URL bar + bookmarks bar at top; status bar at bottom is usually
-      // included in this number too, but small).
-      const origin = {
-        x: window.screenX,
-        y: window.screenY + (window.outerHeight - window.innerHeight),
-      };
-      gatherHintsRecursive(origin).then((hints) => {
-        sendResponse({
-          type: "hints",
-          url: location.href,
-          viewport: { w: innerWidth, h: innerHeight, dpr: devicePixelRatio },
-          ms: parseFloat((performance.now() - t0).toFixed(1)),
-          hints,
+      if (!msg || typeof msg !== "object") return;
+
+      // Top frame computes its own viewport origin in screen coords
+      // (heuristic: window.screenX is window left in CSS px;
+      // outerHeight - innerHeight is the vertical chrome at the top
+      // of the window).
+      function topOrigin() {
+        return {
+          x: window.screenX,
+          y: window.screenY + (window.outerHeight - window.innerHeight),
+        };
+      }
+
+      if (msg.type === "list_hints") {
+        const t0 = performance.now();
+        gatherHintsRecursive(topOrigin()).then((hints) => {
+          sendResponse({
+            type: "hints",
+            url: location.href,
+            viewport: { w: innerWidth, h: innerHeight, dpr: devicePixelRatio },
+            ms: parseFloat((performance.now() - t0).toFixed(1)),
+            hints,
+          });
+        }).catch((err) => {
+          sendResponse({
+            type: "hints",
+            url: location.href,
+            hints: [],
+            error: String(err),
+          });
         });
-      }).catch((err) => {
-        sendResponse({
-          type: "hints",
-          url: location.href,
-          hints: [],
-          error: String(err),
+        return true;
+      }
+
+      if (msg.type === "find_text") {
+        const query = typeof msg.query === "string" ? msg.query : "";
+        const t0 = performance.now();
+        gatherTextMatchesRecursive(query, topOrigin()).then((matches) => {
+          sendResponse({
+            type: "text_matches",
+            url: location.href,
+            query,
+            ms: parseFloat((performance.now() - t0).toFixed(1)),
+            matches,
+          });
+        }).catch((err) => {
+          sendResponse({
+            type: "text_matches",
+            url: location.href,
+            query,
+            matches: [],
+            error: String(err),
+          });
         });
-      });
-      return true;   // async response
+        return true;
+      }
     });
   }
 
@@ -140,6 +195,26 @@
       iframes.map((f) => askIframeForHints(f, origin))
     );
     return myHints.concat(...childBatches);
+  }
+
+  // Same shape as gatherHintsRecursive but for /-search. The detector
+  // returns viewport-clamped text-substring rects in screen coords;
+  // child frames are queried via postMessage with both the query AND
+  // the parent-computed origin.
+  async function gatherTextMatchesRecursive(query, origin) {
+    if (!window.MouselessDetector || !window.MouselessDetector.findTextMatches) return [];
+    if (!query) return [];
+    const myMatches = window.MouselessDetector.findTextMatches(query, {
+      viewportOriginInScreen: origin,
+    });
+
+    const iframes = Array.from(document.querySelectorAll("iframe"));
+    if (iframes.length === 0) return myMatches;
+
+    const childBatches = await Promise.all(
+      iframes.map((f) => askIframeForTextMatches(f, query, origin))
+    );
+    return myMatches.concat(...childBatches);
   }
 
   // ---------- (4) DOM-change detection ----------
@@ -257,6 +332,51 @@
         }, "*");
       } catch (err) {
         // sandboxed / cross-origin no-postMessage case
+        cleanup();
+        resolve([]);
+      }
+    });
+  }
+
+  // Parallel to askIframeForHints for /-search. Same plumbing — just
+  // the message type and reply field differ.
+  function askIframeForTextMatches(iframe, query, parentOrigin) {
+    return new Promise((resolve) => {
+      const r = iframe.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0) { resolve([]); return; }
+      if (!iframe.contentWindow) { resolve([]); return; }
+      if (r.bottom < 0 || r.right < 0 || r.top > innerHeight || r.left > innerWidth) {
+        resolve([]);
+        return;
+      }
+      const childOrigin = {
+        x: parentOrigin.x + r.left,
+        y: parentOrigin.y + r.top,
+      };
+      const id = "mt_" + Math.random().toString(36).slice(2) + "_" + Date.now();
+      let settled = false;
+      const handler = (e) => {
+        const d = e.data;
+        if (!d || d.type !== "mouseless_text_response" || d.id !== id) return;
+        cleanup();
+        resolve(Array.isArray(d.matches) ? d.matches : []);
+      };
+      const timeoutId = setTimeout(() => { cleanup(); resolve([]); }, HINT_REQ_TIMEOUT_MS);
+      const cleanup = () => {
+        if (settled) return;
+        settled = true;
+        window.removeEventListener("message", handler);
+        clearTimeout(timeoutId);
+      };
+      window.addEventListener("message", handler);
+      try {
+        iframe.contentWindow.postMessage({
+          type: "mouseless_text_request",
+          id,
+          query,
+          origin: childOrigin,
+        }, "*");
+      } catch (err) {
         cleanup();
         resolve([]);
       }

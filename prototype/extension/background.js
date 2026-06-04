@@ -176,6 +176,59 @@ async function handleFromNative(msg) {
     }
     return;
   }
+
+  // `find_text` — TAP /-search routed to DOM instead of Vision OCR
+  // when frontmost is a browser. Identical active-tab routing as
+  // list_hints; the query string rides on the message.
+  if (msg.cmd === "find_text") {
+    const query = typeof msg.query === "string" ? msg.query : "";
+    try {
+      let tab = (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0];
+      if (!tab) tab = (await chrome.tabs.query({ active: true, currentWindow: true }))[0];
+      if (!tab) {
+        const win = await chrome.windows.getLastFocused({ populate: true }).catch(() => null);
+        tab = win?.tabs?.find((t) => t.active);
+      }
+      if (!tab) tab = (await chrome.tabs.query({ active: true }))[0];
+      if (!tab || !tab.id) {
+        port?.postMessage({
+          type: "text_matches", url: null, query, matches: [], error: "no_active_tab",
+        });
+        return;
+      }
+      let resp;
+      try {
+        resp = await chrome.tabs.sendMessage(
+          tab.id, { type: "find_text", query }, { frameId: 0 }
+        );
+      } catch (e) {
+        port?.postMessage({
+          type: "text_matches", url: tab.url, query, matches: [],
+          error: "content_script_unavailable",
+        });
+        return;
+      }
+      if (!resp || resp.type !== "text_matches") {
+        port?.postMessage({
+          type: "text_matches", url: tab.url, query, matches: [], error: "bad_response",
+        });
+        return;
+      }
+      port?.postMessage({
+        type: "text_matches",
+        url: resp.url,
+        query: resp.query,
+        ms: resp.ms,
+        matches: resp.matches,
+      });
+      console.log("[mouseless-bg] find_text q=\"" + query + "\" →",
+                  resp.matches.length, "matches, sent to native");
+    } catch (e) {
+      console.warn("[mouseless-bg] find_text handler threw:", e);
+    }
+    return;
+  }
+
   // Other server-initiated messages (future: invalidate caches, etc.).
   console.log("[mouseless-bg] recv from native:", msg);
 }
