@@ -968,7 +968,18 @@ final class VimSession {
                 inputRect = r
             }
         } else {
+            // Primary: AXFocusedUIElement on the app.
             inputRect = Self.focusedTextInputRect(inside: rect)
+            // Fallback: walk the focused window for the first text input.
+            // Catches Electron apps (Slack, Discord, VS Code) that
+            // don't expose AXFocusedUIElement but DO have the compose
+            // box somewhere in the AX tree.
+            if inputRect == nil {
+                if let walked = Self.firstTextInputInWindow(window, inside: rect) {
+                    print("[mouseless] focusedInput: fallback walk found \(walked)")
+                    inputRect = walked
+                }
+            }
         }
         if let inputRect {
             MouseSynth.warp(to: CGPoint(x: inputRect.midX, y: inputRect.midY))
@@ -1059,6 +1070,60 @@ final class VimSession {
         let how = matchedByRole ? "role" : "editable-value"
         print("[mouseless] focusedInput: match via \(how) — role=\(role) subrole=\(subrole) rect=\(rect)")
         return rect
+    }
+
+    /// Fallback when `AXFocusedUIElement` fails or doesn't match:
+    /// walk the focused window's AX subtree looking for the first
+    /// text-input-like element with a reasonable rect.
+    ///
+    /// Electron apps (Slack, Discord, VS Code) frequently don't
+    /// expose `AXFocusedUIElement` at all (`kAXErrorNoValue` /
+    /// -25212), but their compose / search inputs are often still in
+    /// the AX tree at some depth. This catches those without needing
+    /// per-app rules.
+    ///
+    /// "First in tree order" usually = visually top-to-bottom, which
+    /// for chat apps lands in search box rather than compose box.
+    /// Acceptable v1; if real-world feedback says "always want
+    /// compose", switch heuristic to bottom-most or largest-area.
+    ///
+    /// Depth + visit-count capped so a misbehaving app with a
+    /// massive AX tree can't blow up the app-switch latency.
+    private static func firstTextInputInWindow(_ window: AXUIElement, inside windowRect: CGRect) -> CGRect? {
+        var visited = 0
+        return walkForTextInput(window, depth: 0, visited: &visited, windowRect: windowRect)
+    }
+
+    private static func walkForTextInput(_ root: AXUIElement, depth: Int,
+                                          visited: inout Int,
+                                          windowRect: CGRect) -> CGRect? {
+        visited += 1
+        if visited > 200 || depth > 10 { return nil }
+
+        var roleRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(root, "AXRole" as CFString, &roleRef) == .success,
+           let role = roleRef as? String,
+           role == "AXTextField" || role == "AXTextArea" || role == "AXSearchField" {
+            if let rect = AXWindowOps.readRect(root),
+               rect.width >= 30, rect.height >= 12,
+               windowRect.intersects(rect) {
+                return rect
+            }
+        }
+
+        var childrenRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(root, "AXChildren" as CFString, &childrenRef) == .success,
+              let children = childrenRef as? [AXUIElement]
+        else { return nil }
+
+        for child in children {
+            if let found = walkForTextInput(child, depth: depth + 1,
+                                            visited: &visited,
+                                            windowRect: windowRect) {
+                return found
+            }
+        }
+        return nil
     }
 
     /// P3 debug: print whether the currently focused app would route
