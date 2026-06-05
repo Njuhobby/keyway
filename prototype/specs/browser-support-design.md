@@ -9,7 +9,7 @@
 | P2-A 检测器（Vimium 规则改写） | ✅ |
 | P2-B iframe 跨 frame 协调（postMessage 链） | ✅ |
 | P3 `BrowserProvider` 接入 HintMode | ✅ |
-| P4 异步加载 `page_changed` 触发 in-place rehint | ✅ |
+| P4 异步加载 `page_changed` 触发 in-place rehint（leading+trailing 节流）| ✅ |
 | 增量补丁：多 profile / 多浏览器 `i_am_active` 路由 | ✅ |
 | 增量补丁：同窗口换 tab 的 `tab_changed` 信号 | ✅ |
 | 增量补丁：SW 启动 auto-inject 已存在的 tab | ✅ |
@@ -21,7 +21,7 @@
 
 Chrome 上**功能层面已可 daily-drive**。Safari 等 P5。
 
-详细的 commit 链：`fb2ccde` (P0) → `130297e` (P1.1) → `f08a775` (P1.2) → `3c62077` (P1.3) → `a89caee` (P2-A) → `01a5fa8` (P2-B) → `59d4f54` (P3) → `fd7efa6` (P4) → `afd41bc` (multi-route) → `374ea21` (browser path 自治) → `0413c85` (auto-inject) → `76dd2a3` (tab_changed) → `ebcb371` (navigation_complete) → `8df297b` (anchor skip 100ms rehint) → `d68a7d5` (DOM /-search) → `1df5c64` (DOM cursor park)。
+详细的 commit 链：`fb2ccde` (P0) → `130297e` (P1.1) → `f08a775` (P1.2) → `3c62077` (P1.3) → `a89caee` (P2-A) → `01a5fa8` (P2-B) → `59d4f54` (P3) → `fd7efa6` (P4) → `afd41bc` (multi-route) → `374ea21` (browser path 自治) → `0413c85` (auto-inject) → `76dd2a3` (tab_changed) → `ebcb371` (navigation_complete) → `8df297b` (anchor skip 100ms rehint) → `d68a7d5` (DOM /-search) → `1df5c64` (DOM cursor park) → `a614792` (page_changed leading+trailing 节流，修连切 tab)。
 
 ---
 
@@ -218,7 +218,8 @@ Vimium 是 **MIT 协议**，可商用，要求 attribution + 保留 LICENSE。
 机制：
 
 - **扩展端**：每个 frame content_script 装 `MutationObserver`。callback 用 selector 早 return 过滤"没新可点元素出现"的 mutation，避免 Gmail / Slack 每秒几十次 DOM 喷射打过来。"有新可点"时 top frame 直接 `chrome.runtime.sendMessage` 给 SW；iframe 用 `mouseless_page_changed_inner` postMessage 给父，父递归向上中继到 top 才出局。
-- **Mouseless 端**：BridgeServer handler 路由 `{type: "page_changed"}` → `VimSession.handlePageChanged` → 4 道闸：in TAP + frontmost 是 browser + `tapSub == .normal`（不在 drag/search 子状态） + `typed` 前缀为空（不打断用户选 label） + 距上次 ≥500ms cooldown。全过 → `HintMode.refreshInPlace` —— **不 deactivate + 不 hide + 不重 activate**，直接 `applyCollected` 重 fetch hints + `HintOverlay.show(targets: new, typed: typed)` 原地替换 targets，**零闪烁**。
+- **Mouseless 端**：BridgeServer handler 路由 `{type: "page_changed"}` → `VimSession.handlePageChanged` → **leading+trailing 节流(500ms)** + 4 道闸：in TAP + frontmost 是 browser + `tapSub == .normal`（不在 drag/search 子状态） + `typed` 前缀为空（不打断用户选 label）。全过 → `HintMode.refreshInPlace` —— **不 deactivate + 不 hide + 不重 activate**，直接 `applyCollected` 重 fetch hints + `HintOverlay.show(targets: new, typed: typed)` 原地替换 targets，**零闪烁**。
+  - **节流为什么是 leading+trailing 而非纯 leading**：纯 leading（窗口内事件全丢）对"连切 tab"会出错 —— tab1→tab2→tab3→tab4 快连，第一次刷到 tab2、后面被 cooldown 丢，overlay 停在 tab2 而用户在 tab4。改成 leading+trailing：窗口外立即刷（leading，保 streaming 及时性），窗口内排**一个** trailing 在窗口末尾再刷一次、读 THEN-当前的 tab（最终状态赢）。频率上限仍被 500ms cooldown 钉死（trailing 不增频，只补最终状态），所以防 Gmail/Slack DOM 井喷的目标只增不减。`performPageChangedRefresh` 在真正执行时**重新过一遍 4 道闸**（trailing 调度到 fire 之间状态可能变），stale fire 安全 no-op。`pendingPageChangedTrailing` 在 `exit()` 取消。
 - **HintMode 改造**：原 `activate` 里"label 分配 + targets writeback"提到 `applyCollected(_:)` 共用，`activate` 跟新加的 `refreshInPlace(isolateApp:)` 都走它。前者初次进入会清 `typed` + 设 `isActiveFlag = true`；后者保留两者。
 
 ### P4.5 — 同窗口换 tab 的 `tab_changed`（增量）✅
