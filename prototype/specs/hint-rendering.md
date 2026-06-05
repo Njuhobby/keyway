@@ -210,7 +210,7 @@ let viewY = nsGlobalY - winOrigin.y      // NSScreen 全局 → view 局部 Y
 
 ## 7. 四种 badge 排版
 
-`HintOverlayView.draw` 按优先级分流：Dock（数字标签）→ AXMenuItem → **足够大的 rect 用 inside 放置** → 其余 speech bubble。
+`HintOverlayView.draw` 按优先级分流：Dock（数字标签）→ AXMenuItem → **足够大的 rect 用 inside 放置** → 其余 speech bubble。算完位置后还有一趟 **de-collision**（§7.5）把叠在一起的 label 挪开。
 
 ### 7.1 Dock items（label 首字符是数字）
 
@@ -248,6 +248,20 @@ Badge 居中对齐文字（其他几种是左对齐）。
 ### 7.4 Speech bubble（rect 太小，放不下 inside）
 
 Badge 22×16 矩形 + 尾巴三角。默认**下方**（尾巴指上），不 fit 翻**上方**（尾巴指下）。同样用 `contains` 判断 fit。只有小于 §7.3 阈值的 target 才走这里。
+
+### 7.5 De-collision（去重叠）
+
+§7.1-7.4 每个 label 的位置是**独立算的、不看别的 label**，所以 dense 页面（web 工具栏 / icon 网格 / 导航栏，Chrome 上最明显）label 会叠在一起、读不清。用户是**读 label 文字再敲**，被盖住的 label 等于废了 —— 所以"可读"优先于"精确贴着元素"。
+
+`draw` 因此分**三趟**：
+
+1. **算位置**：按 §7.1-7.4 算每个可见 label 的 `fillRect`（逻辑不变），收集成 `[Placed]`（不立即画）。
+2. **去重叠**：贪心。维护 `occupied: [NSRect]`，逐个 label 检查跟"已放下的"撞不撞（相交，1pt gap 防贴边）；撞了就在附近找最近的空位挪过去（`nudgeToFree`：radius 3 × (labelW, labelH) 的偏移网格，按离原位距离近→远排序，第一个空且在屏内的胜出；半径内找不到 → 放弃、接受重叠，好过把 label 甩远）。挪过的 label **丢掉尾巴**（连接线会指错）。把最终位置 append 进 `occupied` —— 后面的 label 比的是前面**挪后**的位置（贪心滚动、不回头）。
+3. **画**。
+
+**Dock label 不参与去重叠**（它们在 icon 网格外、极少撞，挪开会脱离尾巴更难看）。
+
+**性能**：O(n²)（每个比前面所有），但 n≤`maxTargets`(200)、一次性渲染（非每帧）、操作是 cheap 的 rect 相交（几个 float 比较）。实测亚毫秒；病态全撞满也才 ~10ms。真嫌慢有空间分桶（broad-phase）可降到 ~O(n)，但 n 这量级用不上。
 
 ---
 
