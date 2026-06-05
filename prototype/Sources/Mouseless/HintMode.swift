@@ -395,8 +395,8 @@ final class HintMode {
                 // "park the cursor here, I'll fine-tune with hjkl".
                 MouseSynth.warp(to: center)
             } else {
-                MouseSynth.click(at: center, button: buttonForAction(action),
-                                 count: countForAction(action))
+                clickAfterMove(at: center, button: buttonForAction(action),
+                               count: countForAction(action))
             }
         case .omni:
             // OCR refiner needs to re-screencap + OCR (~60-90ms total).
@@ -421,8 +421,8 @@ final class HintMode {
                 if isMove {
                     MouseSynth.warp(to: point)
                 } else {
-                    MouseSynth.click(at: point, button: buttonForAction(action),
-                                     count: countForAction(action))
+                    clickAfterMove(at: point, button: buttonForAction(action),
+                                   count: countForAction(action))
                 }
             }
         }
@@ -437,6 +437,22 @@ final class HintMode {
         if !isMove, case .ax(_, let window?) = target.source {
             HintWindowCache.shared.markDirty(window: window)
         }
+    }
+
+    /// Synthesize a `.mouseMoved` to `point` THEN click there. The move
+    /// first matters for **open menus** (Dock context menu, app menu-bar
+    /// dropdowns): a menu runs in a modal event-tracking loop that
+    /// highlights the item under the pointer via move/drag events and
+    /// selects the highlighted item on mouse-up. A bare down+up with no
+    /// preceding move never highlights the item → the menu doesn't
+    /// register the pick (the pointer relocates but nothing selects —
+    /// the "cursor moved, no click" bug). A real mouse always streams
+    /// moves before the click, which is why manual clicking works; this
+    /// replays that. Harmless for non-menu targets (a click already
+    /// implies the pointer being there; the move also primes hover).
+    private func clickAfterMove(at point: CGPoint, button: CGMouseButton, count: Int) {
+        MouseSynth.warp(to: point)   // .mouseMoved — primes menu highlight / hover
+        MouseSynth.click(at: point, button: button, count: count)
     }
 
     private func buttonForAction(_ action: ClickAction) -> CGMouseButton {
