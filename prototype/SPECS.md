@@ -194,7 +194,8 @@ NSApplication
 | [`specs/omniparser-integration-roadmap.md`](specs/omniparser-integration-roadmap.md) | **实施路线图**：P0-P6 已完成（CoreML spike → 截屏 → 路由 → 集成 → 端到端 → OCR refiner），P7（数据调参）/ P8（发布）待做 |
 | [`specs/per-app-correction-design.md`](specs/per-app-correction-design.md) | **设计草稿，未实现 —— 主要护城河**：per-app **AX walker 覆写**（声明式 JSON predicate，把长尾 app 怪异 AX 树翻译成可点元素）为主力，OP 为 fallback，NCC 模板匹配降级到附录（大概率永不做）。含 L0→L2 社区飞轮 + 治理 + teach 闭环 |
 | [`specs/browser-support-design.md`](specs/browser-support-design.md) | **P0–P4 实现完成**（Chrome）：扩展 + Native Messaging Host + `BridgeServer`/`BrowserProvider` 打通 DOM 级 HINT；多 profile / 多浏览器路由 + `tab_changed` + 异步加载 `page_changed` 全在线；浏览器路径自治，**不 fallback 到 OP**。P5 Safari + 上架待做 |
-| [`specs/licensing-design.md`](specs/licensing-design.md) | **设计草稿，未实现 —— 上线收费前必做**：年付订阅。Merchant of Record（Lemon Squeezy）接管注册/登录/invoice/税务/license key/seat 限制；自建薄后端发 Ed25519 签名 entitlement token（离线可验 + 订阅失效会停）。seat=1、离线宽限 2 天、14 天 trial、不做侵入式反盗版 |
+| [`specs/licensing-design.md`](specs/licensing-design.md) | **设计草稿，未实现 —— 上线收费前必做**：年付订阅。Merchant of Record（Lemon Squeezy）接管注册/登录/invoice/税务/license key/seat 限制；自建薄后端发 Ed25519 签名 entitlement token（离线可验 + 订阅失效会停）。seat=1、离线宽限 2 天、14 天 trial、不做侵入式反盗版。含 E2E 测试策略（时间压缩 hooks + 三层测试）|
+| [`specs/settings-design.md`](specs/settings-design.md) | **设计草稿，未实现 —— 上线前**：菜单栏 "Settings…"（Cmd+,）配置面板。v1 做值型（光标/滚动/窗口速度、双击阈值、跳屏距离）+ 主题色 + trigger 预设 + 开机自启；存 UserDefaults（默认值=当前硬编码，零风险）、live-apply。自定义键位映射推 v2（绑非 QWERTY 重构）|
 
 ---
 
@@ -255,3 +256,6 @@ NSApplication
    方案候选：menu extras 走单独的前缀（如 `;a`, `;s` …）或单独字母池。
 8. **Dock 分隔符 / Recents 占位过滤** —— 当前 Dock 把所有 `AXDockItem` 都收，包括分隔符。低价值的 hint 浪费标签。
 9. **Licensing / 订阅 / 激活（上线收费前必做）** —— 年付订阅。Merchant of Record（Lemon Squeezy）接管注册/登录/invoice/全球税务/license key/seat 限制；自建薄 serverless 后端发 Ed25519 签名 entitlement token（公钥内嵌 app，离线可验 + 订阅失效会停 + 防篡改）。seat=1、离线宽限 2 天、激活每 12h 静默 refresh、14 天 trial、换机自助 deactivate、不做侵入式反盗版。详见 [`specs/licensing-design.md`](specs/licensing-design.md)。
+10. **Settings 配置面板（上线前）** —— 菜单栏 "Settings…"（Cmd+,）。v1 做值型配置（光标/滚动/窗口速度的慢中快、双击阈值、跳屏距离）+ 主题色 + label 字号 + trigger 键预设 + 开机自启 + sticky 默认。存 UserDefaults（默认值 = 当前硬编码常量，没配过行为不变）、live-apply。各控制器里 `private let normalStep` 之类改读 `Settings.shared`。自定义键位映射推 v2（绑非 QWERTY 键盘布局重构，见 #1）。详见 [`specs/settings-design.md`](specs/settings-design.md)。
+11. **官网 + 上架（上线前）** —— 静态落地页（hero + **demo 视频**最关键 + 功能 + 价格 + FAQ + 隐私/条款），扔 Vercel/Netlify/CF Pages。购买按钮 = 跳 Lemon Squeezy hosted checkout（不在官网碰支付/Stripe，MoR 托管）；"管理订阅/发票" = 链 LS portal。App Store 上架 or 直接 notarized .dmg 分发（待定）。
+12. **改名（上线前，最先定）** —— "Mouseless" 已被占用。新名字渗透域名/官网/App Store/商标全链路，上线后改成本极高，应**最先确定**。约束：`.com`/`.app` 域名可得、App Store 无重名、商标无冲突、好拼好读、可搜索（不被通用词淹没）、无多语言负面歧义。
