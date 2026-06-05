@@ -682,6 +682,7 @@ final class VimSession {
     /// `teardownCurrentMode()`.
     private var appSwitchToken: NSObjectProtocol?
     private var spaceChangeToken: NSObjectProtocol?
+    private var appTerminateToken: NSObjectProtocol?
 
     /// Polls `AXFocusedWindow` while the session is active. `NSWorkspace.didActivateApplication`
     /// (above) doesn't fire on intra-app window changes (Cmd+W close,
@@ -733,6 +734,27 @@ final class VimSession {
             ) { [weak self] _ in
                 MainActor.assumeIsolated {
                     self?.handleSpaceChanged()
+                }
+            }
+        }
+        // Also listen for app **termination**. Quitting a BACKGROUND app
+        // (e.g. right-click its Dock icon → Quit, while a different app
+        // stays frontmost) changes the Dock (running-dot / icon gone)
+        // but fires none of the above signals — frontmost didn't change,
+        // so didActivateApplication stays silent, and the focused-window
+        // poll only watches the frontmost app. The stale overlay keeps
+        // showing the quit app's Dock hint. Re-applying on terminate
+        // rescans the current frontmost + Dock. (Quitting the FRONTMOST
+        // app is already covered: it activates the next app →
+        // didActivateApplication. The dedup in reapplyOnCurrentFrontmost
+        // absorbs the double-fire.)
+        if appTerminateToken == nil {
+            appTerminateToken = NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.didTerminateApplicationNotification,
+                object: nil, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.reapplyOnCurrentFrontmost()
                 }
             }
         }
@@ -919,6 +941,10 @@ final class VimSession {
         if let token = spaceChangeToken {
             NSWorkspace.shared.notificationCenter.removeObserver(token)
             spaceChangeToken = nil
+        }
+        if let token = appTerminateToken {
+            NSWorkspace.shared.notificationCenter.removeObserver(token)
+            appTerminateToken = nil
         }
         stopFocusedWindowPoll()
     }
