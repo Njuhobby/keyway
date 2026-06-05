@@ -194,6 +194,7 @@ NSApplication
 | [`specs/omniparser-integration-roadmap.md`](specs/omniparser-integration-roadmap.md) | **实施路线图**：P0-P6 已完成（CoreML spike → 截屏 → 路由 → 集成 → 端到端 → OCR refiner），P7（数据调参）/ P8（发布）待做 |
 | [`specs/per-app-correction-design.md`](specs/per-app-correction-design.md) | **设计草稿，未实现 —— 主要护城河**：per-app **AX walker 覆写**（声明式 JSON predicate，把长尾 app 怪异 AX 树翻译成可点元素）为主力，OP 为 fallback，NCC 模板匹配降级到附录（大概率永不做）。含 L0→L2 社区飞轮 + 治理 + teach 闭环 |
 | [`specs/browser-support-design.md`](specs/browser-support-design.md) | **P0–P4 实现完成**（Chrome）：扩展 + Native Messaging Host + `BridgeServer`/`BrowserProvider` 打通 DOM 级 HINT；多 profile / 多浏览器路由 + `tab_changed` + 异步加载 `page_changed` 全在线；浏览器路径自治，**不 fallback 到 OP**。P5 Safari + 上架待做 |
+| [`specs/licensing-design.md`](specs/licensing-design.md) | **设计草稿，未实现 —— 上线收费前必做**：年付订阅。Merchant of Record（Lemon Squeezy）接管注册/登录/invoice/税务/license key/seat 限制；自建薄后端发 Ed25519 签名 entitlement token（离线可验 + 订阅失效会停）。seat=1、离线宽限 2 天、14 天 trial、不做侵入式反盗版 |
 
 ---
 
@@ -253,3 +254,4 @@ NSApplication
 7. **多 hint 来源的标签空间冲突** —— 焦点 app 元素很多时会吃光字母组，menu extras 排到 `lj/lk/ll`。
    方案候选：menu extras 走单独的前缀（如 `;a`, `;s` …）或单独字母池。
 8. **Dock 分隔符 / Recents 占位过滤** —— 当前 Dock 把所有 `AXDockItem` 都收，包括分隔符。低价值的 hint 浪费标签。
+9. **Licensing / 订阅 / 激活（上线收费前必做）** —— 年付订阅。Merchant of Record（Lemon Squeezy）接管注册/登录/invoice/全球税务/license key/seat 限制；自建薄 serverless 后端发 Ed25519 签名 entitlement token（公钥内嵌 app，离线可验 + 订阅失效会停 + 防篡改）。seat=1、离线宽限 2 天、激活每 12h 静默 refresh、14 天 trial、换机自助 deactivate、不做侵入式反盗版。详见 [`specs/licensing-design.md`](specs/licensing-design.md)。
