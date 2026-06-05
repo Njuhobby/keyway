@@ -335,9 +335,9 @@ MouseSynth.click(at: MouseSynth.cursorPosition(), button: .left, count: 1)
 
 > 统一前两个模式移动键不同（TAP=IJKL、SCROLL=SDFE）是各自键位约束下的妥协；统一到 hjkl 后认知负担消除。日后会开放让用户自定义按键配置。
 
-进入：任何 mode 按住 Caps Lock + d（chord）。进入时 `ScrollAreaDetector` AX-walk 焦点窗口找所有 `AXScrollArea` + `AXWebArea`，`ScrollOverlay` 画蓝色光晕边框 + 数字标记，默认选离光标最近的区域并 warp 光标进去（滚动事件按光标位置路由）。
+进入：任何 mode 按住 Caps Lock + d（chord）。进入时 `ScrollAreaDetector` AX-walk 焦点窗口找所有 `AXScrollArea` + `AXWebArea`，`ScrollOverlay` 画蓝色光晕边框 + 数字标记，默认选离光标最近的区域。**光标已经在选中区内 → 不 warp**；只在区外才 warp 到区中心（滚动事件按光标位置路由，落在区内任意处即可，已在区内还 warp 多余且 jarring）。
 
-零-AX app（a11y 关闭的 Electron，如 Claude 桌面）检测不到滚动区 → 退到窗口中心滚主内容，无区域 picker。识别不出的区域靠未来"键盘平移鼠标"兜底。
+零-AX app（a11y 关闭的 Electron，如 Claude；**Chrome 网页内容也是——renderer a11y 默认关**）检测不到滚动区 → 退到焦点窗口：光标已在窗内则不动，在窗外才 warp 到窗口中心，无区域 picker。识别不出的区域靠未来"键盘平移鼠标" / 扩展 DOM 滚动容器检测兜底。
 
 ---
 

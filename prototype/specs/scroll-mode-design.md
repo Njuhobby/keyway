@@ -115,7 +115,9 @@ SCROLL 里也能键盘移光标 + 点击，跟 TAP **共用同一套 hjkl + bare
 
 AX 认不出的区域（零 AX 的 Electron / 游戏）**不做兜底 hack**。未来会有"键盘平移鼠标"功能——用户手动把光标移到目标区域，再 d/u 照样发滚动指令（滚动事件路由到光标底下的 view）。
 
-所以 v1：**AXScrollArea 能认的精确认，认不出的留给未来人力补**。当前实现里认不出时退到焦点窗口中心（至少主内容区能滚），不画 overlay。
+所以 v1：**AXScrollArea 能认的精确认，认不出的留给未来人力补**。当前实现里认不出时（**Chrome 网页内容就是这种——renderer accessibility 默认关，检测不到 `AXWebArea`/`AXScrollArea`**）退到焦点窗口：**光标已经在窗口里 → 不动它**（滚轮落在光标底下即可，已在页面上没必要 warp，否则 jarring）；只在光标在窗外（别的屏 / Dock）才 warp 到窗口中心。不画 overlay。
+
+> 更彻底的 Chrome 滚动区检测（走扩展 DOM 找页面真实滚动容器、多区 picker）是更大的 feature，未做；当前"已在窗内就不 warp"已消除进 SCROLL 时光标乱跳的 jarring。
 
 #### 试过但无效：AXManualAccessibility 唤醒 Electron
 
@@ -139,12 +141,12 @@ Chromium/Electron 默认关 AX 树。理论上在 app 的 AX 元素上设 `AXMan
 - **每个区域左上角画蓝底数字 label**（1, 2, 3...）
 - **高亮每个区域的边框**（让用户清楚看到区域范围）
 - **默认选离当前光标最近的区域**（高亮区分选中 vs 未选中）
-- warp 光标到选中区域中心（确保滚动落在那）
+- **光标已经在选中区里 → 不 warp**（`nearestAreaIndex` 对"在某区内"的光标返回距离 0 → 必选那个区 → contains 命中 → 跳过 warp）。只在光标**不在**选中区时才 warp 到区中心。滚轮事件只要落在区内任意位置即可，没必要拽到正中心，已在区内还 warp 是多余且 jarring。
 
 用户操作：
 
 - 直接 d/u → 滚默认（最近）区域
-- 按数字键 → 切到那个区域（重新 warp 光标、更新高亮）
+- 按数字键 → 切到那个区域（**主动切换 → 重新 warp** 光标到新区中心、更新高亮）
 
 overlay 一直显示直到 Esc / 切 TAP（这样数字键随时可切区域）。
 
@@ -163,7 +165,7 @@ scroll?.post(tap: .cghidEventTap)
 - **垂直 (wheel1)** vs **水平 (wheel2)** 同一个 event 框架，`ScrollController` 用 `Axis` enum + 单一 timer 复用切换；约定符号一致："负值 = forward 方向"（下 / 右）。
 - **连续滚**：keyDown 启动定时器（~16ms / 60fps），每次 post 小 delta → 平滑；keyUp 停定时器
 - **Shift 加速**：加大 delta 或提高频率
-- **光标定位**：`CGWarpMouseCursorPosition(areaCenter)`——滚动事件路由到光标底下的 view，所以滚前要把光标 warp 到目标区域
+- **光标定位**：滚动事件路由到光标底下的 view，所以光标必须落在目标滚动区内。**但只在它还不在区内时才 `CGWarpMouseCursorPosition(areaCenter)`**——已经在区内（含 Chrome 网页 fallback 的"已在窗内"）就不动，避免没必要的跳动。数字键主动切区是例外，总 warp 到新区中心。
 
 ### 6.1 光标 warp 的 gotcha
 
