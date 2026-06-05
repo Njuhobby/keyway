@@ -139,6 +139,31 @@ final class HintMode {
 
     var isActive: Bool { isActiveFlag }
 
+    /// Rects of the currently-displayed **Dock** hints. Dock targets are
+    /// the numeric-labelled ones (see `generateNumericLabels`); letters
+    /// are focused-window / menu-extra hints. Used by VimSession's
+    /// app-terminate handler to detect whether a quit actually changed
+    /// the Dock (icon removed → reflow) before bothering to re-scan.
+    var currentDockRects: [CGRect] {
+        targets.filter { $0.label.first?.isNumber == true }.map(\.rect)
+    }
+
+    /// Fresh walk of **just the Dock** → dock-item rects. Cheap (~5ms,
+    /// ~36 IPC); lets the terminate handler compare against
+    /// `currentDockRects` without a full `collectAll` + re-render.
+    /// Synchronous — pure AX IPC, fine to call on main for a rare event.
+    static func collectDockRects() -> [CGRect] {
+        var out: [ElementCandidate] = []
+        var ipc = 0
+        let screenSpan = totalScreenSpan()
+        if let dock = applicationElement(forBundleID: "com.apple.dock") {
+            walk(element: dock, depth: 0, into: &out,
+                 screenSpan: screenSpan, windowBounds: nil,
+                 ipcCount: &ipc, sourceWindow: nil)
+        }
+        return out.map(\.rect)
+    }
+
     /// What the user has typed so far against the active hint set.
     /// Read by `VimSession.handlePageChanged` to suppress disruptive
     /// rehints in the middle of a label selection.

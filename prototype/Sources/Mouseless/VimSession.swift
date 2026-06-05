@@ -684,6 +684,64 @@ final class VimSession {
     private var spaceChangeToken: NSObjectProtocol?
     private var appTerminateToken: NSObjectProtocol?
 
+    /// Debounced "did the Dock change after an app quit?" check. The
+    /// Dock removes a quit app's icon with a ~few-hundred-ms animation,
+    /// so we can't compare the instant didTerminate fires (icon not gone
+    /// yet → false negative). Schedule a settle-check; bursts of quits
+    /// collapse into one.
+    private var pendingDockCheck: DispatchWorkItem?
+
+    /// App terminated. Only the **Dock** can go stale from a background
+    /// quit (focused window + menu extras are unaffected when frontmost
+    /// didn't change; if it DID change, didActivateApplication already
+    /// rehinted). So: wait for the Dock to settle, then compare the
+    /// currently-displayed Dock hints against a fresh Dock walk — refresh
+    /// in place only if they differ. A dockless agent quitting leaves the
+    /// Dock identical → no scan, no flash, ignored (the whole point). An
+    /// app that HAD a Dock icon (kept-in-dock or running) quitting →
+    /// reflow → differs → one in-place refresh.
+    private func handleAppTerminated() {
+        // Only TAP has Dock hints to go stale; ignore otherwise.
+        guard isActive, case .tap = mode else { return }
+        pendingDockCheck?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            self?.pendingDockCheck = nil
+            self?.checkDockChangedAndRefresh()
+        }
+        pendingDockCheck = item
+        // 500ms ≈ Dock icon-removal animation settle time.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: item)
+    }
+
+    private func checkDockChangedAndRefresh() {
+        guard isActive, case .tap(let h) = mode, case .normal = tapSub else { return }
+        // Mid-label-typing: don't reshuffle under the user's fingers
+        // (same rule as handlePageChanged). They'll commit and the
+        // post-commit rehint refreshes.
+        guard h.typedPrefix.isEmpty else { return }
+
+        let before = Self.dockSignature(h.currentDockRects)
+        let after = Self.dockSignature(HintMode.collectDockRects())
+        guard before != after else {
+            print("[mouseless] app terminated → dock unchanged → ignore")
+            return
+        }
+        print("[mouseless] app terminated → dock changed → in-place refresh")
+        rehintGeneration += 1
+        let gen = rehintGeneration
+        Task { @MainActor in
+            await h.refreshInPlace()
+            guard gen == self.rehintGeneration else { return }
+        }
+    }
+
+    /// Order-independent signature of a set of Dock rects (rounded to
+    /// int, sorted) for cheap before/after comparison.
+    private static func dockSignature(_ rects: [CGRect]) -> [String] {
+        rects.map { "\(Int($0.minX)),\(Int($0.minY)),\(Int($0.width))x\(Int($0.height))" }
+             .sorted()
+    }
+
     /// Polls `AXFocusedWindow` while the session is active. `NSWorkspace.didActivateApplication`
     /// (above) doesn't fire on intra-app window changes (Cmd+W close,
     /// Cmd+M minimize, Cmd+` window cycle, Cmd+N new window) —
@@ -743,18 +801,21 @@ final class VimSession {
         // but fires none of the above signals — frontmost didn't change,
         // so didActivateApplication stays silent, and the focused-window
         // poll only watches the frontmost app. The stale overlay keeps
-        // showing the quit app's Dock hint. Re-applying on terminate
-        // rescans the current frontmost + Dock. (Quitting the FRONTMOST
-        // app is already covered: it activates the next app →
-        // didActivateApplication. The dedup in reapplyOnCurrentFrontmost
-        // absorbs the double-fire.)
+        // showing the quit app's Dock hint.
+        //
+        // But we do NOT want to re-scan on EVERY termination — dockless
+        // background agents (updaters, helpers) quit all the time and are
+        // irrelevant to what's on screen. `handleAppTerminated` checks
+        // whether the Dock actually changed and only refreshes then.
+        // (Quitting the FRONTMOST app is separately covered by
+        // didActivateApplication activating the next app.)
         if appTerminateToken == nil {
             appTerminateToken = NSWorkspace.shared.notificationCenter.addObserver(
                 forName: NSWorkspace.didTerminateApplicationNotification,
                 object: nil, queue: .main
             ) { [weak self] _ in
                 MainActor.assumeIsolated {
-                    self?.reapplyOnCurrentFrontmost()
+                    self?.handleAppTerminated()
                 }
             }
         }
@@ -1171,6 +1232,8 @@ final class VimSession {
         pendingAppSwitchReenter = nil
         pendingPageChangedTrailing?.cancel()
         pendingPageChangedTrailing = nil
+        pendingDockCheck?.cancel()
+        pendingDockCheck = nil
         scrollPendingG = false
         if case .tap(let h) = mode {
             h.deactivate()
