@@ -175,3 +175,87 @@ LS activation limit = **1**：一个 key 同时只能激活 1 台。
 3. **自建签名 token** —— 唯一必须自己写的，为了离线可用 + 订阅失效会停 + 防篡改
 4. **seat = 1**（可调），**离线宽限 = 2 天**（可调），**v1 直接上签名 token**（不走"缓存+grace"过渡版）
 5. **不做侵入式反盗版** —— 抬高随手盗版门槛即可
+
+---
+
+## 11. 测试策略（E2E）
+
+整套 commerce + licensing 有**测试模式**(不碰真钱),但有两个时间维度(2 天宽限、1 年续费)真实等待不可行,必须靠**时间压缩**绕开。
+
+### 11.1 前提:时间压缩 hooks（一开始就设计进去）
+
+把所有时间常量做成 **env / debug-flag 可配**,测试 build 缩到分钟级 —— 否则验证"离线 2 天后锁"得真等 2 天:
+
+| 常量 | 生产值 | 测试值 |
+|---|---|---|
+| token TTL / `GRACE` | 2 天 | 2 分钟 |
+| `TRIAL_DAYS` | 14 天 | 2 分钟 |
+| refresh 间隔 | 12h | 30 秒 |
+
+后端再加一个 `ENVIRONMENT=test` 切到 LS **test API key**;`device_id` 可手动指定(测 seat 限制 / 换机不用真换机器)。
+
+### 11.2 测试模式基础
+
+Lemon Squeezy + 底层 Stripe 都有 **Test Mode**:独立 test API key / test 商品 / test webhook / test license key,用 **Stripe 测试卡**(`4242 4242 4242 4242`,任意未来日期 + 任意 CVC)付款,不产生真实交易。失败卡(如 `4000 0000 0000 0341`)测 dunning。
+
+### 11.3 三层测试
+
+**L1 — 商业层（纯 LS test mode,点界面 + 看后台）**
+
+1. test mode 建 annual product,activation limit=1
+2. hosted checkout 用 `4242…` 下单
+3. 验:test 邮箱收到 license key?后台 orders 有这单?
+4. customer portal(test magic link)→ 看 invoice、管订阅
+5. portal/后台取消订阅 → 看 webhook 发 `subscription_cancelled`
+
+**L2 — 签名后端（curl/脚本,绕开 app,可自动化进 CI）**
+
+后端指向 LS test key,命令行跑断言:
+
+```bash
+# 激活 → 期望返回签名 token
+curl -X POST $BACKEND/activate   -d '{"key":"<test-key>","device_id":"DEV-A"}'
+# 刷新 → 期望新 token，expires_at 延后
+curl -X POST $BACKEND/refresh    -d '{"key":"<test-key>","device_id":"DEV-A"}'
+# seat=1：第二台激活 → 期望被拒
+curl -X POST $BACKEND/activate   -d '{"key":"<test-key>","device_id":"DEV-B"}'
+# 释放 A，B 再激活 → 期望成功
+curl -X POST $BACKEND/deactivate -d '{"key":"<test-key>","device_id":"DEV-A"}'
+curl -X POST $BACKEND/activate   -d '{"key":"<test-key>","device_id":"DEV-B"}'
+# (L1 取消订阅后) 刷新 → 期望被拒（不发新 token）
+curl -X POST $BACKEND/refresh    -d '{"key":"<test-key>","device_id":"DEV-B"}'
+```
+
+这串写成 shell/node 脚本进 repo,每次改后端跑一遍。
+
+**L3 — app（完整用户旅程,半自动）**
+
+测试 build 指向 test 后端 + 缩短 TTL/trial,手动走:
+
+```
+全新装 → trial(2 分钟)→ 等 2 分钟 → trial 锁
+粘 test key → 激活 → entitled
+拔网 → 仍能用 → 等 2 分钟(TTL)→ 离线超时锁 → 联网 → 自动恢复
+L1 取消订阅 → 等 token 过期 → 订阅失效锁
+"Deactivate this device" → seat 释放 → 换机能激活
+篡改 Keychain token 一个字节 → 验签失败 → 锁
+```
+
+锁状态逻辑可单元测;UI 走查手动。
+
+### 11.4 本地收 webhook
+
+后端本地开发收不到 LS 公网 webhook → 用 `cloudflared` / `ngrok` 隧道把本地端口暴露成公网 URL 填进 LS;或用 LS 后台的 resend / 手动触发事件。
+
+### 11.5 最难测:续费 over time
+
+真等一年不可能。**主力做法:缩 token TTL** —— 续费成功的本质对后端只是"validate 仍返回 active",所以"active 时一直能 refresh"(分钟级 TTL 反复刷)就覆盖了续费效果;"cancelled 后 refuse"覆盖失效。**不做真时间等待。** Stripe Test Clock(快进时间触发扣款)若 LS test mode 暴露可用则更真,但 LS 抽象了 Stripe,**需查 LS 文档确认**。
+
+### 11.6 自动化 vs 手动
+
+| 部分 | 自动化 |
+|---|---|
+| L2 后端(activate/refresh/deactivate/seat/tamper) | ✅ 脚本 + CI |
+| L1 checkout UI / portal magic link | ❌ 手动点（或 Playwright 录）|
+| L3 app 状态机 | 半自动（锁逻辑单元测 + UI 手动）|
+| 续费 over time | ⚠️ 时间压缩 + 手动触发，不真等 |
