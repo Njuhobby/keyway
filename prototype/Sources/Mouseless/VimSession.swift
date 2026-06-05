@@ -559,6 +559,17 @@ final class VimSession {
     /// several such events in a row.
     private var lastPageChangedRehintAt: CFAbsoluteTime = 0
 
+    /// Trailing-edge refresh for events that arrived inside the cooldown
+    /// window. Leading-edge throttle alone DROPS in-window events, which
+    /// is wrong for rapid tab switches (tab1→tab2→tab3→tab4 fast): the
+    /// first refresh shows tab2, the rest get dropped, overlay stays on
+    /// tab2 while the user is on tab4. The trailing item fires once when
+    /// the window ends and re-reads the THEN-current frontmost/tab, so
+    /// the final state always wins. Only the latest pending trailing is
+    /// kept (each new in-window event cancels + reschedules).
+    private var pendingPageChangedTrailing: DispatchWorkItem?
+    private let pageChangedCooldown: CFAbsoluteTime = 0.5
+
     /// Extension reported a browser-side content change that requires
     /// rescanning the active tab. Two triggers fan into here:
     ///
@@ -582,8 +593,39 @@ final class VimSession {
     ///     from the extension, not AX/OP)
     ///   - typed prefix is empty — user not mid-label-selection; we
     ///     refuse to reshuffle labels under their fingers
-    ///   - ≥ 500ms since last page_changed refresh — cooldown
+    ///
+    /// **Throttle (leading + trailing)**: refresh immediately if outside
+    /// the cooldown; if inside, schedule a single trailing refresh for
+    /// the end of the window so the final state (e.g. the last tab in a
+    /// fast tab1→tab4 switch burst) always wins. Pure leading-edge would
+    /// drop the in-window events and leave the overlay on an earlier tab.
     func handlePageChanged() {
+        let now = CFAbsoluteTimeGetCurrent()
+        let sinceLast = now - lastPageChangedRehintAt
+        if sinceLast >= pageChangedCooldown {
+            // Leading edge — refresh now.
+            pendingPageChangedTrailing?.cancel()
+            pendingPageChangedTrailing = nil
+            performPageChangedRefresh()
+        } else {
+            // Inside cooldown — (re)schedule one trailing refresh at the
+            // window's end. Latest event wins; earlier pending dropped.
+            pendingPageChangedTrailing?.cancel()
+            let item = DispatchWorkItem { [weak self] in
+                self?.pendingPageChangedTrailing = nil
+                self?.performPageChangedRefresh()
+            }
+            pendingPageChangedTrailing = item
+            let delay = pageChangedCooldown - sinceLast
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+        }
+    }
+
+    /// The actual gated refresh. Re-checks all gates at call time (state
+    /// may have changed between a trailing schedule and its firing —
+    /// user could've left TAP, switched to a non-browser app, started
+    /// typing a label). Records the refresh time for the next cooldown.
+    private func performPageChangedRefresh() {
         guard isActive else { return }
         guard case .tap(let h) = mode else { return }
         guard case .normal = tapSub else { return }
@@ -594,9 +636,7 @@ final class VimSession {
             // them. They'll see the eventually-fresh state after commit.
             return
         }
-        let now = CFAbsoluteTimeGetCurrent()
-        guard now - lastPageChangedRehintAt >= 0.5 else { return }
-        lastPageChangedRehintAt = now
+        lastPageChangedRehintAt = CFAbsoluteTimeGetCurrent()
 
         rehintGeneration += 1
         let gen = rehintGeneration
@@ -1103,6 +1143,8 @@ final class VimSession {
         pendingStickyRehint = nil
         pendingAppSwitchReenter?.cancel()
         pendingAppSwitchReenter = nil
+        pendingPageChangedTrailing?.cancel()
+        pendingPageChangedTrailing = nil
         scrollPendingG = false
         if case .tap(let h) = mode {
             h.deactivate()
