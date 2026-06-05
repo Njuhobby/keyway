@@ -101,6 +101,19 @@ final class HotkeyTap {
             return Unmanaged.passUnretained(event)
         }
 
+        // ---- flagsChanged (modifier press/release) ----
+        // Feed Shift transitions to the session for the double-tap
+        // gesture (Shift held = right-click, Shift double-tap-hold =
+        // double-click). NEVER consume — modifier events must reach
+        // the focused app. `handleShiftFlagsChanged` dedups internally
+        // (flagsChanged also fires for Cmd/Ctrl/Option changes).
+        if type == .flagsChanged {
+            if session.isActive {
+                session.handleShiftFlagsChanged(shiftDown: flags.contains(.maskShift))
+            }
+            return Unmanaged.passUnretained(event)
+        }
+
         guard type == .keyDown else { return Unmanaged.passUnretained(event) }
 
         // ---- keyDown ----
