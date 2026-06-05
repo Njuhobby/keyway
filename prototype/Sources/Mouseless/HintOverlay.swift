@@ -100,6 +100,10 @@ final class HintOverlayView: NSView {
         let labelW: CGFloat = 22
         let labelH: CGFloat = 16
 
+        // Pass 1: compute each visible label's placement; pass 2 (after
+        // the loop) de-collides; pass 3 draws.
+        var placed: [Placed] = []
+
         for target in targets {
             if !typed.isEmpty && !target.label.hasPrefix(typed) { continue }
 
@@ -265,29 +269,107 @@ final class HintOverlayView: NSView {
             // Skip if this target's label rect doesn't intersect this view.
             if !self.bounds.intersects(fillRect) { continue }
 
-            bg.setFill()
-            NSBezierPath(roundedRect: fillRect, xRadius: 3, yRadius: 3).fill()
-            tail?.fill()
+            // Don't draw yet — collect for a de-collision pass below.
+            placed.append(Placed(rect: fillRect, tail: tail,
+                                 isDock: isDockLabel, label: target.label))
+        }
 
-            // Draw the label text. Center for Dock badge, left-align for bubble.
-            let typedPart = String(target.label.prefix(typed.count))
-            let restPart = String(target.label.dropFirst(typed.count))
+        // ---- De-collision pass ----
+        // Each label rect was computed independently, so on dense pages
+        // (web toolbars, icon grids, nav bars) they overlap and become
+        // unreadable. The user reads the label TEXT then types it, so an
+        // occluded label is useless. Greedily nudge each colliding label
+        // to the nearest free slot (small offsets, stays near its
+        // element). A nudged label drops its tail (the connector would
+        // point wrong); the badge near the element is enough. Last
+        // resort (no free slot within budget): draw at preferred spot,
+        // accept the overlap. Dock labels are left in place (they live
+        // outside the icon grid and rarely collide; nudging them off
+        // their tail looks worse).
+        var occupied: [NSRect] = []
+        for i in placed.indices {
+            if placed[i].isDock { occupied.append(placed[i].rect); continue }
+            let free = Self.nudgeToFree(placed[i].rect, avoiding: occupied,
+                                        within: self.bounds,
+                                        stepX: labelW, stepY: labelH)
+            if free != placed[i].rect {
+                placed[i].rect = free
+                placed[i].tail = nil   // moved → connector would mislead
+            }
+            occupied.append(placed[i].rect)
+        }
+
+        // ---- Draw pass ----
+        for p in placed {
+            bg.setFill()
+            NSBezierPath(roundedRect: p.rect, xRadius: 3, yRadius: 3).fill()
+            p.tail?.fill()
+
+            let typedPart = String(p.label.prefix(typed.count))
+            let restPart = String(p.label.dropFirst(typed.count))
             let typedSize = (typedPart as NSString).size(withAttributes: attrsDim)
             let restSize = (restPart as NSString).size(withAttributes: attrsBlack)
             let totalW = typedSize.width + restSize.width
 
             var textX: CGFloat
             let textY: CGFloat
-            if isDockLabel {
-                textX = fillRect.midX - totalW / 2
-                textY = fillRect.midY - typedSize.height / 2 + 1
+            if p.isDock {
+                textX = p.rect.midX - totalW / 2
+                textY = p.rect.midY - typedSize.height / 2 + 1
             } else {
-                textX = fillRect.minX + 3
-                textY = fillRect.minY + 1
+                textX = p.rect.minX + 3
+                textY = p.rect.minY + 1
             }
             (typedPart as NSString).draw(at: NSPoint(x: textX, y: textY), withAttributes: attrsDim)
             textX += typedSize.width
             (restPart as NSString).draw(at: NSPoint(x: textX, y: textY), withAttributes: attrsBlack)
         }
+    }
+
+    /// A computed label placement, collected in pass 1 and adjusted by
+    /// the de-collision pass before drawing.
+    private struct Placed {
+        var rect: NSRect
+        var tail: NSBezierPath?
+        let isDock: Bool
+        let label: String
+    }
+
+    /// Greedy de-collision: if `preferred` overlaps any `avoiding` rect,
+    /// search a grid of small offsets (ordered nearest-first) for a slot
+    /// that's free AND fully inside `bounds`. Returns the chosen rect, or
+    /// `preferred` if nothing free within the search budget (accept the
+    /// overlap rather than push the label far from its element).
+    private static func nudgeToFree(_ preferred: NSRect,
+                                    avoiding: [NSRect],
+                                    within bounds: NSRect,
+                                    stepX: CGFloat,
+                                    stepY: CGFloat) -> NSRect {
+        func collides(_ r: NSRect) -> Bool {
+            // 1pt gap so adjacent labels don't visually touch.
+            let g = r.insetBy(dx: -1, dy: -1)
+            for o in avoiding where o.intersects(g) { return true }
+            return false
+        }
+        if !collides(preferred) { return preferred }
+
+        // Candidate offsets out to radius 3 in each axis, ordered by
+        // distance from origin (nearest free slot wins). Skip (0,0)
+        // (already known to collide).
+        let radius = 3
+        var offsets: [(CGFloat, CGFloat)] = []
+        for dy in -radius...radius {
+            for dx in -radius...radius {
+                if dx == 0 && dy == 0 { continue }
+                offsets.append((CGFloat(dx) * stepX, CGFloat(dy) * stepY))
+            }
+        }
+        offsets.sort { hypot($0.0, $0.1) < hypot($1.0, $1.1) }
+
+        for (dx, dy) in offsets {
+            let cand = preferred.offsetBy(dx: dx, dy: dy)
+            if bounds.contains(cand) && !collides(cand) { return cand }
+        }
+        return preferred   // give up — overlap is the lesser evil vs. far drift
     }
 }
