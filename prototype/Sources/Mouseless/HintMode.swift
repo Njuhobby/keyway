@@ -511,14 +511,44 @@ final class HintMode {
             let useAX = bundleID.map { AppRegistry.shouldUseAXForFocused(bundleID: $0) } ?? false
 
             if isBrowser {
-                // Browser path is **authoritative** for browser apps.
-                // No OmniParser fallback: the extension's answer wins
-                // even when it's empty (chrome://, content-script-blocked
-                // tabs, blank pages, extension not installed). Keeping
-                // the two paths decoupled preserves one mental model
-                // per app — browser = DOM truth.
+                // Browser path is **authoritative** for the page content
+                // (DOM via extension). No OmniParser fallback: the
+                // extension's answer wins even when empty (chrome://,
+                // content-script-blocked tabs, blank pages, extension not
+                // installed). Keeps one mental model per app — page =
+                // DOM truth.
                 routeLabel = "Browser(ext)"
                 focusedBrowserOut = await BrowserProvider.fetchHints()
+
+                // BUT the browser's own **chrome** — tab strip, toolbar
+                // (back/forward/reload, URL bar, extensions, profile),
+                // bookmarks bar — is native AX, NOT page DOM, so the
+                // extension can't see it. AX-walk the window for those,
+                // pruning the AXWebArea subtree (page content, covered
+                // by DOM; descending would also risk triggering Chrome's
+                // renderer a11y). These merge into focusedOut as normal
+                // .ax hints (click-at-center commit, correct for tabs/
+                // buttons).
+                focusedIPC += 1
+                var winRef: CFTypeRef?
+                var window: AXUIElement? = nil
+                if AXUIElementCopyAttributeValue(focusedApp, "AXFocusedWindow" as CFString,
+                                                 &winRef) == .success, let raw = winRef {
+                    window = (raw as! AXUIElement)
+                } else {
+                    focusedIPC += 1
+                    var mainRef: CFTypeRef?
+                    if AXUIElementCopyAttributeValue(focusedApp, "AXMainWindow" as CFString,
+                                                     &mainRef) == .success, let raw = mainRef {
+                        window = (raw as! AXUIElement)
+                    }
+                }
+                if let window {
+                    walk(element: window, depth: 0, into: &focusedOut,
+                         screenSpan: screenSpan, windowBounds: nil,
+                         ipcCount: &focusedIPC, sourceWindow: window,
+                         extraSkipRoles: ["AXWebArea"])
+                }
             } else {
                 routeLabel = useAX ? "AX(whitelist)" : "OP(default)"
             }
@@ -805,7 +835,8 @@ final class HintMode {
         screenSpan: CGRect?,
         windowBounds: CGRect?,
         ipcCount: inout Int,
-        sourceWindow: AXUIElement?
+        sourceWindow: AXUIElement?,
+        extraSkipRoles: Set<String> = []
     ) {
         guard depth < maxDepth else { return }
         guard out.count < maxTargets else { return }
@@ -853,6 +884,13 @@ final class HintMode {
         }
 
         if skipRoles.contains(role) { return }
+        // Caller-supplied prune (e.g. browser-chrome walks pass
+        // ["AXWebArea"] so we hint the toolbar / tab strip / bookmarks
+        // but DON'T descend into the page content — DOM covers that,
+        // and descending could trigger Chrome's renderer accessibility,
+        // the slow/unreliable thing we route around). Element itself
+        // was already considered above; just stop the descent.
+        if extraSkipRoles.contains(role) { return }
 
         // Closed menubar dropdowns: AppKit leaves the AXMenu and its
         // AXMenuItem children in the AX tree even when not visible,
@@ -889,7 +927,8 @@ final class HintMode {
         for child in attrs.children {
             walk(element: child, depth: depth + 1, into: &out,
                  screenSpan: screenSpan, windowBounds: effectiveBounds,
-                 ipcCount: &ipcCount, sourceWindow: sourceWindow)
+                 ipcCount: &ipcCount, sourceWindow: sourceWindow,
+                 extraSkipRoles: extraSkipRoles)
         }
 
         // Source-list fallback. Apple's NSOutlineView source list
