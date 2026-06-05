@@ -139,7 +139,7 @@ LS activation limit = **1**：一个 key 同时只能激活 1 台。
 
 **拦不住铁了心的破解者，追他们负 ROI。** 目标是把"随手盗版"门槛抬高，不是 Fort Knox。
 
-- 签名 token 验签 + **app notarization**：破解者要 patch binary 跳过校验，但 patch 破坏 Apple 代码签名 → Gatekeeper 拦。能本地重签 / 关 Gatekeeper 绕过，但已经把"下个破解版双击就能用"的门槛抬掉。
+- 签名 token 验签 + **app notarization**：破解者要 patch binary 跳过校验，但 patch 破坏 Apple 代码签名 → Gatekeeper 拦。能本地重签 / 关 Gatekeeper 绕过，但已经把"下个破解版双击就能用"的门槛抬掉。（**前置：notarization + Developer ID 签名都需要 Apple Developer Program 账号 $99/年，要尽早注册 —— 见 `SPECS.md` Future-work #13。**）
 - 几个**混淆 + 分散的验签点**（不止一处验 token）进一步抬门槛（v2）。
 - **不做侵入式 DRM**（频繁强制联网、卡顿、误杀正版）—— 效率极客最恨，且照样被破。
 - 接受破解版存在，精力放在**正版体验更好**（无缝续费、跨设备、好用）。Things / Bartender / Sketch 都是这个哲学，活得好。
