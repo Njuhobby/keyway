@@ -47,20 +47,36 @@ final class ScrollController {
     /// rather than leaving SCROLL active on a target-less state.
     @discardableResult
     func enter() -> Bool {
+        let cursor = Self.cursorPoint()
         areas = ScrollAreaDetector.detect()
         if areas.isEmpty {
-            // Fallback: window center, no overlay (nothing to pick).
-            if let center = Self.focusedWindowCenter() {
-                CGWarpMouseCursorPosition(center)
-                print("[mouseless] scroll: no AXScrollArea — fallback to window center")
-                return true
-            } else {
+            // Fallback: no AX scroll area (common on Chrome — web content
+            // AX is off by default). Scroll wheel events route to the view
+            // under the cursor, so we only need the cursor somewhere inside
+            // the scrollable window. **If it's already inside the focused
+            // window, leave it where it is** — warping to center when the
+            // user's cursor is already on the page is jarring and
+            // pointless. Only warp (to center) when the cursor is outside
+            // the window (e.g. on another monitor / over the Dock).
+            guard let rect = Self.focusedWindowRect() else {
                 print("[mouseless] scroll: no scroll area and no window rect")
                 return false
             }
+            if rect.contains(cursor) {
+                print("[mouseless] scroll: no AXScrollArea — cursor already in window, no warp")
+            } else {
+                CGWarpMouseCursorPosition(CGPoint(x: rect.midX, y: rect.midY))
+                print("[mouseless] scroll: no AXScrollArea — warp to window center (cursor was outside)")
+            }
+            return true
         }
-        selectedIndex = Self.nearestAreaIndex(areas, to: Self.cursorPoint())
-        warpToSelected()
+        selectedIndex = Self.nearestAreaIndex(areas, to: cursor)
+        // nearestAreaIndex returns the containing area at distance 0 when
+        // the cursor is inside one — so "cursor already inside the
+        // selected area" means don't warp; scrolling works wherever it is.
+        if !areas[selectedIndex].rect.contains(cursor) {
+            warpToSelected()
+        }
         ScrollOverlay.shared.show(areas: areas.map { $0.rect }, selected: selectedIndex)
         print("[mouseless] scroll: \(areas.count) area(s), selected #\(selectedIndex + 1)")
         return true
@@ -185,9 +201,9 @@ final class ScrollController {
         return best
     }
 
-    // MARK: - Focused window center (fallback when no AXScrollArea)
+    // MARK: - Focused window rect (fallback when no AXScrollArea)
 
-    private static func focusedWindowCenter() -> CGPoint? {
+    private static func focusedWindowRect() -> CGRect? {
         guard let (app, _) = FocusedApp.current() else { return nil }
         var winRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(app, "AXFocusedWindow" as CFString, &winRef) == .success,
@@ -205,6 +221,6 @@ final class ScrollController {
         guard AXValueGetValue(p as! AXValue, .cgPoint, &origin),
               AXValueGetValue(s as! AXValue, .cgSize, &size)
         else { return nil }
-        return CGPoint(x: origin.x + size.width / 2, y: origin.y + size.height / 2)
+        return CGRect(origin: origin, size: size)
     }
 }
