@@ -11,17 +11,17 @@
 `HintMode.alphabet`：
 ```swift
 static let alphabet: [Character] = [
-    "a","s","d","f","g","e","r","u","i","o","p","w","t","n","m",
+    "a","s","d","f","g","e","r","u","i","w","t","n","m",
 ]
 ```
-15 个字母。**不含 h/j/k/l/v/c**——h/j/k/l 在 TAP 和 SCROLL 里都是 hjkl 移光标键、`v` 在 TAP normal 里是"进 DRAG 子状态"触发键、`c` 是"点击当前光标位置"触发键，裸按它们都有专门含义、不能再当 hint 标签（见 `modes.md` §4 / §6）。除这六个外其它顺手字母都纳入。顺序按手感前置（左手 home row `a s d f g` 在前），因为单字母 label 用 `prefix` 取前缀、最短 label 最快 commit。
+13 个字母。**不含 h/j/k/l/v/c/o/p**——h/j/k/l 在 TAP 和 SCROLL 里都是 hjkl 移光标键、`v` 在 TAP normal 里是"进 DRAG 子状态"触发键、`c` 是"点击当前光标位置"触发键，裸按它们都有专门含义、不能再当 hint 标签（见 `modes.md` §4 / §6）。`o`/`p` 则因右手小拇指外伸太别扭被剔除——而且两字母 tier 里生成器把每个键和其它每个键两两配对，`o`/`p` 会作为首字符 *和* 次字符频繁出现，正是小拇指最遭罪的地方。除这八个外其它顺手字母都纳入。顺序按手感前置（左手 home row `a s d f g` 在前），因为单字母 label 用 `prefix` 取前缀、最短 label 最快 commit。
 
-**历史**：池容量在 16/17/15 之间来回过几轮。`v` 曾短暂被纳入（17 字母，那是 DRAG 还是独立 mode、`Caps Lock + v` chord 进入时），DRAG 收编成 TAP 子状态、bare `v` 改成进 DRAG 触发键后又移除（16）。`c` 这一轮：原本是 Enter 当点击键、`c` 留在池里；Enter 经常跟 app 的菜单确认 / 表单提交冲突（被 Mouseless 吃掉），把 Enter 放行 + 点击挪到 bare `c` 后，`c` 也从池里移除（15）。
+**历史**：池容量在 16/17/15/13 之间来回过几轮。`v` 曾短暂被纳入（17 字母，那是 DRAG 还是独立 mode、`Caps Lock + v` chord 进入时），DRAG 收编成 TAP 子状态、bare `v` 改成进 DRAG 触发键后又移除（16）。`c` 那一轮：原本是 Enter 当点击键、`c` 留在池里；Enter 经常跟 app 的菜单确认 / 表单提交冲突（被 Mouseless 吃掉），把 Enter 放行 + 点击挪到 bare `c` 后，`c` 也从池里移除（15）。最近一轮：`o`/`p` 因右小拇指外伸手感差被剔除（13），代价是超密屏幕容量从 225 降到 169（`maxTargets` 同步降到 169）。
 
 **字母组**（焦点 app + menu extras 共享），同一次扫描内所有标签**等长**——混长度会前缀冲突（"aa" 是 "aaa" 的前缀，用户输 "aa" 会卡住等第三字符）：
-- count ≤ 15：单字母
-- 16–225：两字母（15 × 15）
-- 226+：三字母——**实际不可达**：`maxTargets` 是 200 < 225，所以任何一次扫描都落在 ≤2 字母。三字母分支只作 pool/cap 变动时的安全网。
+- count ≤ 13：单字母
+- 14–169：两字母（13 × 13）
+- 170+：三字母——**实际不可达**：`maxTargets` 是 169 = 13²，所以任何一次扫描都落在 ≤2 字母。三字母分支只作 pool/cap 变动时的安全网。
 
 **数字组**（Dock 独享）：
 - count ≤ 10：单字符 `0, 1, ..., 9`
@@ -31,9 +31,15 @@ static let alphabet: [Character] = [
 
 两字母 / 两数字标签的好处：第一字符过滤一次，第二字符才提交，错按时前缀不匹配 `.ignored` 吞掉（不误触发、也不退出）。
 
-**标签分配顺序 = 空间顺序（label 稳定性）**：每个池（Dock 数字 / 其余字母）的候选先按**量化的 (y, x) 排序**——从上到下、从左到右的阅读顺序，y 按 `rowQuantum=12px` 分档（同一行内的元素按 x 排，不被亚像素 y 噪声打乱），再按这个顺序分 label。**同样的布局 → 同样的 label，每次扫描都一致** → rehint 时用户记住的 label 不会乱跳（误点其它元素）。
+**标签分配 = 跨扫描 rect 身份匹配 + 空间顺序兜底（label 稳定性）**：每个池（Dock 数字 / 其余字母）分两趟（候选都先按量化 (y, x) 阅读顺序排，保证确定性）：
+1. **preserve（保留）**：每个候选去上一次扫描的 targets 里找**几何上最近**的一个（中心点距离 ≤ `posTol=8px` 且各边尺寸在 ±`sizeTol=25%` 内），匹配上就**复用它的旧 label**。这是 label 稳定性的真正来源——元素没动就保住 label，哪怕屏幕别处全变了。
+2. **fill（兜底）**：没匹配上的（首次扫描 / 真正新出现的元素）按空间阅读顺序领走剩下的 label。
 
-> **为什么是空间排序而非跨扫描身份匹配**：最初的 bug —— WeChat（OP 路径）rehint 后 label 洗牌 —— 根因是 OmniParser 每次返回 box 的**顺序不固定**（按置信度，不是空间）+ 坐标几像素抖动，于是"按收集顺序分 label"在布局没变时也洗牌。曾试过"跨扫描按 rect 匹配同一元素、保留旧 label"，但 (a) 复杂，(b) 它唯一比空间排序强的地方是"中间插入元素时保住其余 label"，而对真正会重排的内容（WeChat 聊天列表：来新消息 → 那个聊天跳到顶 → 整体洗牌）这点优势也没了。所以选简单的空间排序。
+匹配是**纯几何**的——不看 role、不看 source，所以 OP 路径（所有 box 共享常量 role `"AXOmni"`、没有有意义的 role）和 AX 一视同仁。`posTol=8px` 足够吸收 OP 每次几像素的抖动，又远小于列表行距（WeChat ~70px），相邻行不会误配。用屏幕绝对坐标（非 window 相对）即可：sticky rehint 在点击后 ~100ms 触发、窗口没动，没动的元素绝对 rect 就是稳定锚点（窗口若被拖动则其内容重新发 label，优雅降级；OP 也没有 window ref 可换算）。
+
+> **历史**：曾经只用空间排序（无身份匹配）。失败原因正是 label = 阅读顺序里的第 N 位 ⇒ 第 N 位取决于"它前面排了多少元素"。WeChat 点开另一个会话后**左边会话列表一像素没动**，但右边消息区换了一屏气泡，气泡的 y 和左列行交错，全屏一遍式发 label 就把下游所有 label（含没动的左列）挤位重排。空间排序治不了"别处变了连累没变的"——只有按 rect 把没动的元素钉回旧 label 才行。空间排序因此从"稳定性机制"**降级**为"给没有 prior 可匹配的新元素一个确定的发牌顺序"（否则新元素会落回 OmniParser 的非确定置信度顺序，重新抖）。
+>
+> **跨实例传递 prior**：sticky rehint 走 `rehintSticky` 会 new 一个 `HintMode`，需要把旧扫描喂给它。坑：hint commit 在 `handle()` 里**先 `deactivate()`（清空 `targets`）再**隔 100ms 调 `scheduleStickyRehint`，等 rehint 跑时 live `targets` 早没了。所以另存一份 `lastScanTargets`（每次 `applyCollected` 末尾写入、**`deactivate()` 不清它**，同 `lastCommittedTarget` 的活法）；`snapshotTargets()` 返回它、`seedPriorTargets()` 种进新实例，preserve 趟才有 prior 可匹配（app 切换 `fromAppSwitch` 时**不种**——旧 app 的 rect 和新 app 无关）。`refreshInPlace` 同实例不需要，`self.targets` 本就是 prior。
 
 Dock targets 先入 `targets` 数组、非 Dock 后入；绘制完全按 target 自己的 rect 定位（数组顺序只影响 typing 过滤遍历，不影响位置）。
 
@@ -265,7 +271,7 @@ Badge 22×16 矩形 + 尾巴三角。默认**下方**（尾巴指上），不 fi
 
 **Dock label 不参与去重叠**（它们在 icon 网格外、极少撞，挪开会脱离尾巴更难看）。
 
-**性能**：O(n²)（每个比前面所有），但 n≤`maxTargets`(200)、一次性渲染（非每帧）、操作是 cheap 的 rect 相交（几个 float 比较）。实测亚毫秒；病态全撞满也才 ~10ms。真嫌慢有空间分桶（broad-phase）可降到 ~O(n)，但 n 这量级用不上。
+**性能**：O(n²)（每个比前面所有），但 n≤`maxTargets`(169)、一次性渲染（非每帧）、操作是 cheap 的 rect 相交（几个 float 比较）。实测亚毫秒；病态全撞满也才 ~10ms。真嫌慢有空间分桶（broad-phase）可降到 ~O(n)，但 n 这量级用不上。
 
 ---
 

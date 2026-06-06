@@ -497,9 +497,16 @@ final class VimSession {
     private func rehintSticky(isolateApp: Bool = false, fromAppSwitch: Bool = false) {
         rehintGeneration += 1
         let gen = rehintGeneration
-        if case .tap(let h) = mode { h.deactivate() }
+        // Snapshot the outgoing scan BEFORE deactivate (which clears it),
+        // so the fresh instance can rect-match and preserve labels.
+        var prior: [HintTarget] = []
+        if case .tap(let h) = mode { prior = h.snapshotTargets(); h.deactivate() }
         Task { @MainActor in
             let next = HintMode()
+            // Same-app sticky rehint: seed the prior scan so unchanged
+            // elements keep their labels. App switches start fresh — the
+            // previous app's rects are unrelated to the new app's.
+            if !fromAppSwitch { next.seedPriorTargets(prior) }
             let ok = await next.activate(isolateApp: isolateApp)
             guard gen == self.rehintGeneration else { return }  // superseded
             if ok {

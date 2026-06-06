@@ -71,10 +71,17 @@ final class HintMode {
     // SCROLL, so they can't be hint labels — a bare j would be ambiguous
     // (move? or hint?). Everything else ergonomic is fair game.
     //
-    // 15 letters → 2-char labels cover 15² = 225 targets, past
-    // `maxTargets` (200), so a scan **never needs 3-char labels** (the
-    // 3-char tier in `generateLabels` is now effectively dead). Bigger
-    // pool also means more targets get fast 1-char labels.
+    // 13 letters → 2-char labels cover 13² = 169 targets. `maxTargets`
+    // is pinned to 169 to match, so a scan **never needs 3-char labels**
+    // (the 3-char tier in `generateLabels` is now effectively dead).
+    //
+    // `o` and `p` are intentionally **not** here: both force an
+    // uncomfortable right-pinky stretch, and in the dense 2-char tier the
+    // generator pairs every key with every other, so they'd show up
+    // constantly as first *and* second char — exactly where the pinky
+    // hurts most. Dropping them trades capacity on ultra-dense screens
+    // (≤169 hints now vs 200 before) for a pool that's comfortable to
+    // type all the way through.
     //
     // Front-loaded by typing comfort: left home row (a s d f g) first,
     // then the strong inner/right keys. 1-char labels use `prefix()` and
@@ -85,7 +92,7 @@ final class HintMode {
     // through now so app menus / forms can use it). Neither can
     // double as a hint label without ambiguity.
     static let alphabet: [Character] = [
-        "a","s","d","f","g","e","r","u","i","o","p","w","t","n","m",
+        "a","s","d","f","g","e","r","u","i","w","t","n","m",
     ]
 
     /// Roles we always treat as clickable, even if AXPress isn't advertised.
@@ -116,7 +123,7 @@ final class HintMode {
     ]
 
     private static let maxDepth = 12
-    private static let maxTargets = 200
+    private static let maxTargets = 169   // = alphabet.count² (13²), keeps labels ≤2 chars
 
     /// Attributes we read for every walked element. We fetch them in ONE
     /// `AXUIElementCopyMultipleAttributeValues` call per element instead of
@@ -232,6 +239,26 @@ final class HintMode {
         return true
     }
 
+    /// The last scan's targets, **surviving `deactivate()`** (like
+    /// `lastCommittedTarget`). A hint commit deactivates immediately
+    /// (clearing `targets`) and only THEN schedules the 100ms rehint, so
+    /// the live `targets` is gone by snapshot time — this holds the
+    /// pre-click scan the rehint needs to rect-match against.
+    private(set) var lastScanTargets: [HintTarget] = []
+
+    /// Snapshot the last scan so a NEW HintMode (the sticky rehint
+    /// creates a fresh instance) can preserve labels across the rehint.
+    /// Pair with `seedPriorTargets` on the new instance. Safe to call
+    /// after `deactivate()` — returns the surviving `lastScanTargets`.
+    func snapshotTargets() -> [HintTarget] { lastScanTargets }
+
+    /// Seed a fresh HintMode with the prior scan's targets BEFORE
+    /// `activate`, so `applyCollected`'s preserve pass can rect-match
+    /// unchanged elements and keep their labels. (For `refreshInPlace`
+    /// this isn't needed — same instance, `self.targets` already holds
+    /// the prior set.)
+    func seedPriorTargets(_ t: [HintTarget]) { targets = t }
+
     /// A labelless hint candidate — built from the collection, then run
     /// through stable label assignment.
     private struct Candidate {
@@ -244,18 +271,13 @@ final class HintMode {
     /// The y key is quantized to `rowQuantum` px so two elements on the
     /// "same row" (within jitter) sort by x, not by sub-pixel y noise.
     ///
-    /// **This is what gives stable labels across rehints.** Labels are
-    /// assigned to candidates in this sorted order, so the SAME layout
-    /// always yields the SAME labels — fixing the WeChat reshuffle,
-    /// whose root cause was OmniParser returning boxes in a non-
-    /// deterministic order (confidence order, not spatial) + a few-px
-    /// coord jitter run-to-run. A deterministic spatial sort sidesteps
-    /// both. (Cross-scan identity matching would also stabilize the
-    /// no-change case AND survive mid-list insertion, but it's far more
-    /// complex and its insertion benefit is largely moot for genuinely-
-    /// reordering content like WeChat's chat list — a new message jumps
-    /// a chat to the top, reshuffling everything regardless. So: keep it
-    /// simple.)
+    /// This is NOT the stability mechanism (that's the rect-match
+    /// preserve pass in `assignStable`). Its job is narrower: give a
+    /// **deterministic order** for (a) the very first scan and (b)
+    /// genuinely-new elements that match nothing prior — so their labels
+    /// read top-to-bottom AND don't fall back to OmniParser's non-
+    /// deterministic confidence order (the original WeChat-reshuffle
+    /// jitter). It also fixes the greedy preserve-pass processing order.
     private static let rowQuantum: CGFloat = 12
     private static func spatialSorted(_ cands: [Candidate]) -> [Candidate] {
         cands.sorted { a, b in
@@ -266,14 +288,99 @@ final class HintMode {
         }
     }
 
+    /// Cross-scan identity by **pure screen-space geometry** — no role,
+    /// no source, so OmniParser boxes (which share the constant "AXOmni"
+    /// role) match exactly like AX elements. Two elements are "the same"
+    /// across a rehint if their centers are within `posTol` and each
+    /// dimension within `sizeTol`. `posTol` is small (8px) — it absorbs
+    /// OP's few-px run-to-run jitter but stays well under list-row pitch
+    /// (~70px in WeChat) so adjacent rows never alias onto each other.
+    ///
+    /// Screen-space (not window-relative) is correct for the sticky
+    /// rehint: it fires ~100ms after a click on a STATIONARY window, so
+    /// an unchanged element's absolute rect is the stable anchor. A
+    /// dragged-between-scans window would just relabel its contents
+    /// (graceful) — and OP carries no window ref to re-base against anyway.
+    private static let posTol: CGFloat = 8
+    private static let sizeTol: CGFloat = 0.25   // ±25% per dimension
+    private static func centerDist(_ a: CGRect, _ b: CGRect) -> CGFloat {
+        hypot(a.midX - b.midX, a.midY - b.midY)
+    }
+    private static func sizeClose(_ a: CGRect, _ b: CGRect) -> Bool {
+        func close(_ x: CGFloat, _ y: CGFloat) -> Bool {
+            abs(x - y) <= sizeTol * max(x, y, 1)
+        }
+        return close(a.width, b.width) && close(a.height, b.height)
+    }
+
+    /// Assign `pool` labels to `cands`, **preserving** each element's
+    /// prior label when it rect-matches a target from the last scan;
+    /// genuinely-new elements take leftover labels in spatial order.
+    ///
+    /// Two passes over `cands` in spatial order (deterministic):
+    ///  1. **preserve** — reuse the nearest still-free prior label within
+    ///     tolerance (`centerDist`/`sizeClose`). This is what keeps "ab"
+    ///     pointing at the same element after a rehint even when the rest
+    ///     of the screen churns.
+    ///  2. **fill** — remaining pool labels → still-unlabeled candidates.
+    ///
+    /// `pool` membership segregates Dock (numeric) from the rest (alpha):
+    /// `prev` is filtered to labels in THIS pool, so a Dock element's old
+    /// numeric label never leaks into the alpha pool. When the candidate
+    /// count crosses a label-length tier (e.g. 13→14 flips 1-char→2-char),
+    /// old labels aren't in the new pool → everything reassigns. Rare,
+    /// only at the boundary, unavoidable.
+    private func assignStable(_ cands: [Candidate], pool: [String],
+                              prev: [HintTarget]) -> [HintTarget] {
+        let poolSet = Set(pool)
+        let prevPool = prev.filter { poolSet.contains($0.label) }
+        let order = Self.spatialSorted(cands)
+        var out = [HintTarget?](repeating: nil, count: order.count)
+        var usedLabels = Set<String>()
+        var usedPrev = [Bool](repeating: false, count: prevPool.count)
+
+        // Pass 1 — preserve (nearest free prior within tolerance).
+        for (i, c) in order.enumerated() {
+            var bestJ = -1
+            var bestD = Self.posTol
+            for (j, p) in prevPool.enumerated() where !usedPrev[j] {
+                if usedLabels.contains(p.label) { continue }
+                if !Self.sizeClose(c.rect, p.rect) { continue }
+                let d = Self.centerDist(c.rect, p.rect)
+                if d <= bestD { bestD = d; bestJ = j }
+            }
+            if bestJ >= 0 {
+                let lbl = prevPool[bestJ].label
+                out[i] = HintTarget(label: lbl, rect: c.rect, role: c.role, source: c.source)
+                usedLabels.insert(lbl)
+                usedPrev[bestJ] = true
+            }
+        }
+        // Pass 2 — fill (leftover labels → unmatched, in pool order).
+        var freeLabels = pool.makeIterator()
+        func nextFree() -> String? {
+            while let l = freeLabels.next() { if !usedLabels.contains(l) { return l } }
+            return nil
+        }
+        for i in order.indices where out[i] == nil {
+            guard let lbl = nextFree() else { break }
+            usedLabels.insert(lbl)
+            out[i] = HintTarget(label: lbl, rect: order[i].rect,
+                                role: order[i].role, source: order[i].source)
+        }
+        return out.compactMap { $0 }
+    }
+
     /// Label assignment + targets writeback shared by `activate` and
     /// `refreshInPlace`. Returns false if the scan was empty (no hints
     /// anywhere — Dock, focused window, menu extras all returned []).
     /// Doesn't touch overlay / isActiveFlag / typed — callers decide.
     ///
-    /// Labels are assigned in **spatial (reading) order** per pool, so an
-    /// unchanged layout yields unchanged labels across rehints (see
-    /// `spatialSorted`).
+    /// Labels are assigned per pool by `assignStable`: an element that
+    /// rect-matches one from the prior scan KEEPS its label; new elements
+    /// take leftover labels in spatial (reading) order. So an unchanged
+    /// element survives a rehint with the same label even when the rest
+    /// of the screen churns.
     private func applyCollected(_ collected: CollectedElements) -> Bool {
         if collected.focused.isEmpty
             && collected.focusedOmni.isEmpty
@@ -282,6 +389,12 @@ final class HintMode {
             && collected.menuBarExtras.isEmpty {
             return false
         }
+
+        // Prior scan to preserve labels against. For `refreshInPlace`
+        // this is the same instance's current `targets`; for the sticky
+        // rehint's fresh instance it's what `seedPriorTargets` planted.
+        // Captured before we overwrite `targets` below.
+        let prev = targets
 
         // Dock → numeric pool. Everything else → alphabetic pool.
         let dockCands = collected.dock.map {
@@ -305,20 +418,14 @@ final class HintMode {
                       source: .ax(element: $0.element, sourceWindow: $0.sourceWindow))
         }
 
-        // Sort each pool spatially, then assign labels in that order.
-        let sortedDock = Self.spatialSorted(dockCands)
-        let sortedLetter = Self.spatialSorted(letterCands)
-        let dockLabels = Self.generateNumericLabels(count: sortedDock.count)
-        let letterLabels = Self.generateLabels(count: sortedLetter.count)
-
-        let dockTargets = zip(dockLabels, sortedDock).map { (label, c) in
-            HintTarget(label: label, rect: c.rect, role: c.role, source: c.source)
-        }
-        let nonDockTargets = zip(letterLabels, sortedLetter).map { (label, c) in
-            HintTarget(label: label, rect: c.rect, role: c.role, source: c.source)
-        }
+        // Preserve prior labels by rect match; fill the rest spatially.
+        let dockTargets = assignStable(dockCands,
+            pool: Self.generateNumericLabels(count: dockCands.count), prev: prev)
+        let nonDockTargets = assignStable(letterCands,
+            pool: Self.generateLabels(count: letterCands.count), prev: prev)
 
         targets = dockTargets + nonDockTargets
+        lastScanTargets = targets   // survives deactivate; seeds the next rehint
         focusedTargetCount = collected.focused.count
                            + collected.focusedOmni.count
                            + collected.focusedBrowser.count
@@ -1220,7 +1327,7 @@ final class HintMode {
         // "a a" and the system can't tell if they want to commit "aa"
         // or are still building "aaa". Picking the shortest tier that
         // fits avoids this entirely.
-        let n = alphabet.count   // 15
+        let n = alphabet.count   // 13
         var out: [String] = []
         out.reserveCapacity(count)
 
@@ -1232,8 +1339,8 @@ final class HintMode {
             return out
         }
         if count <= n * n {
-            // 2-letter labels — n² = 225 covers every scan (maxTargets
-            // is 200), so this is the tier dense scans land in.
+            // 2-letter labels — n² = 169 covers every scan (maxTargets
+            // is 169), so this is the tier dense scans land in.
             for first in alphabet {
                 for second in alphabet {
                     out.append("\(first)\(second)")
@@ -1242,7 +1349,7 @@ final class HintMode {
             }
             return out
         }
-        // 3-letter labels — unreachable with n=15 (225 > maxTargets 200),
+        // 3-letter labels — unreachable with n=13 (169 = maxTargets 169),
         // kept only as a safety net if the pool or cap ever change.
         for first in alphabet {
             for second in alphabet {
