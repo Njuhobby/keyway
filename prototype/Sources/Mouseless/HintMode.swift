@@ -148,16 +148,6 @@ final class HintMode {
         targets.filter { $0.label.first?.isNumber == true }.map(\.rect)
     }
 
-    /// Snapshot the current targets so a NEW HintMode (sticky rehint
-    /// creates a fresh instance) can preserve labels across the rehint.
-    /// Pair with `seedPriorTargets` on the new instance.
-    func snapshotTargets() -> [HintTarget] { targets }
-
-    /// Seed a fresh HintMode with the prior targets BEFORE `activate`,
-    /// so `applyCollected`'s stable assignment can keep unchanged
-    /// elements' labels. (For `refreshInPlace` this isn't needed — same
-    /// instance, `self.targets` already holds the prior set.)
-    func seedPriorTargets(_ t: [HintTarget]) { targets = t }
 
     /// Fresh walk of **just the Dock** → dock-item rects. Cheap (~5ms,
     /// ~36 IPC); lets the terminate handler compare against
@@ -250,18 +240,30 @@ final class HintMode {
         let source: HintSource
     }
 
-    /// Identity key for "is this the same element as last scan?" — used
-    /// to PRESERVE a target's label across rehints so the user's
-    /// memorized label ("ab") doesn't get reassigned to a different
-    /// element under their fingers. (role, integer-rounded rect): stable
-    /// for elements that didn't move; an element that moved / appeared
-    /// gets a fresh label (acceptable — it genuinely changed).
-    /// AX-element CFEqual would be more precise but isn't uniformly
-    /// available across .ax/.omni/.browser; rect+role is uniform and
-    /// good enough (the unchanged majority — Dock, toolbar, untouched
-    /// content — keeps stable labels, which is the whole point).
-    private static func identityKey(rect: CGRect, role: String) -> String {
-        "\(role)|\(Int(rect.minX.rounded())),\(Int(rect.minY.rounded())),\(Int(rect.width.rounded()))x\(Int(rect.height.rounded()))"
+    /// Spatial sort: top-to-bottom, then left-to-right (reading order).
+    /// The y key is quantized to `rowQuantum` px so two elements on the
+    /// "same row" (within jitter) sort by x, not by sub-pixel y noise.
+    ///
+    /// **This is what gives stable labels across rehints.** Labels are
+    /// assigned to candidates in this sorted order, so the SAME layout
+    /// always yields the SAME labels — fixing the WeChat reshuffle,
+    /// whose root cause was OmniParser returning boxes in a non-
+    /// deterministic order (confidence order, not spatial) + a few-px
+    /// coord jitter run-to-run. A deterministic spatial sort sidesteps
+    /// both. (Cross-scan identity matching would also stabilize the
+    /// no-change case AND survive mid-list insertion, but it's far more
+    /// complex and its insertion benefit is largely moot for genuinely-
+    /// reordering content like WeChat's chat list — a new message jumps
+    /// a chat to the top, reshuffling everything regardless. So: keep it
+    /// simple.)
+    private static let rowQuantum: CGFloat = 12
+    private static func spatialSorted(_ cands: [Candidate]) -> [Candidate] {
+        cands.sorted { a, b in
+            let ay = (a.rect.midY / rowQuantum).rounded()
+            let by = (b.rect.midY / rowQuantum).rounded()
+            if ay != by { return ay < by }            // higher on screen first (smaller y)
+            return a.rect.midX < b.rect.midX           // then left first
+        }
     }
 
     /// Label assignment + targets writeback shared by `activate` and
@@ -269,10 +271,9 @@ final class HintMode {
     /// anywhere — Dock, focused window, menu extras all returned []).
     /// Doesn't touch overlay / isActiveFlag / typed — callers decide.
     ///
-    /// **Stable assignment**: an element matching a previously-displayed
-    /// one (by `identityKey`) KEEPS its old label; only genuinely-new
-    /// elements draw from the leftover label pool. Prevents the
-    /// "memorized `ab` now points elsewhere after a rehint" mis-click.
+    /// Labels are assigned in **spatial (reading) order** per pool, so an
+    /// unchanged layout yields unchanged labels across rehints (see
+    /// `spatialSorted`).
     private func applyCollected(_ collected: CollectedElements) -> Bool {
         if collected.focused.isEmpty
             && collected.focusedOmni.isEmpty
@@ -282,16 +283,7 @@ final class HintMode {
             return false
         }
 
-        // Previous label by identity (from the currently-displayed
-        // targets, captured before we overwrite them below).
-        var prevLabel: [String: String] = [:]
-        for t in targets {
-            prevLabel[Self.identityKey(rect: t.rect, role: t.role)] = t.label
-        }
-
         // Dock → numeric pool. Everything else → alphabetic pool.
-        // Order within the alpha pool: AX-windows → OP → Browser →
-        // AX menubar/extras (deterministic).
         let dockCands = collected.dock.map {
             Candidate(rect: $0.rect, role: $0.role,
                       source: .ax(element: $0.element, sourceWindow: $0.sourceWindow))
@@ -313,12 +305,18 @@ final class HintMode {
                       source: .ax(element: $0.element, sourceWindow: $0.sourceWindow))
         }
 
-        let dockTargets = assignStable(dockCands,
-            pool: Self.generateNumericLabels(count: dockCands.count),
-            prevLabel: prevLabel)
-        let nonDockTargets = assignStable(letterCands,
-            pool: Self.generateLabels(count: letterCands.count),
-            prevLabel: prevLabel)
+        // Sort each pool spatially, then assign labels in that order.
+        let sortedDock = Self.spatialSorted(dockCands)
+        let sortedLetter = Self.spatialSorted(letterCands)
+        let dockLabels = Self.generateNumericLabels(count: sortedDock.count)
+        let letterLabels = Self.generateLabels(count: sortedLetter.count)
+
+        let dockTargets = zip(dockLabels, sortedDock).map { (label, c) in
+            HintTarget(label: label, rect: c.rect, role: c.role, source: c.source)
+        }
+        let nonDockTargets = zip(letterLabels, sortedLetter).map { (label, c) in
+            HintTarget(label: label, rect: c.rect, role: c.role, source: c.source)
+        }
 
         targets = dockTargets + nonDockTargets
         focusedTargetCount = collected.focused.count
@@ -326,46 +324,6 @@ final class HintMode {
                            + collected.focusedBrowser.count
         print("[mouseless] hint: \(targets.count) targets (focusedAX: \(collected.focused.count), focusedOP: \(collected.focusedOmni.count), focusedBrowser: \(collected.focusedBrowser.count), dock: \(collected.dock.count), extras: \(collected.menuBarExtras.count))")
         return true
-    }
-
-    /// Assign labels from `pool` to `cands`, preferring each candidate's
-    /// PREVIOUS label (`prevLabel[identityKey]`) when that label is part
-    /// of this pool and still free. Leftover candidates take remaining
-    /// pool labels in order. `pool` membership naturally segregates Dock
-    /// (numeric) from the rest (alpha) — a Dock element's old numeric
-    /// label isn't in the alpha pool, so it won't leak across.
-    ///
-    /// When the candidate count crosses a label-length tier (e.g. 15→16
-    /// flips 1-char → 2-char labels), old labels aren't in the new pool
-    /// → everything reassigns. Unavoidable and rare (only at the
-    /// boundary); within a tier, unchanged elements keep their labels.
-    private func assignStable(_ cands: [Candidate], pool: [String],
-                              prevLabel: [String: String]) -> [HintTarget] {
-        let poolSet = Set(pool)
-        var used = Set<String>()
-        var out = [HintTarget?](repeating: nil, count: cands.count)
-
-        // Pass 1: preserve.
-        for (i, c) in cands.enumerated() {
-            let key = Self.identityKey(rect: c.rect, role: c.role)
-            if let lbl = prevLabel[key], poolSet.contains(lbl), !used.contains(lbl) {
-                out[i] = HintTarget(label: lbl, rect: c.rect, role: c.role, source: c.source)
-                used.insert(lbl)
-            }
-        }
-        // Pass 2: leftover labels → unassigned candidates, in pool order.
-        var freeLabels = pool.makeIterator()
-        func nextFree() -> String? {
-            while let l = freeLabels.next() { if !used.contains(l) { return l } }
-            return nil
-        }
-        for i in cands.indices where out[i] == nil {
-            guard let lbl = nextFree() else { break }
-            used.insert(lbl)
-            out[i] = HintTarget(label: lbl, rect: cands[i].rect,
-                                role: cands[i].role, source: cands[i].source)
-        }
-        return out.compactMap { $0 }
     }
 
     func deactivate() {

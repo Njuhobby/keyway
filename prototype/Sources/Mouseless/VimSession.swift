@@ -497,15 +497,9 @@ final class VimSession {
     private func rehintSticky(isolateApp: Bool = false, fromAppSwitch: Bool = false) {
         rehintGeneration += 1
         let gen = rehintGeneration
-        // Capture the outgoing targets BEFORE deactivate clears them, so
-        // the fresh HintMode can preserve labels for unchanged elements
-        // (stable assignment — the user's memorized label stays put).
-        let prior: [HintTarget]
-        if case .tap(let h) = mode { prior = h.snapshotTargets() } else { prior = [] }
         if case .tap(let h) = mode { h.deactivate() }
         Task { @MainActor in
             let next = HintMode()
-            next.seedPriorTargets(prior)
             let ok = await next.activate(isolateApp: isolateApp)
             guard gen == self.rehintGeneration else { return }  // superseded
             if ok {
