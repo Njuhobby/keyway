@@ -276,9 +276,61 @@
     }
   }
 
+  // Throttle page_changed to ≤1 per NOTIFY_THROTTLE_MS (leading + trailing
+  // edge). Continuously-mutating pages — a playing YouTube video is the
+  // worst case: its suggestion rail / player controls churn clickable
+  // nodes many times a second — would otherwise flood the native host
+  // with page_changed AND keep the content-script main thread busy enough
+  // that `list_hints` can't reply within Mouseless's 400ms budget (→
+  // "0 hints"). Mirrors the 500ms cooldown on the Mouseless side
+  // (VimSession.handlePageChanged), but matters more here because the work
+  // we're skipping is on the page's own main thread.
+  const NOTIFY_THROTTLE_MS = 500;
+  let lastFireAt = 0;
+  let trailingTimer = null;
+  function scheduleTrailingNotify(remaining) {
+    if (trailingTimer !== null) return;
+    trailingTimer = setTimeout(() => {
+      trailingTimer = null;
+      lastFireAt = Date.now();
+      notifyPageChanged();
+    }, remaining);
+  }
+  // For relayed signals (iframe page_changed) — no expensive scan to skip,
+  // just rate-limit the send.
+  function notifyPageChangedThrottled() {
+    const since = Date.now() - lastFireAt;
+    if (since >= NOTIFY_THROTTLE_MS) {
+      lastFireAt = Date.now();
+      notifyPageChanged();
+    } else {
+      scheduleTrailingNotify(NOTIFY_THROTTLE_MS - since);
+    }
+  }
+
   const pageChangeObserver = new MutationObserver((mutations) => {
-    if (!hasNewClickable(mutations)) return;
-    notifyPageChanged();
+    const since = Date.now() - lastFireAt;
+    if (since < NOTIFY_THROTTLE_MS) {
+      // Inside the cooldown that a real change just opened → the page is
+      // actively churning. Skip the expensive `hasNewClickable` scan
+      // entirely (this is the whole point — that querySelector work, not
+      // the send, is what starves `list_hints`); just ensure one trailing
+      // fire lands. Slightly less precise (the trailing fire is
+      // unconditional, so a burst that happened to add no clickable still
+      // notifies), but it costs at most one extra rescan, which Mouseless
+      // coalesces — and it only happens while a genuine change keeps the
+      // burst alive. `lastFireAt` advances ONLY on a real fire, so a page
+      // that mutates without ever adding a clickable never enters this
+      // branch and never spuriously notifies.
+      scheduleTrailingNotify(NOTIFY_THROTTLE_MS - since);
+      return;
+    }
+    // Outside the cooldown: run the real check; fire (and open the
+    // cooldown) only on a genuine new clickable.
+    if (hasNewClickable(mutations)) {
+      lastFireAt = Date.now();
+      notifyPageChanged();
+    }
   });
 
   // Wait for documentElement / body to exist (run_at: document_idle
@@ -297,7 +349,7 @@
   window.addEventListener("message", (e) => {
     if (!e.data || typeof e.data !== "object") return;
     if (e.data.type !== "mouseless_page_changed_inner") return;
-    notifyPageChanged();
+    notifyPageChangedThrottled();
   });
 
   // ----------

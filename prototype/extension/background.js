@@ -395,9 +395,10 @@ chrome.windows.onFocusChanged.addListener((winId) => {
 });
 
 // Content script → bg → native: page_changed signal forwarded as-is.
-// Coalescing is the receiver's job (Mouseless cooldown), so we don't
-// debounce here — the content script only sends when it has actually
-// detected a new clickable element appearing.
+// We don't debounce here — the content script only sends on a real new
+// clickable AND throttles itself to ≤1 per 500ms (notifyPageChangedThrottled,
+// so a playing-video page can't flood us). Mouseless's cooldown coalesces
+// further on the receiving end.
 chrome.runtime.onMessage.addListener((msg, sender) => {
   if (!msg || typeof msg !== "object") return;
   if (msg.type !== "page_changed") return;
