@@ -50,7 +50,7 @@
 | **光标移动速度** slow/normal/fast | MouseMover 2 / 6 / 18 px/tick | **v1 必须** |
 | **滚动速度** normal/fast | ScrollController 30 / 90 px/tick | **v1 必须** |
 | **窗口 resize/move 速度** slow/normal/fast | Window(Move)Controller 5 / 20 / 80 px/tick | **v1 必须** |
-| **双击阈值** | `windowReverseTapWindow` 0.15s（hjkl 跳屏 + WINDOW 反向 + Shift 双击共用）| **v1 必须**（手速因人而异大）|
+| **双击阈值** | hjkl 跳屏 `hjklJumpTapWindow` 0.10s；WINDOW 反向 + Shift 双击 `windowReverseTapWindow` 0.15s | **v1 必须**（手速因人而异大）|
 | **跳屏距离** | jumpCursor 0.25 / 0.5 屏 | v1 必须 |
 | **hint label 主题色** | 黄 `1.0,0.84,0` / move-armed `1.0,0.95,0.70` | **v1 该有** |
 | **label 字号** | 11pt | v1 该有 |
@@ -70,7 +70,7 @@
 1. 控制器构造时或 `start()` 时从 `Settings.shared` 取值（替掉 `let` 常量）
 2. 速度类每 tick 读（已经在跑 timer，读缓存值无成本）→ live-apply
 3. 主题色：`HintOverlay` 渲染时读 `Settings.shared.hintColor`；`Settings.didChange` 通知触发 `needsDisplay`
-4. `windowReverseTapWindow`（VimSession）→ 读 Settings；同时影响 hjkl 跳屏 / WINDOW 反向 / Shift 双击 —— 一处改全局生效，符合"双击节奏统一"
+4. 双击阈值（VimSession）→ 读 Settings：`hjklJumpTapWindow`（hjkl 跳屏，0.10s）和 `windowReverseTapWindow`（WINDOW 反向 + Shift 双击，0.15s）现在是两个常量。hjkl 跳屏比其它紧，因为它和"正常单步移动"共享同一个键、最容易把快速连点误判成跳屏；WINDOW/Shift 没有这种单步歧义，留 0.15s。可各自暴露，或合成一个"双击灵敏度"滑块按比例缩放两者。
 
 零风险迁移：每个键的默认值 = 当前硬编码值，没配过的用户行为完全不变。
 

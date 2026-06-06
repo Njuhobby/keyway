@@ -163,18 +163,25 @@ final class VimSession {
     private var lastWindowEdgeKeyUp: [WindowController.Edge: CFAbsoluteTime] = [:]
     private let windowReverseTapWindow: CFAbsoluteTime = 0.15
 
-    /// Same-as-WINDOW double-tap detection for **TAP cursor jump**:
-    /// `hh` / `jj` / `kk` / `ll` released-then-pressed within 150ms
-    /// teleports the cursor 1/4 of the containing screen in that
-    /// direction. Holding the second tap chains jumps via OS
-    /// key-repeat (each repeated keyDown re-triggers because we
-    /// refresh the timestamp on every jump). Single press still
-    /// starts the existing continuous `mover.start`.
-    ///
-    /// Threshold tracks `windowReverseTapWindow` (150ms) so muscle
-    /// memory is one rhythm across modes. Cleared on TAP exit and
-    /// on commit.
+    /// Double-tap detection for **cursor jump** (TAP + SCROLL):
+    /// `hh` / `jj` / `kk` / `ll` released-then-pressed within
+    /// `hjklJumpTapWindow` teleports the cursor 1/4 of the containing
+    /// screen in that direction. Holding the second tap chains jumps via
+    /// OS key-repeat (each repeated keyDown re-triggers because we
+    /// refresh the timestamp on every jump). Single press still starts
+    /// the existing continuous `mover.start`.
     private var lastTapHjklKeyUp: [MouseMover.Direction: CFAbsoluteTime] = [:]
+
+    /// **100ms** — the release→press gap under which a second hjkl tap
+    /// counts as a jump rather than a fresh step. Deliberately TIGHTER
+    /// than `windowReverseTapWindow` (150ms, shared by WINDOW reverse +
+    /// Shift double-tap): a real double-tap lands in 80-130ms, but normal
+    /// fast stepping (tap, brief pause, tap again to step once more) was
+    /// falling in the 130-150ms band and misfiring as a 1/4-screen jump.
+    /// 100ms still catches an intentional quick double-tap while letting
+    /// ordinary repeated stepping through. Tune here if jumps feel too
+    /// hard to trigger (raise) or steps still jump (lower).
+    private let hjklJumpTapWindow: CFAbsoluteTime = 0.1
 
     var isActive: Bool { mode != nil }
 
@@ -2014,11 +2021,12 @@ final class VimSession {
         }
 
         // bare `c` → click at the current cursor position, stay in
-        // SCROLL. Modifier picks the kind: bare single-left / Shift
-        // double / Option right. Pairs with hjkl: move the cursor,
-        // `c` to click. Same swap from Enter→c as TAP normal (see
-        // handleTapNormal): Enter has app-level semantics we want to
-        // preserve.
+        // SCROLL. Modifier picks the kind (same scheme as TAP / hint
+        // commits, see `clickAction`): bare = left, Shift = right,
+        // Shift double-tap-hold = double. Option unused. Pairs with
+        // hjkl: move the cursor, `c` to click. Same swap from Enter→c
+        // as TAP normal (see handleTapNormal): Enter has app-level
+        // semantics we want to preserve.
         if keyCode == KeyCode.c {
             let (button, count) = clickKind(for: flags)
             shiftDoubleArmed = false   // single-keystroke commit consumes it
@@ -2140,9 +2148,10 @@ final class VimSession {
             if let dir = Self.moveDirection(for: keyCode) {
                 mover.stop()                // stop continuous cursor move (hjkl)
                 // Record keyUp for double-tap → jump detection. Shared
-                // dictionary with TAP (`lastTapHjklKeyUp`); 150ms window
-                // naturally filters cross-mode chaining (Caps Lock chord
-                // to switch modes always takes >150ms).
+                // dictionary with TAP (`lastTapHjklKeyUp`); 100ms window
+                // (`hjklJumpTapWindow`) naturally filters cross-mode
+                // chaining (Caps Lock chord to switch modes always takes
+                // far longer).
                 lastTapHjklKeyUp[dir] = CFAbsoluteTimeGetCurrent()
                 return true
             }
@@ -2213,7 +2222,7 @@ final class VimSession {
     }
 
     /// `hh` / `jj` / `kk` / `ll` (release-then-press within
-    /// `windowReverseTapWindow` = 150ms) → discrete 1/4-screen jump
+    /// `hjklJumpTapWindow` = 100ms) → discrete 1/4-screen jump
     /// in that direction. Returns true if a jump fired (caller skips
     /// the regular continuous mover.start). Refreshes the timestamp
     /// so OS key-repeat from a held second tap chains more jumps.
@@ -2226,7 +2235,7 @@ final class VimSession {
                                       dragHeld: Bool = false) -> Bool {
         let now = CFAbsoluteTimeGetCurrent()
         guard let lastUp = lastTapHjklKeyUp[direction],
-              now - lastUp < windowReverseTapWindow else {
+              now - lastUp < hjklJumpTapWindow else {
             return false
         }
         // Shift held during the second tap → **half-screen jump**;
