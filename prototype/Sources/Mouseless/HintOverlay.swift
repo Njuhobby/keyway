@@ -9,6 +9,14 @@ final class HintOverlay {
     /// approach silently dropped frames on screens that weren't the window's
     /// principal display. One window per screen sidesteps that.
     private var windows: [NSWindow] = []
+    /// The screen frames `windows` were built for. When the display
+    /// configuration changes (lid close, monitor (dis)connect, resolution
+    /// change) the cached per-screen windows are sized/positioned for the
+    /// OLD layout — they no longer cover the new screens and the AX→view
+    /// coordinate math (which uses `NSScreen.screens.first` + each
+    /// window's origin) goes stale, so hints render clipped / offset until
+    /// a restart. Comparing against this on every `show` lets us rebuild.
+    private var builtForScreens: [CGRect] = []
 
     func show(targets: [HintTarget], typed: String, moveArmed: Bool = false) {
         ensureWindows()
@@ -33,7 +41,14 @@ final class HintOverlay {
     }
 
     private func ensureWindows() {
-        if !windows.isEmpty { return }
+        let current = NSScreen.screens.map { $0.frame }
+        // Already built for exactly this layout → reuse.
+        if !windows.isEmpty && current == builtForScreens { return }
+        // Display config changed (or first run): tear down the stale
+        // windows and rebuild for the current screens.
+        for w in windows { w.orderOut(nil) }
+        windows.removeAll()
+        builtForScreens = current
 
         for screen in NSScreen.screens {
             let frame = screen.frame

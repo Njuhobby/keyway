@@ -173,6 +173,8 @@ for screen in NSScreen.screens {
 
 **每屏一个独立窗口**。曾经试过单窗口跨屏 union frame —— 在非主屏上会丢帧 / 不渲染。多窗口稳定。
 
+**换屏重建**：这些 per-screen 窗口按建立时的屏幕 frame 定尺寸/定位,且只建一次缓存。显示器配置一变(合盖、插拔外显、改分辨率),旧窗口就盖不住新屏、`draw` 里基于 `NSScreen.screens.first` + 窗口 origin 的坐标换算也错位 → hint 渲染被裁/偏移,直到重启。`ensureWindows` 每次 `show` 拿当前 `NSScreen.screens.map(\.frame)` 和"上次建窗用的"(`builtForScreens`)比一下,变了就拆旧窗重建——开销可忽略(1–3 个 CGRect 的相等比较,远小于前面那次 AX 扫描)。HUD 不需要,它每次 `show` 都按 `NSScreen.main` 重新定位、自我纠正。
+
 ### 窗口层级
 
 | level | 数值 | 谁在这里 |
