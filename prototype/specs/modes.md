@@ -11,10 +11,11 @@ Mode 状态机、命令面板、所有键位的完整定义。
 ```swift
 enum Mode {
     case tap(HintMode)            // hint 点击 + hjkl 移光标 + bare c 点击 + (子状态：drag / search)
-    case scroll(ScrollController) // 键盘滚动（多区域 picker）
+    case scroll(ScrollController) // 键盘滚动（多区域 picker）+ hjkl 移 + bare c 点 + (子状态：drag / search)
     case window(WindowController)     // 整窗口 resize
     case windowMove(WindowMoveController)  // 整窗口平移
-    // TAP 内还有子状态：TapSub.normal / .dragging / .searchTyping / .searchSearching / .searchPicking
+    // TAP 子状态：TapSub.normal / .dragging / .searchTyping / .searchSearching / .searchPicking
+    // SCROLL 子状态：ScrollSub.normal / .dragging / .searchTyping / .searchSearching / .searchPicking
 }
 
 var paletteBuffer: String? = nil   // nil = 面板关闭
@@ -361,11 +362,11 @@ MouseSynth.click(at: MouseSynth.cursorPosition(), button: .left, count: 1)
 
 ---
 
-## 6. DRAG 子状态（TAP 的子状态，不是独立 mode）
+## 6. DRAG 子状态（TAP **和** SCROLL 的子状态，不是独立 mode）
 
 全键盘拖拽，vim-visual 风格。**单段式**：在 TAP normal 里按 bare `v` **立刻** 在光标位置合成 `mouseDown` 进入 dragging 子状态——用户用 hjkl 移光标已经把光标 aim 到目标上了，没必要再多一段 "armed 等再按 v" 的间隔。`DragController` 只持有 `startPoint: CGPoint`（Backspace 取消时用到）。
 
-**入口与归属**：DRAG 是 TAP 的子状态（`TapSub.dragging(DragController)`）。从 TAP normal 进入；drop / cancel 完都回到 **TAP normal** 而非退 OFF（用户场景里 drop 完往往要继续点别的东西，sticky-rehint 接管刷新）。所以 SCROLL / OFF / WINDOW / MOVE 里**没有"直接进 DRAG"的路径**——要 drag 先 Caps Lock 进 TAP 再 `v`。
+**入口与归属**：DRAG 在 **TAP 和 SCROLL 各有一个平行的子状态**（`TapSub.dragging(DragController)` / `ScrollSub.dragging(DragController)`），都从各自 normal 里 bare `v` 进入。TAP 的 drag drop/cancel 回 **TAP normal**(sticky → rehint;非 sticky → exit OFF);SCROLL 的回 **SCROLL normal**(SCROLL 没有 sticky/exit 概念,drop/cancel 后留在 SCROLL)。OFF / WINDOW / MOVE 里**没有"直接进 DRAG"的路径**。
 
 | 键 | 行为 |
 | --- | --- |
@@ -386,11 +387,18 @@ MouseSynth.click(at: MouseSynth.cursorPosition(), button: .left, count: 1)
 - 选文字 + 复制：（先用 `/` 搜索定位起点光标——见 §6.5）→ `v` → hjkl 到终点（沿途文本被选中）→ Enter（释放，**选区保留**）→ Cmd+C 复制。
 - 拖 divider / slider / 时间轴 trim：hjkl 把 cursor 移到 divider 上 → `v` → hjkl 拖 → Enter。
 
+**SCROLL 里的 drag（`ScrollSub.dragging`）**：和 TAP 版镜像,但多一条专属能力——**边拖边滚**。这正是"在 SCROLL 里拖"相对"在 TAP 里拖"的价值:按住拖的同时 `d/u`(垂直)/`b/f`(水平)继续驱动 `ScrollController`,鼠标键不松,可以跨视口拖选(从这里按住、`d` 往下滚选一大段超出屏幕的文字、Enter 放下)。
+- 进入:SCROLL normal 里 bare `v`(`v` 在 SCROLL 里本来是空的)→ `startDragFromScroll()`:`controller.stop()` 停掉连续滚动 → `DragController(at: cursor)` 合成 mouseDown → `scrollSub = .dragging` → `controller.hideOverlay()` 藏起 area picker → HUD `SCROLL · dragging`。
+- `h/j/k/l`:早期拦截里 `.scroll` 分支检测 `.dragging` → `allowsMoveHere=true, dragHeld=true`(normal 时仍 false、走 handleScrollNormal),所以拖动光标发 `.leftMouseDragged`。
+- `d/u/b/f`:`handleScrollDragging` 照常调 `controller.start(...)`(keyUp 经共享的 `handleKeyUp` scroll 路径停)。
+- `Enter` drop / `Backspace` cancel → `scrollDragDrop` / `scrollDragCancel`:mouseUp(cancel 先 warp 回 startPoint)、`controller.showOverlay()` 恢复 picker、回 SCROLL normal(**不退出**)。
+- `Esc` / 切 mode:走 `exit` / `teardownCurrentMode` → `cleanupScrollSub` 的 `.dragging` 分支补一个 mouseUp 释放按钮(同 `cleanupTapSub`)。
+
 **实现注意点**：
-- `startDragFromTap()` 立刻 `MouseSynth.dragDown(at: cursor)` 并构造 `DragController(at: cursor)`，没有 "armed 等 v" 的中间态。
-- 早期 hjkl 拦截读 `tapSub` 决定 `dragHeld`（dragging = `.leftMouseDragged`、其它 TAP 子状态 = `.mouseMoved`）。
-- `cleanupTapSub()` / `exit` 的 mouseUp 只在 dragging 子状态合成（其它子状态没东西可释放）。
-- 进 DRAG 子状态时取消 `pendingStickyRehint`（避免 100ms 延迟里 re-hint 在 drag 中途弹出 overlay）。
+- `startDragFromTap()` / `startDragFromScroll()` 立刻 `MouseSynth.dragDown(at: cursor)`(由 `DragController(at:)` 构造时合成),没有 "armed 等 v" 的中间态。
+- 早期 hjkl 拦截读 `tapSub` / `scrollSub` 决定 `dragHeld`（dragging = `.leftMouseDragged`、其它子状态 = `.mouseMoved`）。
+- `cleanupTapSub()` / `cleanupScrollSub()` / `exit` 的 mouseUp 只在 dragging 子状态合成（其它子状态没东西可释放）。
+- 进 TAP DRAG 时取消 `pendingStickyRehint`（避免 100ms 延迟里 re-hint 在 drag 中途弹出 overlay）；SCROLL 没有 sticky-rehint,不需要。
 
 ---
 

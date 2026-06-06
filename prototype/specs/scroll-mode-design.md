@@ -72,6 +72,7 @@ SCROLL 模式：
     h/j/k/l 按住 → 移光标 左/下/上/右   （vim hjkl，与 TAP 统一；Shift 快 / Option 慢，见 §3.3）
     gg / G     → 跳到选中区域 顶部 / 底部（vim 风格，见 §3.2）
     c           → 当前光标位置左键单击，留在 SCROLL（配 hjkl：移→点；Shift 双击 / Option 右键）
+    v           → 进 drag 子状态（光标位置 mouseDown）：hjkl 拖、d/u/b/f 边拖边滚、Enter 放下、Backspace 取消（见 §3.4 / modes.md §6）
     Enter       → 放行给焦点 app（菜单确认 / 表单提交，不被 SCROLL 吃掉）
     数字键 1-9   → 切换选中区域
     Caps Lock   → 切到 TAP 模式（这时才扫描 + 出 hints）
@@ -91,6 +92,17 @@ SCROLL 里也能键盘移光标 + 点击，跟 TAP **共用同一套 hjkl + bare
 `c` = 当前光标位置左键单击（Shift 双击 / Option 右键），点完留在 SCROLL（不像 TAP 有 sticky/exit 分派——scroll 里就是连续操作）。原来用 Enter，改成 `c` 是为了让 Enter 放行给焦点 app（详见 `modes.md` §4.3）。
 
 > 统一前两个模式移光标键不同（TAP=IJKL、SCROLL=SDFE）是各自键位约束下的妥协；统一到 hjkl 后认知负担消除。日后会开放让用户自定义按键配置。
+
+### 3.4 drag 子状态（`ScrollSub.dragging`）
+
+SCROLL 也能拖拽,和 TAP 的 drag 镜像(`modes.md` §6),但多一条**边拖边滚**——这正是"在 SCROLL 里拖"相对"在 TAP 里拖"的价值:按住拖的同时 `d/u`(垂直)/`b/f`(水平)继续滚,鼠标键不松,可以**跨视口拖选**(从这里按住、`d` 往下滚选一大段超出屏幕的内容、Enter 放下)。
+
+- 进入:SCROLL normal 里 bare `v`(`v` 在 SCROLL 本来空着)→ 停连续滚动 + 光标位置 mouseDown + 藏 area picker,HUD `SCROLL · dragging`;
+- `hjkl` 拖光标(发 `.leftMouseDragged`);`d/u/b/f` 边拖边滚;
+- `Enter` 放下 / `Backspace` 取消(取消 warp 回起点)→ 恢复 picker、回 SCROLL normal(**不退出**,SCROLL 没有 sticky/exit 概念);
+- `Esc` / 切 mode → cleanup 补 mouseUp 释放按钮。
+
+实现:`VimSession.startDragFromScroll` / `handleScrollDragging` / `scrollDragDrop` / `scrollDragCancel`,与 TAP 共用 `DragController` / `MouseMover`(dragHeld)。
 
 ### 3.1 松开 d/u 不自动重扫
 
@@ -176,7 +188,7 @@ scroll?.post(tap: .cghidEventTap)
 | 组件 | 职责 |
 | --- | --- |
 | `HotkeyTap` | F19 armed 状态机 + keyUp + chord 检测（Caps Lock + d）；分发到 TAP / SCROLL |
-| `VimSession` | Mode enum 加 `.scroll`；scroll 按键分发（d/u 滚、hjkl 移、gg/G 跳、bare `c` 点、数字切区）|
+| `VimSession` | Mode enum 加 `.scroll`；scroll 按键分发（d/u 滚、hjkl 移、gg/G 跳、bare `c` 点、bare `v` 拖、数字切区）|
 | `ScrollAreaDetector` | AX walk 找 AXScrollArea + AXWebArea，返回各自 screen rect |
 | `ScrollOverlay` | 画蓝色光晕边框（Homerow 风）+ 数字 badge 标每个区域 |
 | `ScrollController` | 滚动合成 + 连续定时器 + gg/G 跳顶底 + 光标 warp + 区域选择状态 |

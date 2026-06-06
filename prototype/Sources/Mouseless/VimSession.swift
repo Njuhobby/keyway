@@ -49,6 +49,7 @@ final class VimSession {
     /// helpers.
     enum ScrollSub {
         case normal
+        case dragging(DragController)
         case searchTyping(buffer: String)
         case searchSearching
         case searchPicking(matches: [SearchMatch], typed: String)
@@ -488,6 +489,12 @@ final class VimSession {
         switch scrollSub {
         case .normal:
             break
+        case .dragging:
+            // Release the held mouseDown — same catch-all as cleanupTapSub
+            // (Enter/Backspace release explicitly; this covers mode-switch
+            // chords mid-drag). c.teardown() already stopped any scroll.
+            mover.stop()
+            MouseSynth.dragUp(at: MouseSynth.cursorPosition())
         case .searchTyping, .searchSearching, .searchPicking:
             SearchOverlay.shared.hide()
         }
@@ -1318,7 +1325,15 @@ final class VimSession {
             case .searchTyping, .searchSearching, .searchPicking:
                 allowsMoveHere = false; dragHeld = false
             }
-        case .scroll: allowsMoveHere = false; dragHeld = false
+        case .scroll:
+            // Normal SCROLL: hjkl handled in handleScrollNormal (mover w/o
+            // drag). Dragging sub-state: route hjkl here with dragHeld so
+            // the mover posts .leftMouseDragged (same as TAP dragging).
+            if case .dragging = scrollSub {
+                allowsMoveHere = true; dragHeld = true
+            } else {
+                allowsMoveHere = false; dragHeld = false
+            }
         case .window: allowsMoveHere = false; dragHeld = false   // hjkl resizes, handled in handleWindow
         case .windowMove: allowsMoveHere = false; dragHeld = false   // hjkl translates, handled in handleWindowMove
         }
@@ -1539,6 +1554,81 @@ final class VimSession {
         MouseSynth.dragUp(at: c.startPoint)
         tapSub = .normal
         if case .tap(let h) = mode { h.showOverlay() }
+        renderModeHUD()
+    }
+
+    // MARK: - SCROLL sub-state: drag
+
+    /// Start dragging from SCROLL normal. Mirrors `startDragFromTap`:
+    /// synth `mouseDown` at the cursor, switch to `.dragging`, hide the
+    /// scroll-area picker. While dragging, hjkl moves the cursor (held
+    /// button → `.leftMouseDragged`) and d/u/b/f keep scrolling, so the
+    /// user can drag-select across the viewport. Bare `v` triggers it.
+    private func startDragFromScroll() {
+        guard case .scroll(let controller) = mode, case .normal = scrollSub else { return }
+        controller.stop()   // stop any continuous scroll before grabbing
+        let cursor = MouseSynth.cursorPosition()
+        scrollSub = .dragging(DragController(at: cursor))
+        controller.hideOverlay()
+        renderModeHUD()
+        print("[mouseless] DRAG (SCROLL sub-state) start at \(Int(cursor.x)),\(Int(cursor.y))")
+    }
+
+    /// `.dragging` keystrokes in SCROLL. hjkl is handled by the early
+    /// intercept (dragHeld). Here: Enter drops, Backspace cancels, and
+    /// d/u/b/f scroll WHILE the drag button is held (drag-scroll). Bare
+    /// `v` is a no-op (already grabbed); everything else is swallowed to
+    /// keep stray keys out of the focused app while a mouseDown is held.
+    private func handleScrollDragging(controller: ScrollController,
+                                      keyCode: Int, flags: CGEventFlags) -> Bool {
+        let modMask: CGEventFlags = [.maskShift, .maskControl,
+                                     .maskCommand, .maskAlternate]
+        let bareModifiers = flags.intersection(modMask).isEmpty
+
+        if keyCode == KeyCode.return {
+            scrollDragDrop()
+            return true
+        }
+        if keyCode == KeyCode.delete && bareModifiers {
+            scrollDragCancel()
+            return true
+        }
+        // d/u scroll vertical, b/f horizontal — same mapping as normal,
+        // but the held drag button turns it into a drag-scroll. Shift =
+        // fast. keyUp stops them via the shared handleKeyUp scroll path.
+        let fast = flags.contains(.maskShift)
+        if keyCode == KeyCode.d { controller.start(axis: .vertical, positive: true, fast: fast); return true }
+        if keyCode == KeyCode.u { controller.start(axis: .vertical, positive: false, fast: fast); return true }
+        if keyCode == KeyCode.b { controller.start(axis: .horizontal, positive: false, fast: fast); return true }
+        if keyCode == KeyCode.f { controller.start(axis: .horizontal, positive: true, fast: fast); return true }
+        // bare `v` while dragging: idempotent no-op. Swallow the rest.
+        return true
+    }
+
+    /// Drag dropped (Enter): mouseUp at the cursor, back to SCROLL normal,
+    /// re-show the picker. SCROLL has no sticky/exit concept — it just
+    /// returns to normal and stays in SCROLL.
+    private func scrollDragDrop() {
+        guard case .dragging = scrollSub else { return }
+        mover.stop()
+        if case .scroll(let c) = mode { c.stop() }
+        MouseSynth.dragUp(at: MouseSynth.cursorPosition())
+        scrollSub = .normal
+        if case .scroll(let c) = mode { c.showOverlay() }
+        renderModeHUD()
+    }
+
+    /// Drag cancelled (Backspace): warp back to the start point and
+    /// release there (zero-distance drop = no-op for the app), back to
+    /// SCROLL normal.
+    private func scrollDragCancel() {
+        guard case .dragging(let dc) = scrollSub else { return }
+        mover.stop()
+        if case .scroll(let c) = mode { c.stop() }
+        CGWarpMouseCursorPosition(dc.startPoint)
+        MouseSynth.dragUp(at: dc.startPoint)
+        scrollSub = .normal
+        if case .scroll(let c) = mode { c.showOverlay() }
         renderModeHUD()
     }
 
@@ -1939,6 +2029,8 @@ final class VimSession {
         switch scrollSub {
         case .normal:
             return handleScrollNormal(controller: controller, keyCode: keyCode, flags: flags)
+        case .dragging:
+            return handleScrollDragging(controller: controller, keyCode: keyCode, flags: flags)
         case .searchTyping(let buffer):
             return handleSearchTyping(buffer: buffer, keyCode: keyCode, flags: flags)
         case .searchSearching:
@@ -2031,6 +2123,16 @@ final class VimSession {
             let (button, count) = clickKind(for: flags)
             shiftDoubleArmed = false   // single-keystroke commit consumes it
             MouseSynth.click(at: MouseSynth.cursorPosition(), button: button, count: count)
+            return true
+        }
+        // bare `v` → start a drag (mouseDown at cursor), same trigger as
+        // TAP normal. Then hjkl drags the cursor, d/u/b/f scroll while the
+        // button stays held (drag-select across the viewport — the whole
+        // point of dragging in SCROLL), Enter drops, Backspace cancels.
+        if keyCode == KeyCode.v
+            && flags.intersection([.maskShift, .maskControl,
+                                   .maskCommand, .maskAlternate]).isEmpty {
+            startDragFromScroll()
             return true
         }
         // Enter → pass through (same reason as TAP normal).
@@ -2639,6 +2741,8 @@ final class VimSession {
             switch scrollSub {
             case .normal:
                 label = "SCROLL"
+            case .dragging:
+                label = "SCROLL · dragging"
             case .searchTyping(let buffer):
                 label = "/" + buffer
             case .searchSearching:
