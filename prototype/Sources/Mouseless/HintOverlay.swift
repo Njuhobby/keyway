@@ -15,6 +15,15 @@ final class HintOverlay {
         for w in windows {
             (w.contentView as? HintOverlayView)?.update(targets: targets, typed: typed,
                                                         moveArmed: moveArmed)
+            // Re-assert all-spaces membership BEFORE ordering front.
+            // After an `orderOut` (we hide the overlay on every app/Space
+            // switch — see VimSession.reapplyOnCurrentFrontmost) macOS
+            // drops the window's all-spaces registration; a plain
+            // orderFront then reattaches it to the Space it was last
+            // visible on (the OLD one), so it never follows you to the
+            // newly-activated Space. Re-setting collectionBehavior here
+            // re-registers it on the CURRENT Space each show.
+            w.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
             w.orderFrontRegardless()
         }
     }

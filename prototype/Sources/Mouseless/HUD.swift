@@ -15,6 +15,12 @@ final class HUD {
         ensureWindow()
         (window?.contentView as? HUDView)?.text = text
         repositionAndResize(forText: text)
+        // Re-assert all-spaces membership before ordering front — after an
+        // orderOut (hidden on every app/Space switch) macOS drops the
+        // all-spaces registration, so a plain orderFront reattaches the
+        // HUD to the OLD Space instead of following to the active one.
+        // Same fix as HintOverlay.show.
+        window?.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         window?.orderFrontRegardless()  // never makeKeyAndOrderFront — that steals focus
     }
 

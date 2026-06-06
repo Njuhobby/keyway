@@ -150,6 +150,13 @@ collect focused app:
 子：windows 要走缓存，menubar 要走 fast path，dock / extras 都不来自
 焦点 app（它们走自己的路径，§3 / §4）。
 
+> **不支持右键 / 弹出菜单的 hint。** 试过：右键弹出的 context menu 想加
+> hint，得先在 AX 里找到那个 `AXMenu`。但实测 **Finder 桌面右键菜单根本
+> 不在 Finder 进程的 AX 树里**——system-wide / app 的 `AXFocusedUIElement`
+> 都不是它,`AXChildren` 没有它,深挖子树(depth≤4)也没有。它是独立进程
+> 的系统级菜单,AX 经 Finder 这条路够不着。所以这个功能放弃了(详见 git
+> 历史里那次 revert)。
+
 ### 2.5 AXWindow 缓存（`HintWindowCache`）
 
 **问题**：sticky rescan（点完一个 hint 后自动重扫）总是把焦点 app 的整棵
