@@ -362,6 +362,10 @@ final class BridgeServer: @unchecked Sendable {
         case "com.brave.Browser":         return "brave"
         case "company.thebrowser.Browser": return "arc"
         case "com.apple.Safari":          return "safari"
+        case "org.mozilla.firefox",
+             "org.mozilla.firefoxdeveloperedition",
+             "org.mozilla.nightly":
+            return "firefox"
         default:                          return "unknown"
         }
     }

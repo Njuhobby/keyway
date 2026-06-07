@@ -1,6 +1,6 @@
 # Mouseless extension
 
-Bridge between Chrome (Safari later) and the Mouseless desktop app.
+Bridge between Chrome / Firefox (Safari later) and the Mouseless desktop app.
 
 See [`../specs/browser-support-design.md`](../specs/browser-support-design.md)
 for the architecture and roadmap.
@@ -39,6 +39,28 @@ Register the native host manifest:
 This writes
 `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.mouseless.bridge.json`
 pointing at the bridge binary in `.build/`, locked to your extension ID.
+
+## Dev setup — Firefox
+
+The JS (`background.js` / `content_script.js` / `detector.js`) and the
+`mouseless-bridge` binary are shared with Chrome. Only the manifest differs
+(Firefox uses an event-page `background.scripts` + a `gecko` id instead of
+Chrome's `background.service_worker`), and the native host is registered
+under Mozilla's dir keyed by the add-on id, not a `chrome-extension://`
+origin. Two helper scripts handle both:
+
+```bash
+cd prototype/extension
+./build-firefox.sh             # assembles dist-firefox/ (shared JS + Firefox manifest)
+./install_dev_host_firefox.sh  # registers the native host for Firefox (gecko id mouseless@local)
+```
+
+Then load it: Firefox → `about:debugging#/runtime/this-firefox` →
+**Load Temporary Add-on…** → pick `dist-firefox/manifest.json`. Click the
+Mouseless toolbar icon to trigger the first native ping. (Temporary add-ons
+are dropped on Firefox restart — reload each session, like Chrome's unpacked
+dev load. `dist-firefox/` is generated, gitignored — rerun `build-firefox.sh`
+after editing the shared JS.)
 
 ## Verifying the P1 ping/pong
 

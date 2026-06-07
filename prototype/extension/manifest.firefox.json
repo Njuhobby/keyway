@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "Mouseless (dev)",
+  "version": "0.0.13",
+  "description": "Bridge between Firefox and the Mouseless desktop app. Dev build — multi-profile / multi-browser active routing.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "mouseless@local",
+      "strict_min_version": "115.0"
+    }
+  },
+  "permissions": ["nativeMessaging", "scripting"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "scripts": ["background.js"]
+  },
+  "action": {
+    "default_title": "Mouseless: click to ping native host"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["detector.js", "content_script.js"],
+      "run_at": "document_idle",
+      "all_frames": true,
+      "match_about_blank": true
+    }
+  ]
+}

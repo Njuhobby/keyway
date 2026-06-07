@@ -27,6 +27,13 @@
 (function () {
   "use strict";
 
+  // Cross-browser: use Firefox's promise-based `browser.*` when present,
+  // else Chrome's `chrome.*`. (We only use callback/fire-and-forget
+  // messaging here, but keep the alias consistent with background.js.)
+  const chrome = (typeof globalThis.browser !== "undefined")
+    ? globalThis.browser
+    : globalThis.chrome;
+
   const IS_TOP = (window.top === window);
   const HINT_REQ_TIMEOUT_MS = 250;
 

@@ -95,6 +95,9 @@ enum AppRegistry {
         "com.microsoft.edgemac",
         "com.apple.Safari",
         "company.thebrowser.Browser",   // Arc
+        "org.mozilla.firefox",
+        "org.mozilla.firefoxdeveloperedition",
+        "org.mozilla.nightly",
     ]
 
     static func isBrowserApp(bundleID: String) -> Bool {

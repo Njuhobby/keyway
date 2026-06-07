@@ -13,6 +13,16 @@
 // browser window is open. If the port DOES die (network error, OS
 // suspend, etc.) we reconnect with exponential backoff.
 
+// Cross-browser shim. Firefox exposes the promise-based `browser.*`
+// namespace; Chrome exposes `chrome.*` (promise-based in MV3). This file is
+// written against `chrome.*` with await/promises, so on Firefox we alias
+// `chrome` → `browser` to guarantee the promise returns (Firefox's own
+// `chrome.*` aliases are callback-style on some versions). On Chrome
+// `globalThis.browser` is undefined, so this is a no-op.
+const chrome = (typeof globalThis.browser !== "undefined")
+  ? globalThis.browser
+  : globalThis.chrome;
+
 const HOST = "com.mouseless.bridge";
 const KEEPALIVE_MS = 20_000;
 const RECONNECT_BASE_MS = 1_000;
@@ -22,6 +32,11 @@ const RECONNECT_MAX_MS = 30_000;
 // in sync with `browserKeyForBundleID` in BridgeServer.swift.
 function detectBrowser() {
   const ua = navigator.userAgent || "";
+  // Firefox first — its UA has no "Chrome/" token, but check explicitly
+  // so the Chrome fallthrough below never misclassifies it. (Firefox MV3
+  // aliases the chrome.* namespace, so the rest of this file is unchanged;
+  // see manifest.firefox.json for the background-script difference.)
+  if (/Firefox\//.test(ua)) return "firefox";
   if (/Edg\//.test(ua))   return "edge";
   if (/OPR\//.test(ua))   return "opera";
   if (/Brave\//.test(ua)) return "brave";
