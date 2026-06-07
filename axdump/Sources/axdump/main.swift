@@ -85,25 +85,135 @@ func line(_ el: AXUIElement, depth: Int, role: String, actions: [String]) -> Str
     return "\(indent)\(role)\(subrole) \(label)\(acts)\(rectStr(el))\(enabled)\(ident)\(selected)\n"
 }
 
+// MARK: - "Would Mouseless hint this?" predicate
+//
+// Mirrors HintMode's AX candidacy + reachability so the dump can MARK the
+// nodes Mouseless's CURRENT logic would turn into hint targets (left-margin
+// "▶"). The gap between "marked" and "clickable-but-unmarked" is exactly
+// the AX-coverage signal we want to study.
+//
+// KEEP IN SYNC with HintMode.swift: clickableRoles / skipRoles / maxDepth /
+// the candidacy check in walk() / hasMeaningfulLabel / onScreen /
+// withinWindow / the AXRow source-list fallback. Deliberate
+// approximations (noted in the output header): the 169-target cap and the
+// menubar-only closed-AXMenu nuance.
+let HINT_DEPTH = 12   // HintMode.maxDepth
+let clickableRoles: Set<String> = [
+    "AXButton", "AXLink", "AXMenuItem", "AXMenuBarItem", "AXMenuButton",
+    "AXCheckBox", "AXRadioButton", "AXPopUpButton", "AXTab",
+    "AXDisclosureTriangle", "AXDockItem", "AXMenuExtra",
+]
+let skipRoles: Set<String> = ["AXStaticText", "AXImage", "AXProgressIndicator"]
+
+func totalScreenSpan() -> CGRect? {
+    guard let primary = NSScreen.screens.first else { return nil }
+    let primaryH = primary.frame.height
+    var union = CGRect.null
+    for s in NSScreen.screens {
+        let f = s.frame
+        let ax = CGRect(x: f.minX, y: primaryH - f.maxY, width: f.width, height: f.height)
+        union = union.isNull ? ax : union.union(ax)
+    }
+    return union.isNull ? nil : union
+}
+let screenSpan = totalScreenSpan()
+
+func rectOf(_ el: AXUIElement) -> CGRect? {
+    var pRef: CFTypeRef?; var sRef: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(el, "AXPosition" as CFString, &pRef) == .success,
+          AXUIElementCopyAttributeValue(el, "AXSize" as CFString, &sRef) == .success,
+          let pRef, let sRef else { return nil }
+    var o = CGPoint.zero; var sz = CGSize.zero
+    guard AXValueGetValue(pRef as! AXValue, .cgPoint, &o),
+          AXValueGetValue(sRef as! AXValue, .cgSize, &sz) else { return nil }
+    return CGRect(origin: o, size: sz)
+}
+func enabledAttr(_ el: AXUIElement) -> Bool { boolAttr(el, "AXEnabled") ?? true }
+func onScreen(_ r: CGRect) -> Bool { guard let s = screenSpan else { return true }; return r.intersects(s) }
+func withinWindow(_ r: CGRect, _ b: CGRect?) -> Bool { guard let b else { return true }; return r.intersects(b) }
+func meaningfulLabel(_ role: String, _ el: AXUIElement) -> Bool {
+    if role == "AXDockItem" || role == "AXMenuBarItem" || role == "AXMenuExtra" { return true }
+    for a in ["AXTitle", "AXDescription", "AXHelp", "AXValue", "AXSubrole"] {
+        if let s = str(el, a), !s.isEmpty { return true }
+    }
+    return false
+}
+func isClickableHint(_ role: String, _ actions: [String]) -> Bool {
+    if clickableRoles.contains(role) { return true }
+    return actions.contains("AXPress") || actions.contains("AXOpen")
+}
+func axMenuIsOpen(_ el: AXUIElement) -> Bool {
+    guard let parent = copyEl(el, "AXParent") else { return false }
+    return str(parent, "AXRole") == "AXMenuBarItem" && (boolAttr(parent, "AXSelected") == true)
+}
+func culled(_ rect: CGRect?, _ window: CGRect?) -> Bool {
+    guard let r = rect, !r.isEmpty else { return false }
+    if let s = screenSpan, !r.intersects(s) { return true }
+    if let w = window, !r.intersects(w) { return true }
+    return false
+}
+
 // MARK: - Walk
 
+struct DumpNode { let depth: Int; let text: String; var isHint: Bool }
+var nodes: [DumpNode] = []
 var nodeCount = 0
+var hintCount = 0
 var roleCounts: [String: Int] = [:]
 var pressableCount = 0
 var truncated = false
 
-func walk(_ el: AXUIElement, depth: Int, into out: inout String) {
-    if nodeCount >= MAX_NODES { truncated = true; return }
+/// Append one DumpNode per element. `reachable` tracks whether Mouseless's
+/// hint walker would descend this far (ancestor skipRoles / closed AXMenu /
+/// subtree culling / depth). Returns the count of hint-marked nodes in this
+/// subtree — used by the AXRow source-list fallback (row is a target only
+/// when it has no clickable descendant).
+@discardableResult
+func walk(_ el: AXUIElement, depth: Int, reachable: Bool, windowBounds: CGRect?) -> Int {
+    if nodeCount >= MAX_NODES { truncated = true; return 0 }
     nodeCount += 1
     let role = str(el, "AXRole") ?? "?"
     roleCounts[role, default: 0] += 1
     let actions = actionNames(el)
     if actions.contains("AXPress") || actions.contains("AXOpen") { pressableCount += 1 }
-    out += line(el, depth: depth, role: role, actions: actions)
-    guard depth < MAX_DEPTH else { return }
-    for child in copyArray(el, "AXChildren") ?? [] {
-        walk(child, depth: depth + 1, into: &out)
+    let rect = rectOf(el)
+
+    var selfHint = false
+    if reachable, depth < HINT_DEPTH, enabledAttr(el), let r = rect,
+       r.width >= 8, r.height >= 8, onScreen(r), withinWindow(r, windowBounds),
+       meaningfulLabel(role, el), isClickableHint(role, actions) {
+        selfHint = true
     }
+
+    let myIndex = nodes.count
+    nodes.append(DumpNode(depth: depth,
+                          text: line(el, depth: depth, role: role, actions: actions),
+                          isHint: selfHint))
+    if selfHint { hintCount += 1 }
+
+    var subtreeHints = selfHint ? 1 : 0
+    guard depth < MAX_DEPTH else { return subtreeHints }
+
+    let descend = reachable && (depth + 1 < HINT_DEPTH)
+        && !skipRoles.contains(role)
+        && !(role == "AXMenu" && !axMenuIsOpen(el))
+        && !culled(rect, windowBounds)
+    var descendantHints = 0
+    for child in copyArray(el, "AXChildren") ?? [] {
+        descendantHints += walk(child, depth: depth + 1, reachable: descend, windowBounds: windowBounds)
+    }
+    subtreeHints += descendantHints
+
+    // AXRow source-list fallback (Finder / Mail / Notes / Music sidebars):
+    // the row itself is the click target when no descendant was hinted.
+    if role == "AXRow", reachable, depth < HINT_DEPTH, !selfHint, descendantHints == 0,
+       enabledAttr(el), let r = rect, r.width >= 8, r.height >= 8,
+       onScreen(r), withinWindow(r, windowBounds), meaningfulLabel(role, el) {
+        nodes[myIndex].isHint = true
+        hintCount += 1
+        subtreeHints += 1
+    }
+    return subtreeHints
 }
 
 // MARK: - App resolution
@@ -205,14 +315,20 @@ let appEl = AXUIElementCreateApplication(pid)
 let windows = copyArray(appEl, "AXWindows") ?? []
 
 var body = ""
+func flushNodes() {
+    for n in nodes { body += (n.isHint ? "▶ " : "  ") + n.text }
+    nodes.removeAll(keepingCapacity: true)
+}
 if windows.isEmpty {
     eprint("[axdump] \(name): no AXWindows exposed — dumping the application element")
-    walk(appEl, depth: 0, into: &body)
+    walk(appEl, depth: 0, reachable: true, windowBounds: nil)
+    flushNodes()
 } else {
     for (i, w) in windows.enumerated() {
         let title = str(w, "AXTitle").map { " \"\(clip($0))\"" } ?? ""
         body += "\n== window[\(i)]\(title) ==\n"
-        walk(w, depth: 0, into: &body)
+        walk(w, depth: 0, reachable: true, windowBounds: rectOf(w))
+        flushNodes()
     }
 }
 
@@ -221,9 +337,12 @@ header += "# AX dump — \(name) (\(bundle), pid \(pid))\n"
 header += "# windows: \(windows.count)\n"
 header += "# nodes: \(nodeCount)\(truncated ? " (TRUNCATED at \(MAX_NODES))" : "")"
 header += ", with AXPress/AXOpen: \(pressableCount)\n"
+header += "# ▶ Mouseless would hint: \(hintCount)  (mirrors HintMode; grep '^▶')\n"
+header += "#   approximations: 169-target cap and closed-AXMenu nuance NOT applied\n"
 header += "# roles: " + roleCounts.sorted { $0.value > $1.value }
     .map { "\($0.key)×\($0.value)" }.joined(separator: ", ") + "\n"
-header += "# format: <indent><role>[<subrole>] \"label\" actions=[…] rect=(x,y w×h) en=N id=… SELECTED\n"
+header += "# format: <▶|·> <indent><role>[<subrole>] \"label\" actions=[…] rect=(x,y w×h) en=N id=… SELECTED\n"
+header += "#         ▶ = Mouseless's current logic would mark this a hint target\n"
 
 print(header + body)
-eprint("[axdump] \(name): \(nodeCount) nodes, \(pressableCount) with AXPress/AXOpen")
+eprint("[axdump] \(name): \(nodeCount) nodes, \(pressableCount) AXPress/AXOpen, \(hintCount) would-be hints")

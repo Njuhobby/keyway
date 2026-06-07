@@ -65,28 +65,48 @@ Output goes to stdout (redirect to a file); progress/errors go to stderr.
 
 ## Output format
 
-A summary header, then every window's tree, one node per line:
+A summary header, then every window's tree, one node per line. The first
+column is a **`▶` marker** when Mouseless's *current* hint logic would turn
+that node into a hint target (see below):
 
 ```
 # AX dump — Slack (com.tinyspeck.slackmacgap, pid 1234)
 # windows: 1
 # nodes: 3812, with AXPress/AXOpen: 274
+# ▶ Mouseless would hint: 96  (mirrors HintMode; grep '^▶')
+#   approximations: 169-target cap and closed-AXMenu nuance NOT applied
 # roles: AXGroup×2901, AXStaticText×410, AXButton×120, …
-# format: <indent><role>[<subrole>] "label" actions=[…] rect=(x,y w×h) en=N id=… SELECTED
+# format: <▶|·> <indent><role>[<subrole>] "label" actions=[…] rect=(x,y w×h) en=N id=… SELECTED
+#         ▶ = Mouseless's current logic would mark this a hint target
 
 == window[0] "Slack — general" ==
-AXWindow "Slack — general" rect=(0,0 1440×900)
-  AXGroup rect=(...)
-    AXButton "Compose" actions=[AXPress] rect=(...)
-    ...
+   AXWindow "Slack — general" rect=(0,0 1440×900)
+     AXGroup rect=(...)
+▶      AXButton "Compose" actions=[AXPress] rect=(...)
+       AXStaticText "general" rect=(...)
 ```
 
-Reading it for AX-coverage decisions:
-- **`actions=[…]` with `AXPress`/`AXOpen`** is the key signal — an element
-  the AX layer considers clickable. If the thing you want to click shows up
-  with `AXPress`, a per-app rule can surface it.
-- An element present but with **no actions and no meaningful label**, buried
-  under `AXGroup`s, often still corresponds to a clickable control → a
-  per-app predicate (by subrole / identifier / position) can claim it.
-- If the control you want **doesn't appear at all** anywhere in the tree,
-  AX can't serve it — that app stays on OmniParser.
+### The `▶` marker — "what Mouseless catches"
+
+Each line is tagged `▶` iff Mouseless's hint walker would mark it, mirroring
+`HintMode`: reachable (depth < 12, parent not an `AXStaticText`/`AXImage`/
+`AXProgressIndicator` it won't recurse into, subtree on-screen + within the
+window), enabled, ≥ 8×8, has a meaningful label, and is clickable (role in
+the allow-list **or** advertises `AXPress`/`AXOpen`) — plus the `AXRow`
+source-list fallback. (Kept in sync with `HintMode.swift`; the 169-target
+cap and the menubar-only closed-`AXMenu` nuance are not replicated.)
+
+So the dump shows two things at once:
+- `▶` lines = **what Mouseless hints today**.
+- un-`▶`'d lines that are clearly interactive = **the gap** — the
+  AX-coverage opportunity.
+
+Reading it for AX-coverage decisions (`grep '^▶'` for the caught set):
+- A control you want to click that's **un-`▶`'d but has `AXPress`/`AXOpen`**
+  (or sits under an `AXImage`/`AXGroup` Mouseless doesn't reach) → a per-app
+  rule can surface it.
+- A control present with **no actions and no meaningful label**, buried in
+  `AXGroup`s, often still maps to something clickable → a per-app predicate
+  (by subrole / identifier / position) can claim it.
+- A control that **doesn't appear at all** anywhere in the tree → AX can't
+  serve it; that app stays on OmniParser.
