@@ -13,6 +13,17 @@
 // browser window is open. If the port DOES die (network error, OS
 // suspend, etc.) we reconnect with exponential backoff.
 
+// The whole file is wrapped in an IIFE for ONE reason: the cross-browser
+// shim below needs to bind the name `chrome`, but in a Chrome MV3 service
+// worker `chrome` is already a top-level lexical binding — a top-level
+// `const chrome` there throws "Identifier 'chrome' has already been
+// declared" and the SW fails to register (the whole extension goes dark).
+// Inside a function, `const chrome` legally shadows the global, so the
+// shim works on Chrome AND Firefox with zero call-site changes. The IIFE
+// runs synchronously on SW load, so event-listener registration is still
+// synchronous (MV3 requires that).
+(function () {
+
 // Cross-browser shim. Firefox exposes the promise-based `browser.*`
 // namespace; Chrome exposes `chrome.*` (promise-based in MV3). This file is
 // written against `chrome.*` with await/promises, so on Firefox we alias
@@ -510,3 +521,5 @@ chrome.action.onClicked.addListener(() => {
 // fired). If no port exists by the time module top-level runs,
 // connect now too.
 if (!port) connect();
+
+})();   // end IIFE (see top: lets the `const chrome` shim shadow the global)
