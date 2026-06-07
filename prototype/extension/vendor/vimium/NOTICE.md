@@ -33,3 +33,9 @@ Source pin: rules taken from commit on `master` retrieved 2026-06-03.
 When pulling in upstream fixes (e.g., shadow-root occlusion improvements,
 new framework heuristics), reference the date and commit SHA here so
 divergence is traceable.
+
+(Note: an earlier iteration of the in-page d/u scroller adapted Vimium's
+`content_scripts/scroller.js`; that was replaced — Mouseless now detects
+the keys in the content script but delegates the actual scroll to the
+native side, which posts a real OS scroll-wheel event. No Vimium scroller
+code remains.)

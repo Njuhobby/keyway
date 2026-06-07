@@ -33,6 +33,13 @@ final class BridgeServer: @unchecked Sendable {
     typealias Handler = @Sendable (_ message: [String: Any], _ reply: @escaping @Sendable ([String: Any]) -> Void) -> Void
 
     private var handler: Handler = { _, _ in }
+
+    /// Called when the active (focus-reporting) client connection drops.
+    /// Used as a backstop to stop an in-flight page scroll if the extension
+    /// SW dies mid-hold (its "stop" message would never arrive). Set by
+    /// AppDelegate; invoked on the connection's background queue, so the
+    /// closure should hop to the main actor itself.
+    var onActiveClientDisconnect: (@Sendable () -> Void)?
     private var listenFD: Int32 = -1
     private let acceptQueue = DispatchQueue(label: "mouseless.bridge.accept", qos: .utility)
 
@@ -191,10 +198,14 @@ final class BridgeServer: @unchecked Sendable {
         defer {
             close(client)
             stateLock.lock()
-            if activeFD == client { activeFD = -1 }
+            let wasActive = (activeFD == client)
+            if wasActive { activeFD = -1 }
             clientIdentities[client] = nil
             stateLock.unlock()
             print("[bridge] client disconnected fd=\(client)")
+            // If the focused browser's bridge dropped, kill any in-flight
+            // page scroll — its "stop" message can no longer arrive.
+            if wasActive { onActiveClientDisconnect?() }
         }
         while true {
             var lenBytes = [UInt8](repeating: 0, count: 4)
@@ -315,6 +326,26 @@ final class BridgeServer: @unchecked Sendable {
         guard let data = try? JSONSerialization.data(withJSONObject: message) else { return false }
         writeMessage(client: fd, data: data)
         return true
+    }
+
+    /// Public, synchronous: is there an active (focus-reporting) client
+    /// connection whose self-reported browser matches `bundleID`? Used by
+    /// the Caps Lock+d gate (HotkeyTap) to tell, in the synchronous event-
+    /// tap callback, whether the frontmost browser's extension is live.
+    func hasActiveBrowserConnection(forBrowserBundleID bundleID: String) -> Bool {
+        stateLock.lock()
+        let fd = activeFD
+        let identity = (fd >= 0) ? clientIdentities[fd] : nil
+        stateLock.unlock()
+        guard fd >= 0 else { return false }
+        return identity?.browser == Self.browserKeyForBundleID(bundleID)
+    }
+
+    /// Public wrapper over the bundle→browser-key mapping so callers
+    /// (VimSession's scroll gate) can compare a frontmost bundle ID
+    /// against the browser key reported in a `scroll_gate` message.
+    static func browserKey(forBundleID bundleID: String) -> String {
+        browserKeyForBundleID(bundleID)
     }
 
     /// Map a macOS bundle identifier to the short browser key the

@@ -68,6 +68,18 @@ final class VimSession {
     private var paletteBuffer: String? = nil   // nil = palette closed
     private var sticky: Bool = false           // toggled by trigger key in TAP
     private let mover = MouseMover()            // hjkl cursor move (TAP + SCROLL)
+
+    /// Standalone scroll engine for the browser's in-page d/u/gg/G scroll
+    /// (Vimium-style), driven by `page_scroll` messages the extension's
+    /// content script sends when the user presses d/u/gg/G on a real web
+    /// page while NOT in any Mouseless mode. Reuses ScrollController's
+    /// wheel-posting (start/stop/jump) WITHOUT enter() — no area detection,
+    /// no cursor warp, no overlay: it just posts a real scroll-wheel event
+    /// at the current cursor, so the browser's native scroll engine handles
+    /// containment (scrolling a sidebar doesn't leak to the page). See
+    /// `handlePageScroll`. Stopped on any mode entry (teardownCurrentMode)
+    /// and on extension disconnect, as a backstop for a missed keyup.
+    private let pageScroll = ScrollController()
     private var rehintGeneration = 0           // supersede in-flight re-hints
     private var pendingStickyRehint: DispatchWorkItem?  // post-commit delayed re-hint
     /// Pending work item for the "re-apply current mode on the newly-
@@ -78,6 +90,18 @@ final class VimSession {
     /// actions that supersede them (Esc, mode chord, etc.).
     private var pendingAppSwitchReenter: DispatchWorkItem?
     private var scrollPendingG = false         // first 'g' of a gg (SCROLL)
+
+    /// Browser key (e.g. "chrome") whose currently-focused tab has a
+    /// live content script handling d/u/gg/G scrolling itself (Vimium-
+    /// style), or nil. Pushed by the extension via `scroll_gate`
+    /// (background SW probes the active tab on focus / tab / nav
+    /// changes). When the frontmost app maps to this key, Caps Lock+d →
+    /// SCROLL is suppressed (the page scrolls d/u on its own; entering
+    /// SCROLL would be redundant). chrome:// / Web Store / PDF pages
+    /// have no content script → the extension reports nil for them →
+    /// Caps Lock+d still enters SCROLL as a fallback. See
+    /// `browserHandlesScroll()`.
+    private var scrollGateLiveBrowser: String? = nil
 
     /// Mode without its associated value — captured at app-switch time
     /// so the delayed re-enter knows which mode to reapply, even if
@@ -258,6 +282,68 @@ final class VimSession {
     /// hint scan — scroll is independent of hints. Synchronous: the AX
     /// scroll-area walk runs inline (cheap, ~few ms). See
     /// `specs/scroll-mode-design.md`.
+    /// Record the extension's `scroll_gate` push: the focused tab of
+    /// `browser` (e.g. "chrome") either has a live content script
+    /// handling d/u scrolling (`live == true`) or doesn't. We store the
+    /// browser key when live, and clear it when the SAME browser reports
+    /// not-live (a different browser's report doesn't clobber this one).
+    func setBrowserScrollGate(live: Bool, browser: String) {
+        if live {
+            scrollGateLiveBrowser = browser
+        } else if scrollGateLiveBrowser == browser {
+            scrollGateLiveBrowser = nil
+        }
+    }
+
+    /// True when the frontmost app is a browser whose focused tab handles
+    /// d/u/gg/G scrolling itself (Vimium-style, via the content script).
+    /// Gate for Caps Lock+d: when true, the chord is a no-op (page
+    /// already scrolls on d/u); when false (non-browser app, or a
+    /// chrome:// / Web Store / PDF page with no content script), Caps
+    /// Lock+d enters SCROLL as before. Synchronous — safe to call from
+    /// the event-tap callback.
+    func browserHandlesScroll() -> Bool {
+        guard let bid = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        else { return false }
+        let key = BridgeServer.browserKey(forBundleID: bid)
+        guard key != "unknown", key == scrollGateLiveBrowser else { return false }
+        // Belt-and-suspenders: the gate flag must agree with a live
+        // focus-reporting connection for this browser (clears stale
+        // state if the SW dropped).
+        return BridgeServer.shared.hasActiveBrowserConnection(forBrowserBundleID: bid)
+    }
+
+    /// Handle a `page_scroll` command from the extension (content script
+    /// detected d/u/gg/G on a real web page, no Mouseless mode active).
+    /// We post a real scroll-wheel event at the cursor via `pageScroll`,
+    /// so the browser's native scroll engine does the work (correct
+    /// containment, scrolls whatever's under the cursor). Continuous
+    /// scrolling runs on `pageScroll`'s own 60fps timer — only start/stop/
+    /// jump cross the bridge, never per-frame.
+    ///
+    /// Ignored (and any running scroll stopped) when a Mouseless mode is
+    /// active: the content script shouldn't fire then (the tap eats d/u
+    /// before the page), but guard defensively so mode scrolling and page
+    /// scrolling can never run at once.
+    func handlePageScroll(action: String, dir: String?, fast: Bool, to: String?) {
+        guard !isActive else { pageScroll.stop(); return }
+        switch action {
+        case "start":
+            pageScroll.start(axis: .vertical, positive: dir == "down", fast: fast)
+        case "stop":
+            pageScroll.stop()
+        case "jump":
+            if to == "top" { pageScroll.jumpToTop() } else { pageScroll.jumpToBottom() }
+        default:
+            break
+        }
+    }
+
+    /// Stop any in-flight page scroll. Backstop for a missed "stop" (e.g.
+    /// the extension disconnected mid-hold) — called from BridgeServer on
+    /// client disconnect.
+    func stopPageScroll() { pageScroll.stop() }
+
     func enterScroll() {
         // Caps Lock + d works from any mode — teardownCurrentMode
         // handles drag's mouseUp release, window/move timer stop +
@@ -434,6 +520,8 @@ final class VimSession {
     /// stopped only in `exit()` (the true return to OFF).
     private func teardownCurrentMode() {
         mover.stop()
+        pageScroll.stop()   // entering any mode cancels an in-flight page scroll
+                            // (the d/u keyup will be swallowed by the mode tap)
         pendingStickyRehint?.cancel()
         pendingStickyRehint = nil
         pendingAppSwitchReenter?.cancel()

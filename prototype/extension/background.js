@@ -89,7 +89,7 @@ function connect() {
   // for the boot case where Mouseless launches AFTER Chrome and the
   // user's already in a focused Chrome window.
   chrome.windows.getLastFocused().then((w) => {
-    if (w && w.focused) reportActive("initial focus check");
+    if (w && w.focused) { reportActive("initial focus check"); reportScrollGate("connect"); }
   }).catch(() => { /* no windows yet — fine, will fire on first focus */ });
 
   // Inject content scripts into tabs that were already open before
@@ -291,6 +291,41 @@ function reportActive(reason) {
   console.log("[mouseless-bg] reported i_am_active:", reason);
 }
 
+// Tell Mouseless whether the user's currently-focused tab has a live
+// content script — i.e. whether d/u/gg/G scrolling is being handled
+// here in the page (Vimium-style). Mouseless uses this to suppress
+// Caps Lock+d → SCROLL on real web pages (it's meaningless there) while
+// KEEPING it as a fallback on chrome:// / Web Store / PDF viewer pages,
+// which have no content script.
+//
+// We don't trust the URL scheme alone: https Web Store pages block
+// content-script injection despite looking scriptable. The reliable
+// signal is "did the top frame answer a ping" — so we actually probe.
+async function reportScrollGate(reason) {
+  if (!port) return;
+  let live = false;
+  try {
+    let tab = (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0];
+    if (!tab) tab = (await chrome.tabs.query({ active: true, currentWindow: true }))[0];
+    if (tab && tab.id) {
+      try {
+        const resp = await chrome.tabs.sendMessage(
+          tab.id, { type: "mouseless_cs_alive" }, { frameId: 0 }
+        );
+        live = !!(resp && resp.alive);
+      } catch (e) {
+        live = false;   // no content script on this tab (chrome://, Web Store, …)
+      }
+    }
+  } catch (e) {
+    live = false;
+  }
+  try {
+    port.postMessage({ type: "scroll_gate", live, browser: BROWSER });
+    console.log("[mouseless-bg] scroll_gate live=" + live + " (" + reason + ")");
+  } catch (e) { /* port dead — will reconnect */ }
+}
+
 async function refreshExistingTabs() {
   if (!chrome.scripting) {
     console.warn("[mouseless-bg] no chrome.scripting (missing permission?) — skipping refresh");
@@ -355,6 +390,10 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     });
     console.log("[mouseless-bg] page_changed (navigation complete) → tabId=" + tabId);
   } catch (e) { /* port dead */ }
+  // New page finished loading in the focused tab → its content-script
+  // liveness may have changed (e.g. navigated from a web page to
+  // chrome://settings or vice-versa). Re-probe the scroll gate.
+  reportScrollGate("navigation_complete");
 });
 
 // Within-window tab switch (Cmd+1/2/3, clicking tab strip, Cmd+[ back
@@ -381,6 +420,9 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
   } catch (e) {
     /* port dead — will reconnect */
   }
+  // Switched tabs within the focused window → the now-active tab may be
+  // scriptable or not. Re-probe the scroll gate.
+  reportScrollGate("tab_changed");
 });
 
 chrome.windows.onFocusChanged.addListener((winId) => {
@@ -392,6 +434,9 @@ chrome.windows.onFocusChanged.addListener((winId) => {
   // activeFD = -1 in the gap.
   if (winId === chrome.windows.WINDOW_ID_NONE) return;
   reportActive("windows.onFocusChanged winId=" + winId);
+  // Focused window changed (incl. cross-profile) → re-probe whether the
+  // newly-focused window's active tab is scriptable.
+  reportScrollGate("windows.onFocusChanged winId=" + winId);
 });
 
 // Content script → bg → native: page_changed signal forwarded as-is.
@@ -407,6 +452,28 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
     port.postMessage({ type: "page_changed", url: msg.url, frameId: sender?.frameId });
   } catch (e) {
     console.warn("[mouseless-bg] page_changed forward failed:", e.message);
+  }
+});
+
+// Content script → bg → native: d/u/gg/G scroll commands. The content
+// script detects the keys (editable check, mode gating) and asks Mouseless
+// to post a real wheel event at the cursor. Forwarded verbatim; only
+// gesture boundaries (start/stop/jump) come through, not per-frame.
+chrome.runtime.onMessage.addListener((msg, sender) => {
+  if (!msg || typeof msg !== "object") return;
+  if (msg.type !== "page_scroll") return;
+  if (!port) return;
+  try {
+    port.postMessage({
+      type: "page_scroll",
+      action: msg.action,
+      dir: msg.dir,
+      fast: msg.fast,
+      to: msg.to,
+      frameId: sender?.frameId,
+    });
+  } catch (e) {
+    console.warn("[mouseless-bg] page_scroll forward failed:", e.message);
   }
 });
 

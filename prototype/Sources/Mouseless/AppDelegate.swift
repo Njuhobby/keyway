@@ -52,6 +52,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             //                            as page_changed — refresh
             //                            the hint overlay to point
             //                            at the new tab's elements.
+            // Active browser bridge dropped → stop any in-flight page scroll
+            // (the content script's "stop" can no longer reach us).
+            BridgeServer.shared.onActiveClientDisconnect = { [weak self] in
+                Task { @MainActor in self?.session?.stopPageScroll() }
+            }
             BridgeServer.shared.start { [weak self] msg, reply in
                 let cmd = msg["cmd"] as? String
                 let type = msg["type"] as? String
@@ -59,6 +64,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if type == "page_changed" || type == "tab_changed" {
                     Task { @MainActor in
                         self?.session?.handlePageChanged()
+                    }
+                    return
+                }
+                // type:"scroll_gate" → extension reports whether the
+                // focused tab has a live content script handling d/u/gg/G
+                // scrolling itself. Gates Caps Lock+d (suppress → SCROLL
+                // on real web pages; keep it on chrome:// / Web Store).
+                if type == "scroll_gate" {
+                    let live = (msg["live"] as? Bool) ?? false
+                    let browser = (msg["browser"] as? String) ?? ""
+                    Task { @MainActor in
+                        self?.session?.setBrowserScrollGate(live: live, browser: browser)
+                    }
+                    return
+                }
+                // type:"page_scroll" → content script detected d/u/gg/G on a
+                // real web page (no Mouseless mode). Post a real wheel event
+                // at the cursor. Only start/stop/jump arrive, not per-frame.
+                if type == "page_scroll" {
+                    let action = (msg["action"] as? String) ?? ""
+                    let dir = msg["dir"] as? String
+                    let fast = (msg["fast"] as? Bool) ?? false
+                    let to = msg["to"] as? String
+                    Task { @MainActor in
+                        self?.session?.handlePageScroll(action: action, dir: dir, fast: fast, to: to)
                     }
                     return
                 }

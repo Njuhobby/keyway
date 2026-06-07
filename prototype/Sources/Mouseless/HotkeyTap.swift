@@ -133,6 +133,16 @@ final class HotkeyTap {
         // scroll-area walk); consume the chord key.
         if f19Armed && keyCode == KeyCode.d {
             f19ChordUsed = true
+            // In a browser tab whose content script handles d/u/gg/G
+            // scrolling itself (Vimium-style), Caps Lock+d → SCROLL is
+            // meaningless — the page already scrolls on a bare d/u. Eat
+            // the chord and do nothing (chordUsed=true also stops the
+            // F19 keyUp from firing the default TAP action). Non-
+            // scriptable pages (chrome:// / Web Store / PDF) and non-
+            // browser apps fall through to SCROLL as before.
+            if session.browserHandlesScroll() {
+                return nil
+            }
             session.enterScroll()
             return nil
         }

@@ -175,6 +175,18 @@
         return true;
       }
 
+      // Liveness probe from the background SW. Background pings the
+      // active tab's top frame on focus / tab / navigation changes; a
+      // reply means "this tab has a live content script", which is what
+      // gates Caps Lock+d on the Mouseless side (real web page → d/u
+      // scrolling is handled here, so Caps Lock+d → SCROLL is
+      // suppressed; chrome:// / Web Store have no content script → no
+      // reply → Caps Lock+d still enters SCROLL as a fallback).
+      if (msg.type === "mouseless_cs_alive") {
+        sendResponse({ type: "cs_alive", alive: true });
+        return false;   // synchronous
+      }
+
       if (msg.type === "find_first_input") {
         // Synchronous — detector returns immediately. Reports the
         // input that's currently focused (document.activeElement), or
@@ -350,6 +362,115 @@
     if (!e.data || typeof e.data !== "object") return;
     if (e.data.type !== "mouseless_page_changed_inner") return;
     notifyPageChangedThrottled();
+  });
+
+  // ---------- (5) Vimium-style scroll: d/u (continuous), gg / G ----------
+  //
+  // When Mouseless is NOT in a mode, its event tap passes keys straight
+  // through to the page, so THIS handler sees d/u/gg/G and asks Mouseless
+  // to scroll (it posts a real wheel event at the cursor — see the
+  // delegation note below). The instant the user enters any Mouseless mode,
+  // the native event tap (head-insert, OS level) swallows these keys BEFORE
+  // the page sees them, so this handler simply stops firing — "modes disable
+  // page scroll" comes for free, no coordination.
+  //
+  // Runs in every frame (manifest all_frames). Keyboard events dispatch to
+  // the focused frame only, so whichever frame has focus reports the keys.
+  //
+  // Editable targets are skipped so typing in a textbox is never hijacked
+  // (this is exactly why key DETECTION lives in JS: DOM focus is readable
+  // synchronously here, unlike from the native event tap).
+
+  function mlIsEditableTarget() {
+    let el = document.activeElement;
+    // Descend shadow roots to the truly-focused element.
+    while (el && el.shadowRoot && el.shadowRoot.activeElement) {
+      el = el.shadowRoot.activeElement;
+    }
+    if (!el) return false;
+    if (el.isContentEditable) return true;
+    const tag = el.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+    const role = el.getAttribute && el.getAttribute("role");
+    if (role === "textbox" || role === "searchbox" || role === "combobox") return true;
+    return false;
+  }
+
+  // --- d/u / gg / G scroll: detect in-page, scroll on the NATIVE side ---
+  // We DETECT the keys here (synchronous editable check, capture-phase
+  // preventDefault) but DELEGATE the actual scroll to Mouseless, which posts
+  // a real scroll-wheel event at the cursor. Why not scroll the DOM
+  // ourselves: a real wheel goes through the browser's native scroll engine
+  // with correct scroll containment (e.g. scrolling YouTube's guide rail
+  // does NOT leak into the page) — `el.scrollBy` can't reproduce that, and
+  // some sites couple an inner scroll to the page. A real wheel also scrolls
+  // whatever is under the OS cursor, so we don't even send coordinates.
+  //
+  // Communication is ONLY at gesture boundaries (start / stop / jump), not
+  // per frame — the 60fps wheel loop runs locally in Mouseless. Once a
+  // Mouseless mode is active the native tap swallows d/u before the page
+  // sees them, so this never fires (scroll auto-disabled in modes).
+
+  function mlSendScroll(msg) {
+    try { chrome.runtime.sendMessage(Object.assign({ type: "page_scroll" }, msg)); }
+    catch (e) { /* SW asleep / extension reloading — next event recovers */ }
+  }
+
+  let mlHeldDir = null;        // "down" | "up" — which d/u key is currently held
+  let mlLastGAt = 0;           // first 'g' of a gg
+  const ML_GG_WINDOW_MS = 500;
+
+  window.addEventListener("keydown", (e) => {
+    // Live fast-toggle: Shift pressed while a d/u is held → speed up now.
+    if ((e.code === "ShiftLeft" || e.code === "ShiftRight") && mlHeldDir) {
+      mlSendScroll({ action: "start", dir: mlHeldDir, fast: true });
+      return;
+    }
+    // Leave Cmd/Ctrl/Alt chords to the browser (Cmd+D bookmark, etc.).
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (mlIsEditableTarget()) return;
+    if (e.code !== "KeyD" && e.code !== "KeyU" && e.code !== "KeyG") return;
+
+    if (e.code === "KeyG") {
+      if (e.shiftKey) { mlSendScroll({ action: "jump", to: "bottom" }); mlLastGAt = 0; }
+      else {
+        const now = Date.now();
+        if (now - mlLastGAt <= ML_GG_WINDOW_MS) { mlSendScroll({ action: "jump", to: "top" }); mlLastGAt = 0; }
+        else mlLastGAt = now;   // first g — wait for the second
+      }
+    } else {
+      const dir = e.code === "KeyD" ? "down" : "up";
+      // Start on the first press; auto-repeat just keeps it going (native is
+      // already scrolling) unless the direction changed.
+      if (!e.repeat || mlHeldDir !== dir) {
+        mlHeldDir = dir;
+        mlSendScroll({ action: "start", dir, fast: e.shiftKey });
+      }
+    }
+    e.preventDefault();
+    e.stopPropagation();
+  }, true);   // capture phase — preempt page key handlers
+
+  window.addEventListener("keyup", (e) => {
+    // Shift released while a d/u is held → drop back to normal speed.
+    if ((e.code === "ShiftLeft" || e.code === "ShiftRight") && mlHeldDir) {
+      mlSendScroll({ action: "start", dir: mlHeldDir, fast: false });
+      return;
+    }
+    if (e.code === "KeyD" || e.code === "KeyU") {
+      const dir = e.code === "KeyD" ? "down" : "up";
+      if (mlHeldDir === dir) { mlHeldDir = null; mlSendScroll({ action: "stop" }); }
+    }
+  }, true);
+
+  // Lost focus / tab hidden mid-hold → the keyup may never arrive; stop so
+  // native doesn't scroll on. (Mouseless also stops page-scroll whenever a
+  // mode is entered or the extension disconnects, as further safety.)
+  window.addEventListener("blur", (e) => {
+    if (e.target === window && mlHeldDir) { mlHeldDir = null; mlSendScroll({ action: "stop" }); }
+  }, true);
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden && mlHeldDir) { mlHeldDir = null; mlSendScroll({ action: "stop" }); }
   });
 
   // ----------

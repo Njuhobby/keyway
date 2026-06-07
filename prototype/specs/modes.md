@@ -102,13 +102,15 @@ Mouseless 的状态有**三层**，"退出"在哪一层语义不一样：
 | 操作 | OFF | TAP | TAP sticky | SCROLL | WINDOW | MOVE | palette 开 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Caps Lock 单击（松手无 chord） | 进 TAP | 切 sticky / 退子状态* | 切回非 sticky / 退子状态* | 切回 TAP | 切回 TAP | 切回 TAP | 关 palette |
-| Caps Lock + d | 进 SCROLL | 进 SCROLL | 进 SCROLL | （重进 SCROLL）| 进 SCROLL | 进 SCROLL | — |
+| Caps Lock + d | 进 SCROLL† | 进 SCROLL | 进 SCROLL | （重进 SCROLL）| 进 SCROLL | 进 SCROLL | — |
 | Caps Lock + w | 进 WINDOW | 进 WINDOW | 进 WINDOW | 进 WINDOW | （已在 WINDOW，no-op）| 进 WINDOW | — |
 | Caps Lock + m | 进 MOVE | 进 MOVE | 进 MOVE | 进 MOVE | 进 MOVE | （已在 MOVE，no-op）| — |
 | `Esc` | — | deactivate / 退子状态* | deactivate / 退子状态* | deactivate | deactivate | deactivate | deactivate |
 | 菜单栏 Quit / Cmd+Q | quit 进程 | quit 进程 | quit 进程 | quit 进程 | quit 进程 | quit 进程 | quit 进程 |
 
 \* DRAG 与 `/`-搜索是 TAP 的**子状态**而非独立 mode（见 §6 / §6.5）。在 TAP 子状态里按 Caps Lock 单击会先**清理子状态**（drag → drop at cursor；search → 关 search overlay 恢复 hints）再回 TAP normal；Esc 在 search 子状态里是"取消搜索回 TAP normal"，在 dragging 子状态里是"drop at cursor 后 deactivate 回 OFF"，在 TAP normal 里才是直接 deactivate。
+
+† **浏览器例外**：当前台是浏览器、且当前 tab 是注入了 content script 的真网页（http/https 等）时，Caps Lock + d **不进 SCROLL，直接吞掉无效果**——因为这种页面 d/u 已经能**免模式滚动**（见 §5.1）。判定靠扩展推来的 `scroll_gate` live 标志(`VimSession.browserHandlesScroll()`)。chrome:// / 网上应用店 / PDF 等无 content script 的页面仍按正常进 SCROLL（兜底）。
 
 Caps Lock + Shift/Cmd/Ctrl/Option（修饰键）→ 不 arm，放行给系统/用户。
 
@@ -359,6 +361,19 @@ MouseSynth.click(at: MouseSynth.cursorPosition(), button: .left, count: 1)
 进入：任何 mode 按住 Caps Lock + d（chord）。进入时 `ScrollAreaDetector` AX-walk 焦点窗口找所有 `AXScrollArea` + `AXWebArea`，`ScrollOverlay` 画蓝色光晕边框 + 数字标记，默认选离光标最近的区域。**光标已经在选中区内 → 不 warp**；只在区外才 warp 到区中心（滚动事件按光标位置路由，落在区内任意处即可，已在区内还 warp 多余且 jarring）。
 
 零-AX app（a11y 关闭的 Electron，如 Claude；**Chrome 网页内容也是——renderer a11y 默认关**）检测不到滚动区 → 退到焦点窗口：光标已在窗内则不动，在窗外才 warp 到窗口中心，无区域 picker。识别不出的区域靠未来"键盘平移鼠标" / 扩展 DOM 滚动容器检测兜底。
+
+### 5.1 浏览器免模式滚动（d/u/gg/G，Vimium 式）
+
+**只针对前台是浏览器、且当前 tab 是真网页的情况**：不必先按 Caps Lock + d 进 SCROLL，**直接 `d`/`u`（Shift 加速）连续滚、`gg`/`G` 跳顶/底**——就像 Vimium。这也是为什么这种页面 Caps Lock + d 被禁用（§3.2 †）。
+
+实现走**扩展 content script 检测 + native 发真滚轮**两段(详见 [`browser-support-design.md`](browser-support-design.md) §4.11)，要点：
+
+- **按键检测在网页里**(content script，capture 阶段)：聚焦在可编辑元素(input/textarea/contenteditable 等)时放行让用户打字；带 Cmd/Ctrl/Alt 放行;只有裸 d/u/gg/G 才拦(`preventDefault`)。"可编辑判断"用 JS 同步读 `document.activeElement`，这是它必须放在网页侧而非 native event tap 的原因。
+- **实际滚动在 native**：content script 只在手势边界发 `page_scroll`(start/stop/jump)指令，native 用一个常驻 `ScrollController`(不 enter、不 warp、不画 overlay)在**光标处发真 CGEvent 滚轮**。好处：滚轮走浏览器内核的滚动包含逻辑，**滚光标下的容器、不会泄漏到页面**（YouTube 侧栏 vs 主内容那种联动靠 JS `scrollBy` 解决不了，真滚轮天然正确）；60fps 连续滚在 native 本地跑，IPC 只在 start/stop/jump。
+- **进模式即自动禁用**：一旦进任何 Mouseless 模式，native event tap 在网页收到键之前就吞掉 d/u → content script 不触发 → 免模式滚动自动停。零协调。
+- **兜底**：进模式(`teardownCurrentMode`)、扩展断连(`onActiveClientDisconnect`)都会停掉在飞的 page scroll，防"松手前进模式 / SW 挂掉"导致一直滚。
+
+其它 app（非浏览器）不受影响,仍需 Caps Lock + d 进 SCROLL。
 
 ---
 
