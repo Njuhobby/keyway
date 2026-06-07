@@ -522,6 +522,7 @@ final class VimSession {
         mover.stop()
         pageScroll.stop()   // entering any mode cancels an in-flight page scroll
                             // (the d/u keyup will be swallowed by the mode tap)
+        cancelDockActivationPark()   // a new mode supersedes a pending Dock-click park
         pendingStickyRehint?.cancel()
         pendingStickyRehint = nil
         pendingAppSwitchReenter?.cancel()
@@ -792,6 +793,16 @@ final class VimSession {
     private var appSwitchToken: NSObjectProtocol?
     private var spaceChangeToken: NSObjectProtocol?
     private var appTerminateToken: NSObjectProtocol?
+
+    /// One-shot app-activation observer for the post-Dock-click cursor
+    /// nudge (see `scheduleDockActivationPark`). Distinct from the
+    /// mode-level `appSwitchToken` follow — this fires once, in OFF, after
+    /// a non-sticky Dock-hint commit, then removes itself. `dockParkWork`
+    /// holds whichever DispatchWorkItem is pending: first the
+    /// no-activation timeout, then (after activation) the settle-delayed
+    /// park. Either is cancelled by `cancelDockActivationPark`.
+    private var dockParkToken: NSObjectProtocol?
+    private var dockParkWork: DispatchWorkItem?
 
     /// Debounced "did the Dock change after an app quit?" check. The
     /// Dock removes a quit app's icon with a ~few-hundred-ms animation,
@@ -1231,6 +1242,76 @@ final class VimSession {
             : CGPoint(x: rect.midX, y: rect.minY + 6)
         MouseSynth.warp(to: landing)
         return true
+    }
+
+    /// After a **Dock**-hint commit, the cursor is left on the Dock icon
+    /// (commit synthesizes a real click there). Clicking a Dock item means
+    /// "take me to this app", so once the app actually activates, nudge the
+    /// cursor into its window — for a browser that lands on the page
+    /// content (parkCursorOnFrontmostWindowIfOutside), so d/u scrolling
+    /// works immediately instead of the cursor stranded on the Dock.
+    ///
+    /// One-shot: a single `didActivateApplication` observer that removes
+    /// itself on first fire. Scoped to Dock commits only — normal in-app
+    /// button clicks never move the cursor afterward. Cancelled by any new
+    /// mode entry (teardownCurrentMode) so a stray late activation can't
+    /// yank the cursor.
+    private func scheduleDockActivationPark() {
+        cancelDockActivationPark()   // supersede any prior pending dock park
+        dockParkToken = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil, queue: .main
+        ) { [weak self] note in
+            // Bind to the app that THIS activation is for (extract the pid
+            // out here so only the Sendable pid_t — not the Notification —
+            // crosses into the main-actor closure).
+            let pid = (note.userInfo?[NSWorkspace.applicationUserInfoKey]
+                as? NSRunningApplication)?.processIdentifier
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                guard let pid else { self.cancelDockActivationPark(); return }
+                self.onDockAppActivated(pid: pid)
+            }
+        }
+        // No app activated within the window (clicked the already-front
+        // app's icon, or launch failed) → drop the observer, leave the
+        // cursor on the Dock (acceptable fallback).
+        let timeout = DispatchWorkItem { [weak self] in self?.cancelDockActivationPark() }
+        dockParkWork = timeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: timeout)
+    }
+
+    /// The Dock-clicked app activated. Mirror the sticky app-switch settle
+    /// (`reapplyOnCurrentFrontmost`): wait a short beat if the window is
+    /// already on-screen, longer if not (cold launch / mid-Space
+    /// animation), then park ONCE — no blind retry. Gated on the app still
+    /// being frontmost at park time, so a quick switch-away after the Dock
+    /// click doesn't yank the cursor into the app the user moved to.
+    private func onDockAppActivated(pid: pid_t) {
+        // One-shot: stop observing, cancel the no-activation timeout.
+        if let t = dockParkToken {
+            NSWorkspace.shared.notificationCenter.removeObserver(t)
+            dockParkToken = nil
+        }
+        dockParkWork?.cancel()
+        let delay: TimeInterval = Self.frontmostAppHasOnScreenWindow() ? 0.1 : 0.5
+        let work = DispatchWorkItem { [weak self] in
+            guard let self,
+                  NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
+            else { return }
+            Task { @MainActor in await self.parkCursorOnFrontmostWindowIfOutside() }
+        }
+        dockParkWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    private func cancelDockActivationPark() {
+        if let t = dockParkToken {
+            NSWorkspace.shared.notificationCenter.removeObserver(t)
+            dockParkToken = nil
+        }
+        dockParkWork?.cancel()
+        dockParkWork = nil
     }
 
     /// If the frontmost app's `AXFocusedUIElement` is a text-input-like
@@ -2706,7 +2787,14 @@ final class VimSession {
                     scheduleStickyRehint()
                 }
             } else {
+                // A Dock-hint commit leaves the cursor on the Dock icon.
+                // Capture that BEFORE exit() clears state, then (after exit,
+                // so teardown's cancel doesn't undo it) schedule the cursor
+                // nudge into the app once it activates. See
+                // scheduleDockActivationPark.
+                let wasDock = (hint.lastCommittedTarget?.role == "AXDockItem")
                 exit()
+                if wasDock { scheduleDockActivationPark() }
             }
         }
         return true
