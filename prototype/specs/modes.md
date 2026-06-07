@@ -234,8 +234,12 @@ Step 3: 选 input rect, 失败回 title bar
         │        - 还要 rect 跟 window 相交 + 至少 4×4
         │
         └─ 拿到 rect → warp 到 rect 中心 (MouseSynth.warp, .mouseMoved 合成事件)
-           拿到 null → 兜底 title bar 中点 (rect.midX, rect.minY + 6pt)
+           拿到 null → 兜底:
+             - 浏览器 → 窗口**内容中心** (rect.midX, rect.midY)
+             - 其它 app → title bar 中点 (rect.midX, rect.minY + 6pt)
 ```
+
+> **浏览器兜底为什么落内容中心而非 title bar**:浏览器页面的 d/u/gg/G 免模式滚动是**在光标处发真滚轮**(见 §5.1),落标题栏会把光标停在不可滚的条上、切过去没法马上滚;落内容中心正好压在页面上,随手就能滚(也是个不错的 hint 起手位)。其它 app 仍落标题栏(就近双击最大化 / 拖动 / 窗口按钮)。
 
 **各 app 类型实际表现**：
 
@@ -243,7 +247,7 @@ Step 3: 选 input rect, 失败回 title bar
 |---|---|---|
 | 浏览器（装扩展） | 焦点在某 input | `document.activeElement` 中心 |
 | 浏览器 | 没点过任何 input | 页面第一个可见 input 中心 |
-| 浏览器 | 页面无 input / chrome:// | title bar 中点 |
+| 浏览器 | 页面无 input / chrome:// | 窗口**内容中心**（便于切过去直接 d/u 滚） |
 | AX 友好 native（Mail / Notes / WeChat / TextEdit）| 焦点在 text input | 那个 input 中心 |
 | AX 友好 native | 焦点在 button / link / list item | title bar（role 不在白名单，安全） |
 | Electron / AX 弱（Slack / Discord / VS Code）| — | title bar 中点（`AXFocusedUIElement` 返回 `kAXErrorNoValue`） |
@@ -256,6 +260,13 @@ Step 3: 选 input rect, 失败回 title bar
 3. **AX 不暴露的不强求** —— Electron 类直接接受 title bar fallback，不做 AX 子树深度 walk（之前尝试过 walker fallback + role 普查诊断，复杂度收益不成正比，回退）。将来 per-app patch 路线启动后可单独给 Slack 写"compose 在窗口底部 80pt"硬编码规则
 4. **可观察** —— 每条分支都打 `[mouseless] focusedInput: ...` 日志（match via role / via editable-value / read failed / rect too small / rect outside window / skipped role=...），定位某 app 没生效时一行就能看到哪一道闸拦的
 5. **`.mouseMoved` 而非 `CGWarp`** —— 跟 §6.5 search commit 同理，让目标 view 收到事件、更新 cursor shape (I-beam) + hover state
+
+**Dock hint 提交后的光标**:点 Dock 图标的 hint 是合成真鼠标点击,光标会**留在 Dock 图标上**——对接下来的操作(尤其想滚刚打开的 app)很别扭。处理分两种:
+
+- **sticky TAP**:点完应用切换,sticky 的"跟随前台"(`reapplyOnCurrentFrontmost`)会自动重新 park 到新应用窗口(浏览器→内容中心),不用额外做。
+- **非 sticky**(普通,点完就 `exit()` 回 OFF):专门挂一个**一次性 `didActivateApplication` 观察者**(`scheduleDockActivationPark`)。新应用激活后,**照搬 sticky 的 settle 模型**——`frontmostAppHasOnScreenWindow()` 在屏 0.1s / 不在(冷启动)0.5s,然后 `parkCursorOnFrontmostWindowIfOutside` **park 一次**(浏览器→内容中心)。
+
+  门控:park 绑定"激活的那个 app 的 pid",park 那一刻前台已不是它(点完立刻切走)→ **不动光标**(留 Dock);2s 无任何激活(点的是已在前台的图标 / 启动失败)→ 丢弃观察者;进任何模式(`teardownCurrentMode`)→ 取消待处理 park。只对 **Dock 来源**(`lastCommittedTarget.role == "AXDockItem"`)生效,普通 app 内按钮点击不动光标。
 
 ### 4.3.5 `'` 前缀 —— hint 当光标传送锚点（move-only pick）
 
