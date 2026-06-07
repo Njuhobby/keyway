@@ -245,7 +245,16 @@ func eprint(_ s: String) { FileHandle.standardError.write((s + "\n").data(using:
 
 // MARK: - Main
 
-let args = Array(CommandLine.arguments.dropFirst())
+var args = Array(CommandLine.arguments.dropFirst())
+
+// --wake: before dumping, try to WAKE an Electron/Chromium app's a11y tree
+// (Chromium builds it lazily, only when an assistive tech is detected).
+// Setting AXManualAccessibility (Chromium's flag) + AXEnhancedUserInterface
+// (AppKit's "an AT is present") asks the app to populate AX, then we wait a
+// beat for the renderer to build it. Compare `axdump X` vs `axdump --wake X`
+// to see whether AX can serve an app that's sparse when cold.
+let wake = args.contains("--wake")
+args.removeAll { $0 == "--wake" }
 
 if args.isEmpty || args.first == "--help" || args.first == "-h" {
     eprint("""
@@ -255,6 +264,9 @@ if args.isEmpty || args.first == "--help" || args.first == "-h" {
       axdump <name-or-bundle-substring>     dump that running app's window(s)
       axdump --frontmost [seconds]          wait N s (default 3), then dump the
                                             frontmost app (switch to it meanwhile)
+      axdump --wake <app>                   set AXManualAccessibility +
+                                            AXEnhancedUserInterface first, wait,
+                                            then dump (wakes Electron a11y)
       axdump --list                         list running foreground apps
       axdump --help
 
@@ -309,6 +321,13 @@ let name = target.localizedName ?? "app"
 let bundle = target.bundleIdentifier ?? "unknown"
 let appEl = AXUIElementCreateApplication(pid)
 
+if wake {
+    AXUIElementSetAttributeValue(appEl, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+    AXUIElementSetAttributeValue(appEl, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+    eprint("[axdump] --wake: set AXManualAccessibility + AXEnhancedUserInterface on \(name); waiting 1.5s for the a11y tree to build…")
+    Thread.sleep(forTimeInterval: 1.5)
+}
+
 // Dump every window (focus state is unreliable for a non-frontmost target,
 // so don't rely on AXFocusedWindow — show all windows). Fall back to the
 // app element if no windows are exposed.
@@ -333,7 +352,7 @@ if windows.isEmpty {
 }
 
 var header = ""
-header += "# AX dump — \(name) (\(bundle), pid \(pid))\n"
+header += "# AX dump — \(name) (\(bundle), pid \(pid))\(wake ? "  [--wake: a11y woken]" : "")\n"
 header += "# windows: \(windows.count)\n"
 header += "# nodes: \(nodeCount)\(truncated ? " (TRUNCATED at \(MAX_NODES))" : "")"
 header += ", with AXPress/AXOpen: \(pressableCount)\n"

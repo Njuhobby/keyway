@@ -57,9 +57,27 @@ The `.build` path is stable across rebuilds, so you only grant it once.
 # Frontmost app after a countdown (switch to it meanwhile):
 .build/debug/axdump --frontmost 4 > /tmp/whatever.txt
 
+# Cold vs woken — does waking Electron a11y populate the tree?
+.build/debug/axdump        "Code" > /tmp/vscode-cold.txt
+.build/debug/axdump --wake "Code" > /tmp/vscode-woken.txt
+
 # See what's running (no AX grant needed):
 .build/debug/axdump --list
 ```
+
+### `--wake` — can AX serve an Electron app?
+
+Chromium/Electron apps (VS Code, Slack, Discord, Notion, Obsidian, Spotify)
+build their accessibility tree **lazily** — only when an assistive
+technology is detected. Cold, their AX is nearly empty (so Mouseless falls
+back to OmniParser). `--wake` sets `AXManualAccessibility` (Chromium's flag)
++ `AXEnhancedUserInterface` (AppKit's "an AT is present") on the app, waits
+~1.5s for the renderer to build the tree, then dumps.
+
+Compare the `▶ would hint` count cold vs `--wake`: if it jumps from a
+handful to "everything you'd click", AX **can** serve that app once woken —
+and AX (labelled, precise rects, `AXPress`) beats the OmniParser vision
+path. That's the decision input for "wake-then-AX vs OP" per app.
 
 Output goes to stdout (redirect to a file); progress/errors go to stderr.
 
