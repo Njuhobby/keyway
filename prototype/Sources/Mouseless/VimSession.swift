@@ -1217,7 +1217,18 @@ final class VimSession {
             MouseSynth.warp(to: CGPoint(x: inputRect.midX, y: inputRect.midY))
             return true
         }
-        let landing = CGPoint(x: rect.midX, y: rect.minY + 6)
+        // No input found → fallback landing.
+        //   - Browser: window CONTENT CENTER, not the title bar. The page's
+        //     d/u/gg/G scrolling posts a real wheel AT THE CURSOR, so a
+        //     title-bar landing would leave the cursor on an un-scrollable
+        //     strip — the user couldn't scroll right after switching. The
+        //     window center sits squarely on the page content, so scrolling
+        //     works immediately (and it's a fine spot for hints too).
+        //   - Other apps: title-bar midpoint (handy for double-click
+        //     maximize / drag / the window buttons).
+        let landing = isBrowser
+            ? CGPoint(x: rect.midX, y: rect.midY)
+            : CGPoint(x: rect.midX, y: rect.minY + 6)
         MouseSynth.warp(to: landing)
         return true
     }
