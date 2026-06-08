@@ -190,8 +190,8 @@ final class VimSession {
 
     /// Double-tap detection for **cursor jump** (TAP + SCROLL):
     /// `hh` / `jj` / `kk` / `ll` released-then-pressed within
-    /// `hjklJumpTapWindow` teleports the cursor 1/4 of the containing
-    /// screen in that direction. Holding the second tap chains jumps via
+    /// `hjklJumpTapWindow` teleports the cursor 1/2 of the containing
+    /// screen in that direction (Shift = full screen). Holding the second tap chains jumps via
     /// OS key-repeat (each repeated keyDown re-triggers because we
     /// refresh the timestamp on every jump). Single press still starts
     /// the existing continuous `mover.start`.
@@ -202,7 +202,7 @@ final class VimSession {
     /// than `windowReverseTapWindow` (150ms, shared by WINDOW reverse +
     /// Shift double-tap): a real double-tap lands in 80-130ms, but normal
     /// fast stepping (tap, brief pause, tap again to step once more) was
-    /// falling in the 130-150ms band and misfiring as a 1/4-screen jump.
+    /// falling in the 130-150ms band and misfiring as a half-screen jump.
     /// 100ms still catches an intentional quick double-tap while letting
     /// ordinary repeated stepping through. Tune here if jumps feel too
     /// hard to trigger (raise) or steps still jump (lower).
@@ -1525,7 +1525,7 @@ final class VimSession {
             // across both modes so the jump gesture must be too).
             // In the drag sub-state the jump rides the held button:
             // `dragHeld` makes jumpCursor post `.leftMouseDragged`, so
-            // the teleport drags the grabbed object 1/4-screen rather
+            // the teleport drags the grabbed object half-screen rather
             // than dropping it — same gesture, drag-aware.
             if maybeJumpOnDoubleTap(direction: dir, flags: flags, dragHeld: dragHeld) {
                 return true
@@ -2283,7 +2283,7 @@ final class VimSession {
 
         // h/j/k/l → move the cursor (Shift fast / Option slow) — SAME
         // keys as TAP (unified, vim hjkl). j/k are free for move here
-        // because SCROLL scrolls with d/u. Double-tap → 1/4-screen
+        // because SCROLL scrolls with d/u. Double-tap → half-screen
         // jump goes through the same helper as TAP so the gesture is
         // consistent across modes.
         if let dir = Self.moveDirection(for: keyCode) {
@@ -2504,8 +2504,8 @@ final class VimSession {
     }
 
     /// `hh` / `jj` / `kk` / `ll` (release-then-press within
-    /// `hjklJumpTapWindow` = 100ms) → discrete 1/4-screen jump
-    /// in that direction. Returns true if a jump fired (caller skips
+    /// `hjklJumpTapWindow` = 100ms) → discrete half-screen jump
+    /// (Shift = full screen) in that direction. Returns true if a jump fired (caller skips
     /// the regular continuous mover.start). Refreshes the timestamp
     /// so OS key-repeat from a held second tap chains more jumps.
     ///
@@ -2520,13 +2520,14 @@ final class VimSession {
               now - lastUp < hjklJumpTapWindow else {
             return false
         }
-        // Shift held during the second tap → **half-screen jump**;
-        // unshifted → quarter-screen. Lets users dial big vs small
-        // teleport off one gesture (Shift+hh = far, hh = medium)
-        // without learning new keys. Option / Cmd / Ctrl don't
-        // modify the jump distance — they have other semantics
-        // elsewhere and would overload poorly here.
-        let fraction: CGFloat = flags.contains(.maskShift) ? 0.5 : 0.25
+        // Shift held during the second tap → **full-screen jump**;
+        // unshifted → half-screen. Lets users dial big vs small teleport
+        // off one gesture (Shift+hh = full screen, hh = half) without
+        // learning new keys. Option / Cmd / Ctrl don't modify the jump
+        // distance — they have other semantics elsewhere and would
+        // overload poorly here. (Tuned up from 1/4 + 1/2: the quarter-jump
+        // felt too small to be worth the gesture in daily use.)
+        let fraction: CGFloat = flags.contains(.maskShift) ? 1.0 : 0.5
         jumpCursor(direction: direction, fraction: fraction, dragHeld: dragHeld)
         lastTapHjklKeyUp[direction] = now
         return true
