@@ -523,6 +523,7 @@ final class VimSession {
         pageScroll.stop()   // entering any mode cancels an in-flight page scroll
                             // (the d/u keyup will be swallowed by the mode tap)
         cancelDockActivationPark()   // a new mode supersedes a pending Dock-click park
+        pendingCClick?.cancel(); pendingCClick = nil   // drop a deferred `c` click
         pendingStickyRehint?.cancel()
         pendingStickyRehint = nil
         pendingAppSwitchReenter?.cancel()
@@ -1043,6 +1044,7 @@ final class VimSession {
         pendingStickyRehint?.cancel()
         pendingStickyRehint = nil
         pendingAppSwitchReenter?.cancel()
+        pendingCClick?.cancel(); pendingCClick = nil   // old app's deferred `c` mustn't fire on the new one
 
         // Hide stale overlays immediately. They were drawn at the OLD
         // app's coordinates; leaving them up during the 100ms settle
@@ -2293,16 +2295,19 @@ final class VimSession {
         }
 
         // bare `c` → click at the current cursor position, stay in
-        // SCROLL. Modifier picks the kind (same scheme as TAP / hint
-        // commits, see `clickAction`): bare = left, Shift = right,
-        // Shift double-tap-hold = double. Option unused. Pairs with
+        // SCROLL. Same gesture as TAP's `c` (handleBareCClick): bare = left
+        // (deferred ~200ms), `cc` quick double-tap = double-click, Shift =
+        // right (immediate). Pairs with
         // hjkl: move the cursor, `c` to click. Same swap from Enter→c
         // as TAP normal (see handleTapNormal): Enter has app-level
         // semantics we want to preserve.
         if keyCode == KeyCode.c {
-            let (button, count) = clickKind(for: flags)
-            shiftDoubleArmed = false   // single-keystroke commit consumes it
-            MouseSynth.click(at: MouseSynth.cursorPosition(), button: button, count: count)
+            handleBareCClick(flags: flags) { [weak self] button, count in
+                guard let self, case .scroll = self.mode, case .normal = self.scrollSub
+                else { return }
+                MouseSynth.click(at: MouseSynth.cursorPosition(), button: button, count: count)
+                // stays in SCROLL (no exit / rehint)
+            }
             return true
         }
         // bare `v` → start a drag (mouseDown at cursor), same trigger as
@@ -2354,16 +2359,45 @@ final class VimSession {
         return shiftDoubleArmed ? .double : .right
     }
 
-    /// (button, count) form of the same scheme for the bare-`c` cursor
-    /// click (which commits on a single keystroke, so it consumes the
-    /// armed flag itself at the call site).
-    private func clickKind(for flags: CGEventFlags) -> (CGMouseButton, Int) {
-        switch clickAction(for: flags) {
-        case .left:   return (.left, 1)
-        case .right:  return (.right, 1)
-        case .double: return (.left, 2)
-        case .move:   return (.left, 1)   // unreachable here
+    /// Pending single `c` click, deferred by `cDoubleTapWindow` so a quick
+    /// second `c` can upgrade it to a double-click. Cancelled on mode
+    /// switch / app switch (teardownCurrentMode / reapplyOnCurrentFrontmost).
+    private var pendingCClick: DispatchWorkItem?
+    /// **Short** double-tap window for `c` → double-click. Deliberately
+    /// tight: two `c` presses farther apart than this are two SEPARATE
+    /// single clicks, NOT a double. This window is also the latency a
+    /// single `c` waits before it fires (the cost of disambiguating).
+    /// 150ms = same as `windowReverseTapWindow` (the other double-tap gesture).
+    private let cDoubleTapWindow: CFAbsoluteTime = 0.15
+
+    /// Bare `c` cursor-position click with a short double-tap-to-double-
+    /// click window (replaces the old Shift-double-tap-for-`c` gesture).
+    ///   Shift+c          → right click, **immediately** (no double concept)
+    ///   c (alone)        → deferred single click; if a second bare `c`
+    ///                      lands within `cDoubleTapWindow` → **double click**
+    /// `commit(button, count)` performs the mode-specific click + after-
+    /// click behavior (TAP exits / sticky-rehints; SCROLL stays put). It's
+    /// passed as a closure because the deferred single fires later — the
+    /// closure re-checks mode at fire time so a stale click can't land.
+    private func handleBareCClick(flags: CGEventFlags,
+                                  commit: @escaping (CGMouseButton, Int) -> Void) {
+        shiftDoubleArmed = false   // `c` no longer uses the Shift double-tap
+        if flags.contains(.maskShift) {              // Shift → right click, now
+            pendingCClick?.cancel(); pendingCClick = nil
+            commit(.right, 1)
+            return
         }
+        if pendingCClick != nil {                    // second bare c → double
+            pendingCClick?.cancel(); pendingCClick = nil
+            commit(.left, 2)
+            return
+        }
+        let work = DispatchWorkItem { [weak self] in // first bare c → defer single
+            self?.pendingCClick = nil
+            commit(.left, 1)
+        }
+        pendingCClick = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + cDoubleTapWindow, execute: work)
     }
 
     // MARK: - Shift double-tap gesture (right-click vs double-click)
@@ -2374,7 +2408,8 @@ final class VimSession {
     /// single press = "right click" intent; a press whose down follows
     /// the previous up within the window = "double click" intent (the
     /// user then holds this second press while typing the label). The
-    /// hint/`c` commit reads `shiftDoubleArmed` to pick double vs right.
+    /// the hint-label commit reads `shiftDoubleArmed` to pick double vs
+    /// right. (`c` no longer uses it — it has its own `cc` double-tap.)
     private var shiftDoubleArmed = false
     private var prevShiftDown = false
     private var shiftDownAt: CFAbsoluteTime = 0
@@ -2701,14 +2736,14 @@ final class VimSession {
         // After-click behavior mirrors a hint commit: sticky → rescan +
         // stay in TAP; otherwise → exit to OFF.
         if keyCode == KeyCode.c {
-            hint.deactivate()
-            let (button, count) = clickKind(for: flags)
-            shiftDoubleArmed = false   // single-keystroke commit consumes it
-            MouseSynth.click(at: MouseSynth.cursorPosition(), button: button, count: count)
-            if sticky {
-                scheduleStickyRehint()
-            } else {
-                exit()
+            handleBareCClick(flags: flags) { [weak self] button, count in
+                // Re-check at fire time — the single click is deferred, so
+                // mode may have changed in the gap.
+                guard let self, case .tap(let h) = self.mode, case .normal = self.tapSub
+                else { return }
+                h.deactivate()
+                MouseSynth.click(at: MouseSynth.cursorPosition(), button: button, count: count)
+                if self.sticky { self.scheduleStickyRehint() } else { self.exit() }
             }
             return true
         }
