@@ -49,8 +49,9 @@ enum HintResult {
 enum ClickAction {
     case left      // bare hint letter
     case right     // Shift + hint letter
-    case double    // Option + hint letter
     case move      // move-armed (`'` prefix): warp cursor, no click
+    // (No `.double`: double-clicking is the unified `cc`-at-cursor gesture
+    //  — `'`+label to teleport onto a hinted element, then `cc`.)
 }
 
 @MainActor
@@ -589,7 +590,7 @@ final class HintMode {
 
     private func buttonForAction(_ action: ClickAction) -> CGMouseButton {
         switch action {
-        case .left, .double: return .left
+        case .left: return .left
         case .right: return .right
         case .move: return .left   // unused (move warps, never clicks)
         }
@@ -598,7 +599,6 @@ final class HintMode {
     private func countForAction(_ action: ClickAction) -> Int {
         switch action {
         case .left, .right: return 1
-        case .double: return 2
         case .move: return 1       // unused (move warps, never clicks)
         }
     }

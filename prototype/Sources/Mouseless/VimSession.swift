@@ -1437,10 +1437,6 @@ final class VimSession {
         pendingPageChangedTrailing = nil
         pendingDockCheck?.cancel()
         pendingDockCheck = nil
-        shiftDoubleArmed = false
-        prevShiftDown = false
-        lastShiftWasTap = false
-        shiftSawKey = false
         scrollPendingG = false
         if case .tap(let h) = mode {
             h.deactivate()
@@ -1471,11 +1467,6 @@ final class VimSession {
     /// Returns `true` if the event was consumed.
     func handle(keyCode: Int, flags: CGEventFlags) -> Bool {
         guard let m = mode else { return false }
-
-        // A key pressed during a Shift hold disqualifies that hold from
-        // being a "tap" — feeds the Shift double-tap gesture (right-click
-        // vs double-click). See handleShiftFlagsChanged.
-        noteKeyWhileShiftHeld()
 
         // Bare h/j/k/l in TAP or DRAG = move the cursor, vim hjkl (h
         // left, j down, k up, l right). Same move keys as SCROLL —
@@ -2345,18 +2336,13 @@ final class VimSession {
         return .normal
     }
 
-    /// Click-action scheme shared by hint commits and the bare-`c`
-    /// cursor click:
-    ///   bare              → left
-    ///   Shift held        → right
-    ///   Shift double-tap-hold → double (see `handleShiftFlagsChanged`)
-    /// Option intentionally unused. Instance method (reads the
-    /// `shiftDoubleArmed` gesture state). Does NOT consume the armed
-    /// flag — callers reset it on actual commit (so a pending multi-
-    /// char label keeps the gesture for its committing keystroke).
+    /// Click kind for a hint-label commit: bare → left, Shift → right.
+    /// Double-click on a hinted element is no longer a label gesture — use
+    /// `'`+label to teleport the cursor onto it, then `cc` to double-click
+    /// (double-click is the single, unified `cc`-at-cursor gesture now).
+    /// Option intentionally unused.
     private func clickAction(for flags: CGEventFlags) -> ClickAction {
-        guard flags.contains(.maskShift) else { return .left }
-        return shiftDoubleArmed ? .double : .right
+        return flags.contains(.maskShift) ? .right : .left
     }
 
     /// Pending single `c` click, deferred by `cDoubleTapWindow` so a quick
@@ -2381,7 +2367,6 @@ final class VimSession {
     /// closure re-checks mode at fire time so a stale click can't land.
     private func handleBareCClick(flags: CGEventFlags,
                                   commit: @escaping (CGMouseButton, Int) -> Void) {
-        shiftDoubleArmed = false   // `c` no longer uses the Shift double-tap
         if flags.contains(.maskShift) {              // Shift → right click, now
             pendingCClick?.cancel(); pendingCClick = nil
             commit(.right, 1)
@@ -2400,59 +2385,6 @@ final class VimSession {
         DispatchQueue.main.asyncAfter(deadline: .now() + cDoubleTapWindow, execute: work)
     }
 
-    // MARK: - Shift double-tap gesture (right-click vs double-click)
-
-    /// Shift key state machine, fed from HotkeyTap's flagsChanged. The
-    /// gesture is identical to WINDOW resize's double-tap (press-release-
-    /// press within `windowReverseTapWindow`), but for Shift: a fresh
-    /// single press = "right click" intent; a press whose down follows
-    /// the previous up within the window = "double click" intent (the
-    /// user then holds this second press while typing the label). The
-    /// the hint-label commit reads `shiftDoubleArmed` to pick double vs
-    /// right. (`c` no longer uses it — it has its own `cc` double-tap.)
-    private var shiftDoubleArmed = false
-    private var prevShiftDown = false
-    private var shiftDownAt: CFAbsoluteTime = 0
-    private var lastShiftUpAt: CFAbsoluteTime = 0
-    private var lastShiftWasTap = false   // previous Shift hold was a quick tap (no key during it)
-    private var shiftSawKey = false       // a key was pressed during the current Shift hold
-
-    func handleShiftFlagsChanged(shiftDown: Bool) {
-        guard shiftDown != prevShiftDown else { return }   // ignore non-Shift modifier changes
-        prevShiftDown = shiftDown
-        let now = CFAbsoluteTimeGetCurrent()
-        if shiftDown {
-            shiftDownAt = now
-            shiftSawKey = false
-            // Arm double iff this press closely follows a previous quick
-            // TAP (press-release with no key in between). Requiring the
-            // FIRST press to be a bare tap rejects the false positive of
-            // two fast consecutive right-clicks (Shift+label, release,
-            // Shift again <150ms): that first hold contained the label
-            // key, so it wasn't a tap → no arm → stays right-click.
-            shiftDoubleArmed = (now - lastShiftUpAt) < windowReverseTapWindow && lastShiftWasTap
-        } else {
-            let held = now - shiftDownAt
-            // A "tap" = short press with no key pressed during it. (The
-            // armed second-hold-with-label isn't a tap, but that's fine —
-            // arming already happened on its down; we only need the
-            // FIRST press to qualify.)
-            lastShiftWasTap = (held < windowReverseTapWindow) && !shiftSawKey
-            lastShiftUpAt = now
-            // Release clears the arm (commit already consumed it during
-            // the hold; a leftover set here means "armed but didn't
-            // commit" → clear so a later plain Shift+label isn't doubled).
-            shiftDoubleArmed = false
-        }
-    }
-
-    /// Called from `handle` on every keyDown while active: if Shift is
-    /// currently held, mark that this Shift hold "saw a key" (so its
-    /// eventual release doesn't count as a bare tap — see the double-tap
-    /// arming logic above).
-    private func noteKeyWhileShiftHeld() {
-        if prevShiftDown { shiftSawKey = true }
-    }
 
     /// Key release handler — routed from HotkeyTap.
     func handleKeyUp(keyCode: Int) -> Bool {
@@ -2766,24 +2698,17 @@ final class VimSession {
         guard let ch = Self.hintChar(for: keyCode) else { return true }
 
         // Modifier on the final hint letter chooses the click action:
-        //   bare              → left click
-        //   Shift held        → right click
-        //   Shift double-tap-hold (press-release-press, then hold while
-        //                      typing the label) → double click
-        // (see §11 / clickAction(for:)). Option is intentionally unused
-        // now — Shift reads as "the alternate click" to most users, and
-        // double-click rides the same Shift via the WINDOW-style
-        // double-tap gesture, freeing the awkward Option modifier.
+        //   bare        → left click
+        //   Shift held  → right click
+        // (see clickAction(for:)). No double-click on a hinted element —
+        // that's now the unified `cc`-at-cursor gesture (`'`+label to
+        // teleport onto it, then `cc`). Option intentionally unused.
         let action = clickAction(for: flags)
 
         switch hint.handle(char: ch, action: action) {
         case .pending, .ignored:
             break   // .ignored = misfire, swallowed; stay in TAP
-                    // (NOTE: don't consume shiftDoubleArmed — a pending
-                    // multi-char label keeps the gesture for its eventual
-                    // committing keystroke).
         case .moved:
-            shiftDoubleArmed = false
             // Move-only pick: cursor warped, hints stay shown (HintMode
             // already re-rendered them, disarmed, cleared typed). Stay
             // in TAP regardless of sticky — a move is navigation, not a
@@ -2792,7 +2717,6 @@ final class VimSession {
             // "· move" suffix now that the arm consumed itself.
             renderModeHUD()
         case .committed:
-            shiftDoubleArmed = false   // gesture consumed by this commit
             if sticky {
                 // Re-scan and stay in TAP. Single re-hint ~100ms after the
                 // click lands (see scheduleStickyRehint). App switches are
