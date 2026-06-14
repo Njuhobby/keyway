@@ -344,6 +344,21 @@ Chrome 之外的第一个浏览器。结论：**便宜**——JS（`background.j
 
 **未做(按需再补)**:Firefox 正式签名 / AMO 上架(对应 Chrome 的 Web Store 提交,归到 P5/发布阶段);event page 在极端 idle 下被回收的边角(当前靠 20s keepalive + 常开 native port 维持,与 Chrome SW 同策略)。
 
+### P4.13 — CSS 显隐切换检测(预渲染 modal / 下拉)（增量）✅
+
+**症状**:sticky TAP 下点开一个 modal,modal 上不自动出 hint,得再按一次 Caps Lock 才有。
+
+**根因**:P4 的 `MutationObserver` 只监听 `childList`(节点增删)。但很多 UI(modal、dialog、下拉、手风琴)是**预渲染在 DOM 里、靠 CSS 切显隐**的(改 `display`/`visibility`/一个 class/`hidden`/`aria-hidden`)——它们的可点元素**一直在 DOM 里,只是从隐藏变可见**,**不产生任何 childList 变化** → childList observer 永不 fire → 不发 `page_changed` → 不自动重扫。而手动 Caps Lock 走的 `list_hints` 是带可见性判断的完整 detector,modal 一旦可见就扫得到。(日志实证:开 modal 全程 mouseless **收不到一条 page_changed**;手动 enter TAP 才 `received N hints`。)
+
+**修法**:`content_script.js` 再加一个 observer 专盯**属性变化**(`attributeFilter: ["style","class","hidden","aria-hidden"]`, `subtree`)。但 `style` 每帧都在变,不能一变就干活(同 childList 路要 `hasNewClickable` 把关的理由),所以两道闸:
+
+1. **reset 去抖(150ms)**:每来一批属性变化就 `clearTimeout` + 重排;持续动画期间定时器被反复重置、永不触发 → **零扫描**;modal 一开就停 → 150ms 后才真正检查(此时 modal 已 settle、可见)。
+2. **只在"可见可点元素数量变了"时才发**:`visibleClickableCount()` = `querySelectorAll(CLICKABLE_SELECTOR)` 里 `getBoundingClientRect()` 有宽高的个数(`display:none` 宽高为 0,显示后 >0)。hover/focus/动画不改变这个数 → 不误发;modal 出现(数跳增)/关闭(数跳减)→ 发。CSS 切换没新增 DOM,所以只能比"可见数量",不能像 childList 那样比"有没有新节点"。
+
+发出去后复用 `notifyPageChangedThrottled()`(和 childList 路共用 500ms 节流),Mouseless 端走现成 `handlePageChanged` → refreshInPlace。
+
+**已知局限**:modal 的可点元素若**全是**启发式才识别的纯 `<div onClick>`(无 button/a/role/tabindex),便宜的 `CLICKABLE_SELECTOR` 数不到 → 不触发(有真 button 就没事);页面若**永不空闲 150ms**(持续动画),去抖不触发,期间开的 modal 要等动画停;两者都罕见,且有手动 Caps Lock 兜底。
+
 ### P5 — Safari 适配 + 打包上架（3-5 天）
 
 1. Safari Web Extension：用 Xcode 的 "Safari Web Extension App" 模板包一层 macOS app

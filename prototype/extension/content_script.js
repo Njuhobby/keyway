@@ -362,6 +362,54 @@
     });
   }
 
+  // ---- (4b) CSS-visibility-toggle detection ----
+  //
+  // Pre-rendered UI shown/hidden via CSS (modals, dialogs, dropdowns
+  // toggled by `display` / `visibility` / a class / `hidden` /
+  // `aria-hidden`) produces NO childList mutation — the clickables were
+  // always in the DOM, only their visibility changed — so the childList
+  // observer above never fires and Mouseless never auto-refreshes (the
+  // user has to re-press Caps Lock). Watch attribute changes too.
+  //
+  // But `style` (and class) mutate every animation frame, so we must NOT
+  // do work per mutation (that's why the childList path has its
+  // `hasNewClickable` gate). Two guards:
+  //   1. a RESET debounce — coalesce a burst and only check once it
+  //      settles, so continuous animation does zero scanning;
+  //   2. compare the COUNT of *visible* clickables and notify only when it
+  //      actually changed — hover / focus / animation don't change what's
+  //      clickable-and-visible (no notify); a modal appearing (count jumps)
+  //      or closing (count drops) does.
+  function visibleClickableCount() {
+    let n = 0;
+    for (const el of document.querySelectorAll(CLICKABLE_SELECTOR)) {
+      const r = el.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0) n += 1;
+    }
+    return n;
+  }
+  let lastVisibleClickableCount = -1;
+  let attrSettleTimer = null;
+  const visibilityObserver = new MutationObserver(() => {
+    if (attrSettleTimer !== null) clearTimeout(attrSettleTimer);
+    attrSettleTimer = setTimeout(() => {
+      attrSettleTimer = null;
+      const n = visibleClickableCount();
+      if (n !== lastVisibleClickableCount) {
+        lastVisibleClickableCount = n;
+        notifyPageChangedThrottled();
+      }
+    }, 150);
+  });
+  if (observeTarget) {
+    visibilityObserver.observe(observeTarget, {
+      attributes: true,
+      attributeFilter: ["style", "class", "hidden", "aria-hidden"],
+      subtree: true,
+    });
+    lastVisibleClickableCount = visibleClickableCount();   // baseline
+  }
+
   // Relay iframe-originated page_changed signals up the parent chain.
   // (Distinct from the hint-request listener at top of file — keep
   // both registered; they handle different message types.)
