@@ -201,6 +201,72 @@ enum ScreenCapture {
         CGPreflightScreenCaptureAccess()
     }
 
+    // MARK: - Cheap window fingerprint (content-settle detection)
+    //
+    // A reusable low-res grayscale "fingerprint" of the focused window,
+    // for cheaply detecting whether its content changed (e.g. an app's
+    // content pane refreshing a few hundred ms after a sticky-TAP click,
+    // where there's NO AX/DOM change event to drive a rehint — Slack et
+    // al.). Resolve the window rect + display ONCE via the factory, then
+    // call `capture()` repeatedly: each call only reads the already-
+    // composited display framebuffer (the cheap path — no per-window
+    // re-render, no OmniParser/YOLO), downscales to FP_W×FP_H grayscale,
+    // and returns the bytes. Diffing two fingerprints is a per-pixel
+    // mean-abs-diff (see VimSession).
+    //
+    // Why low-res grayscale: we only need a yes/no "did a big region
+    // change", not detail. The downscale AVERAGES, so tiny churn (caret
+    // blink, our own small hint chips, sub-pixel jitter) washes out below
+    // the change threshold, while a content swap (large region) stays far
+    // above it. We don't bother excluding our overlay window from the
+    // capture: at 64×36 a 22×16 hint chip maps to ~1 fingerprint pixel,
+    // so even all the chips together stay under the threshold — cheaper
+    // than forcing a re-composition to drop them. See
+    // `specs/scroll-mode-design.md` / browser-support notes.
+    static let fingerprintWidth = 64
+    static let fingerprintHeight = 36
+
+    /// Resolve the focused window + its display once and return a
+    /// `WindowFingerprinter` bound to them. Returns nil if screen-
+    /// recording permission is absent (AX-walk apps may never have
+    /// granted it — the caller just skips the settle watch then) or the
+    /// AX/display lookup fails.
+    static func makeWindowFingerprinter() async -> WindowFingerprinter? {
+        guard CGPreflightScreenCaptureAccess() else { return nil }
+        guard let (windowEl, _) = focusedWindow() else { return nil }
+        guard let rect = windowRect(windowEl) else { return nil }
+        do {
+            let displays = try await cachedDisplays()
+            guard let display = displays.first(where: { $0.frame.intersects(rect) }) else {
+                return nil
+            }
+            let filter = SCContentFilter(display: display, excludingWindows: [])
+            let scale = CGFloat(filter.pointPixelScale)
+            let fullW = filter.contentRect.width * scale
+            let fullH = filter.contentRect.height * scale
+            // Downscale the captured display so the transfer is cheap;
+            // ~640px on the long edge leaves enough detail for the window
+            // crop to then resize down to FP_W×FP_H.
+            let targetLong: CGFloat = 640
+            let ds = min(1.0, targetLong / max(fullW, fullH))
+            let config = SCStreamConfiguration()
+            config.width = max(1, Int(fullW * ds))
+            config.height = max(1, Int(fullH * ds))
+            config.showsCursor = false
+            let pxPerPoint = CGFloat(config.width) / filter.contentRect.width
+            return WindowFingerprinter(
+                filter: filter,
+                config: config,
+                displayOrigin: display.frame.origin,
+                displaySizePts: display.frame.size,
+                windowRectInAX: rect,
+                pxPerPoint: pxPerPoint
+            )
+        } catch {
+            return nil
+        }
+    }
+
     // MARK: - Display cache
     //
     // `SCShareableContent.excludingDesktopWindows(...)` is a cross-process
@@ -375,6 +441,88 @@ enum ScreenCapture {
         case .notEnoughPrecision: return "notEnoughPrecision"
         @unknown default: return "unknown(\(err.rawValue))"
         }
+    }
+}
+
+/// Bound to one focused window + display (resolved once by
+/// `ScreenCapture.makeWindowFingerprinter`). Each `capture()` reads the
+/// composited display framebuffer, crops to the window, and downscales to
+/// a small grayscale byte array — a cheap "is the content different yet?"
+/// probe for the post-commit content-settle watch. See the MARK comment
+/// in ScreenCapture for the rationale.
+@MainActor
+final class WindowFingerprinter {
+    private let filter: SCContentFilter
+    private let config: SCStreamConfiguration
+    private let displayOrigin: CGPoint
+    private let displaySizePts: CGSize
+    private let windowRectInAX: CGRect
+    private let pxPerPoint: CGFloat
+
+    init(filter: SCContentFilter,
+         config: SCStreamConfiguration,
+         displayOrigin: CGPoint,
+         displaySizePts: CGSize,
+         windowRectInAX: CGRect,
+         pxPerPoint: CGFloat) {
+        self.filter = filter
+        self.config = config
+        self.displayOrigin = displayOrigin
+        self.displaySizePts = displaySizePts
+        self.windowRectInAX = windowRectInAX
+        self.pxPerPoint = pxPerPoint
+    }
+
+    /// FP_W×FP_H grayscale bytes (row-major, 8-bit) of the window region,
+    /// or nil on capture/crop failure. Same display-capture-then-crop
+    /// math as `ScreenCapture.captureFocusedWindow`, minus the AX/display
+    /// lookup (resolved once at init) and the OmniParser-sized output.
+    func capture() async -> [UInt8]? {
+        do {
+            let displayImage = try await SCScreenshotManager.captureImage(
+                contentFilter: filter, configuration: config
+            )
+            let cropPts = windowRectInAX.offsetBy(dx: -displayOrigin.x, dy: -displayOrigin.y)
+            let clamped = cropPts.intersection(
+                CGRect(x: 0, y: 0, width: displaySizePts.width, height: displaySizePts.height)
+            )
+            let cropPx = CGRect(
+                x: floor(clamped.minX * pxPerPoint),
+                y: floor(clamped.minY * pxPerPoint),
+                width: floor(clamped.width * pxPerPoint),
+                height: floor(clamped.height * pxPerPoint)
+            )
+            guard cropPx.width >= 1, cropPx.height >= 1,
+                  let cropped = displayImage.cropping(to: cropPx) else { return nil }
+            return Self.downscaleToGray(
+                cropped,
+                width: ScreenCapture.fingerprintWidth,
+                height: ScreenCapture.fingerprintHeight
+            )
+        } catch {
+            return nil
+        }
+    }
+
+    /// Resize + grayscale in one Core Graphics draw into a device-gray
+    /// context. `.medium` interpolation averages source pixels (so small
+    /// features get blended away — the noise immunity we want), unlike
+    /// nearest-neighbor which would pick a single pixel per cell.
+    private static func downscaleToGray(_ image: CGImage, width: Int, height: Int) -> [UInt8]? {
+        let cs = CGColorSpaceCreateDeviceGray()
+        var buf = [UInt8](repeating: 0, count: width * height)
+        let ok: Bool = buf.withUnsafeMutableBytes { raw -> Bool in
+            guard let ctx = CGContext(
+                data: raw.baseAddress,
+                width: width, height: height,
+                bitsPerComponent: 8, bytesPerRow: width,
+                space: cs, bitmapInfo: CGImageAlphaInfo.none.rawValue
+            ) else { return false }
+            ctx.interpolationQuality = .medium
+            ctx.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        return ok ? buf : nil
     }
 }
 

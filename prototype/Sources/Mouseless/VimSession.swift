@@ -82,6 +82,7 @@ final class VimSession {
     private let pageScroll = ScrollController()
     private var rehintGeneration = 0           // supersede in-flight re-hints
     private var pendingStickyRehint: DispatchWorkItem?  // post-commit delayed re-hint
+    private var contentSettleTask: Task<Void, Never>?   // post-commit late-content watch
     /// Pending work item for the "re-apply current mode on the newly-
     /// activated app" flow — see `reapplyOnCurrentFrontmost`. Separate from
     /// `pendingStickyRehint` because the two have different semantics
@@ -526,6 +527,7 @@ final class VimSession {
         pendingCClick?.cancel(); pendingCClick = nil   // drop a deferred `c` click
         pendingStickyRehint?.cancel()
         pendingStickyRehint = nil
+        cancelContentSettleWatch()
         pendingAppSwitchReenter?.cancel()
         pendingAppSwitchReenter = nil
         scrollPendingG = false
@@ -774,6 +776,109 @@ final class VimSession {
         }
         pendingStickyRehint = item
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: item)
+    }
+
+    // MARK: - Content-settle watch (non-browser sticky)
+
+    /// After a non-browser sticky commit, drive **one** rehint off a
+    /// cheap content-settle watch instead of a blind fixed-delay timer.
+    ///
+    /// Why: non-browser apps have no page_changed signal, and a fixed
+    /// delay is just a guess at when the window's content finished
+    /// refreshing. Too early (the old 100ms) scans stale content — e.g. a
+    /// Slack channel switch whose pane repaints a few hundred ms later —
+    /// so the new content never gets hinted (the user had to re-press
+    /// Caps Lock). Waiting longer would lag the common case where nothing
+    /// changed.
+    ///
+    /// Mechanism: the commit already hid the overlay (`deactivate`), so
+    /// nothing of ours is on screen during the watch. Poll a low-res
+    /// grayscale fingerprint of the window (`WindowFingerprinter` — reads
+    /// the composited framebuffer, no OmniParser/YOLO) every ~100ms and
+    /// diff consecutive frames. The moment the window has been **stable
+    /// for two polls** (settled), do the single (expensive) rehint and
+    /// stop. The downscale washes out caret blink / sub-pixel jitter so
+    /// they stay below the threshold; a content swap is far above it.
+    ///
+    /// Per case: a static click is "stable" from the first poll → rehints
+    /// in ~2 polls (~200ms restore). A click that repaints the pane keeps
+    /// diffing > threshold until it settles → rehints once at settle (no
+    /// stale-then-correct double scan). Either way: ONE scan, timed to the
+    /// content. Cap at ~1.2s (rehint anyway) so a never-settling pane
+    /// (video/spinner) still restores hints. **Tradeoff**: content that
+    /// stays identical for >2 polls and only *then* starts changing
+    /// ("delayed-start") rehints on the still-stale frame and is missed —
+    /// re-press to refresh. A separate fast-restore scan could cover that
+    /// but at the cost of a wasted scan on every changing commit; we took
+    /// the single-scan side deliberately.
+    ///
+    /// Fallback: if no fingerprint can be captured (screen-recording
+    /// permission absent — AX-walk apps may never have granted it — or
+    /// the AX/display lookup fails), fall back to the fixed-delay rehint
+    /// so hints still come back.
+    private func startContentSettleWatch() {
+        contentSettleTask?.cancel()
+        contentSettleTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            guard let fp = await ScreenCapture.makeWindowFingerprinter() else {
+                self.scheduleStickyRehint()   // no fingerprinter → fixed-delay fallback
+                return
+            }
+            if Task.isCancelled { return }
+            guard self.isActive, self.sticky, case .tap = self.mode else { return }
+            guard var prev = await fp.capture() else {
+                self.scheduleStickyRehint()   // capture failed → same fallback
+                return
+            }
+
+            let threshold = 6.0                  // mean abs diff / pixel (0–255)
+            let interval: UInt64 = 100_000_000   // 100ms
+            let stableNeeded = 2                 // consecutive sub-threshold polls = settled
+            let maxPolls = 12                    // ~1.2s ceiling → rehint anyway
+            var stable = 0
+
+            for poll in 1...maxPolls {
+                try? await Task.sleep(nanoseconds: interval)
+                if Task.isCancelled { return }
+                // Same gates as the other rehints: still in normal sticky
+                // TAP, and not mid-label-typing (never reshuffle labels
+                // under the user's fingers).
+                guard self.isActive, self.sticky,
+                      case .tap(let h) = self.mode, case .normal = self.tapSub,
+                      h.typedPrefix.isEmpty else { return }
+                guard let cur = await fp.capture() else { continue }
+                let diff = Self.meanAbsDiff(prev, cur)
+                prev = cur
+                print("[mouseless] settle poll \(poll): diff=\(String(format: "%.1f", diff)) stable=\(stable)")
+                if diff < threshold {
+                    stable += 1
+                    if stable >= stableNeeded {
+                        print("[mouseless] settle: stable → rehint (poll \(poll))")
+                        self.rehintSticky()
+                        return
+                    }
+                } else {
+                    stable = 0
+                }
+            }
+            print("[mouseless] settle: cap reached → rehint")
+            self.rehintSticky()
+        }
+    }
+
+    private func cancelContentSettleWatch() {
+        contentSettleTask?.cancel()
+        contentSettleTask = nil
+    }
+
+    /// Per-pixel mean absolute difference of two equal-length grayscale
+    /// fingerprints (0 = identical, 255 = inverted). Cheap content-change
+    /// metric for `startContentSettleWatch`.
+    private static func meanAbsDiff(_ a: [UInt8], _ b: [UInt8]) -> Double {
+        guard a.count == b.count, !a.isEmpty else { return .greatestFiniteMagnitude }
+        var sum = 0
+        for i in a.indices { sum += abs(Int(a[i]) - Int(b[i])) }
+        return Double(sum) / Double(a.count)
     }
 
     // MARK: - App-switch follow (sticky only)
@@ -1043,6 +1148,7 @@ final class VimSession {
         // 500ms delay gets short-circuited by activeSpaceDidChange).
         pendingStickyRehint?.cancel()
         pendingStickyRehint = nil
+        cancelContentSettleWatch()   // app switch supersedes the same-window watch
         pendingAppSwitchReenter?.cancel()
         pendingCClick?.cancel(); pendingCClick = nil   // old app's deferred `c` mustn't fire on the new one
 
@@ -1431,6 +1537,7 @@ final class VimSession {
         stopFollowingFrontmost()
         pendingStickyRehint?.cancel()
         pendingStickyRehint = nil
+        cancelContentSettleWatch()
         pendingAppSwitchReenter?.cancel()
         pendingAppSwitchReenter = nil
         pendingPageChangedTrailing?.cancel()
@@ -1687,6 +1794,7 @@ final class VimSession {
         // replace the hidden overlay with a fresh scan.
         pendingStickyRehint?.cancel()
         pendingStickyRehint = nil
+        cancelContentSettleWatch()
         let cursor = MouseSynth.cursorPosition()
         tapSub = .dragging(DragController(at: cursor))
         // Hide the TAP hint overlay while dragging — the labels would
@@ -1817,6 +1925,7 @@ final class VimSession {
         // the hint overlay we just hid.
         pendingStickyRehint?.cancel()
         pendingStickyRehint = nil
+        cancelContentSettleWatch()
         hint.hideOverlay()
         setSearchPhase(.typing(buffer: ""))
         renderModeHUD()
@@ -2735,15 +2844,33 @@ final class VimSession {
                 // anchors (#section), javascript: URLs, target=_blank,
                 // and non-anchor hints aren't flagged `navigates` so they
                 // still get the 100ms rehint.
+                let committedSource = hint.lastCommittedTarget?.source
                 let isNavigating: Bool
-                if case .browser(let nav)? = hint.lastCommittedTarget?.source, nav {
+                if case .browser(let nav)? = committedSource, nav {
                     isNavigating = true
                 } else {
                     isNavigating = false
                 }
+                let isBrowserCommit: Bool
+                if case .browser? = committedSource { isBrowserCommit = true }
+                else { isBrowserCommit = false }
+                let isDockCommit = (hint.lastCommittedTarget?.role == "AXDockItem")
                 if isNavigating {
                     print("[mouseless] sticky: skip 100ms rehint (link navigation, awaiting tabs.onUpdated)")
+                } else if !isBrowserCommit && !isDockCommit {
+                    // Non-browser apps have no page_changed signal, and a
+                    // fixed-delay rehint is a blind guess at when the
+                    // window's content finished refreshing (too early →
+                    // scans stale content, e.g. a Slack channel switch).
+                    // Drive a SINGLE rehint off a cheap content-settle
+                    // watch instead: it scans once, when the window has
+                    // actually stabilized. (Falls back to the fixed delay
+                    // if a fingerprint can't be captured.)
+                    startContentSettleWatch()
                 } else {
+                    // Browser (page_changed covers late content) and Dock
+                    // (app-switch follow covers it) keep the fixed-delay
+                    // rehint.
                     scheduleStickyRehint()
                 }
             } else {
