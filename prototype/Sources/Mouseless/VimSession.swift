@@ -778,91 +778,152 @@ final class VimSession {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: item)
     }
 
-    // MARK: - Content-settle watch (non-browser sticky)
+    // MARK: - Settle watch (generic "wait for the screen to stop changing")
 
-    /// After a non-browser sticky commit, drive **one** rehint off a
-    /// cheap content-settle watch instead of a blind fixed-delay timer.
+    /// One poll's result from a settle watch's frame source.
+    private enum SettleFrame {
+        case frame([UInt8])   // captured a low-res grayscale fingerprint
+        case noWindow         // resolved fine, but there's nothing to capture
+        case captureFailed    // transient capture hiccup — skip this poll
+    }
+
+    /// Generic "wait until a screen region stops changing, then act"
+    /// primitive — the cheap, *measured* replacement for the blind
+    /// fixed-delay guesses scattered around rehint paths.
+    ///
+    /// Each poll, `nextFrame` produces a `SettleFrame`. We diff consecutive
+    /// `.frame`s (per-pixel mean-abs-diff on the downscaled grayscale, which
+    /// washes out caret blink / sub-pixel jitter; a content swap is far
+    /// above the threshold). The region is "settled" once it's been stable
+    /// for `stableNeeded` polls:
+    ///   - stable as **frames** (content stopped changing) → `onSettled`;
+    ///   - stable as **noWindow** (nothing to capture, persistently) →
+    ///     `onNoWindow` (e.g. the frontmost app has no on-screen window —
+    ///     `null == null` is itself a stable state, no separate guess
+    ///     needed). A `frame ⇄ noWindow` transition counts as a change.
+    ///   - `.captureFailed` keeps the prior state and skips the poll.
+    /// `gate` is re-checked every poll (bail if the situation no longer
+    /// applies). Cap at `maxPolls` → fire whichever terminal matches the
+    /// last seen state, so we never hang.
+    ///
+    /// The caller owns the `Task` (so it can cancel via its own handle) and
+    /// supplies `baseline` (the pre-loop frame) — that lets the caller do
+    /// its own "couldn't even start" fallback before handing off here.
+    private func runSettleLoop(
+        baseline: SettleFrame,
+        interval: UInt64 = 100_000_000,      // 100ms
+        threshold: Double = 6.0,             // mean abs diff / pixel (0–255)
+        stableNeeded: Int = 2,               // consecutive stable polls = settled
+        maxPolls: Int = 12,                  // ~1.2s ceiling
+        gate: @escaping () -> Bool,
+        nextFrame: @escaping () async -> SettleFrame,
+        onSettled: @escaping () -> Void,
+        onNoWindow: @escaping () -> Void
+    ) async {
+        var prev = baseline
+        var stable = 0
+        for poll in 1...maxPolls {
+            try? await Task.sleep(nanoseconds: interval)
+            if Task.isCancelled { return }
+            guard gate() else { return }
+            let cur = await nextFrame()
+            if Task.isCancelled { return }
+            switch (prev, cur) {
+            case (_, .captureFailed):
+                print("[mouseless] settle poll \(poll): capture failed (skip)")
+                continue   // keep prev + stable
+            case let (.frame(p), .frame(c)):
+                let diff = Self.meanAbsDiff(p, c)
+                print("[mouseless] settle poll \(poll): diff=\(String(format: "%.1f", diff)) stable=\(stable)")
+                stable = diff < threshold ? stable + 1 : 0
+                prev = cur
+                if stable >= stableNeeded {
+                    print("[mouseless] settle: content stable → onSettled (poll \(poll))")
+                    onSettled()
+                    return
+                }
+            case (.noWindow, .noWindow):
+                stable += 1
+                print("[mouseless] settle poll \(poll): noWindow stable=\(stable)")
+                prev = cur
+                if stable >= stableNeeded {
+                    print("[mouseless] settle: persistently no window → onNoWindow (poll \(poll))")
+                    onNoWindow()
+                    return
+                }
+            default:
+                // frame ⇄ noWindow transition = a change; re-baseline.
+                print("[mouseless] settle poll \(poll): state change → reset")
+                stable = 0
+                prev = cur
+            }
+        }
+        // Cap reached — fire the terminal matching the last state.
+        print("[mouseless] settle: cap reached")
+        switch prev {
+        case .noWindow: onNoWindow()
+        default:        onSettled()
+        }
+    }
+
+    // MARK: - Content-settle watch (non-browser sticky commit)
+
+    /// After a non-browser sticky commit, drive **one** rehint off the
+    /// settle watch instead of a blind fixed-delay timer.
     ///
     /// Why: non-browser apps have no page_changed signal, and a fixed
-    /// delay is just a guess at when the window's content finished
-    /// refreshing. Too early (the old 100ms) scans stale content — e.g. a
-    /// Slack channel switch whose pane repaints a few hundred ms later —
-    /// so the new content never gets hinted (the user had to re-press
-    /// Caps Lock). Waiting longer would lag the common case where nothing
-    /// changed.
+    /// delay just guesses when the window's content finished refreshing.
+    /// Too early (the old 100ms) scans stale content — e.g. a Slack
+    /// channel switch whose pane repaints a few hundred ms later — so the
+    /// new content never gets hinted (the user had to re-press Caps Lock).
+    /// Waiting longer would lag the common case where nothing changed.
     ///
-    /// Mechanism: the commit already hid the overlay (`deactivate`), so
-    /// nothing of ours is on screen during the watch. Poll a low-res
-    /// grayscale fingerprint of the window (`WindowFingerprinter` — reads
-    /// the composited framebuffer, no OmniParser/YOLO) every ~100ms and
-    /// diff consecutive frames. The moment the window has been **stable
-    /// for two polls** (settled), do the single (expensive) rehint and
-    /// stop. The downscale washes out caret blink / sub-pixel jitter so
-    /// they stay below the threshold; a content swap is far above it.
-    ///
-    /// Per case: a static click is "stable" from the first poll → rehints
-    /// in ~2 polls (~200ms restore). A click that repaints the pane keeps
-    /// diffing > threshold until it settles → rehints once at settle (no
-    /// stale-then-correct double scan). Either way: ONE scan, timed to the
-    /// content. Cap at ~1.2s (rehint anyway) so a never-settling pane
-    /// (video/spinner) still restores hints. **Tradeoff**: content that
-    /// stays identical for >2 polls and only *then* starts changing
-    /// ("delayed-start") rehints on the still-stale frame and is missed —
-    /// re-press to refresh. A separate fast-restore scan could cover that
-    /// but at the cost of a wasted scan on every changing commit; we took
-    /// the single-scan side deliberately.
+    /// The commit already hid the overlay (`deactivate`), so nothing of
+    /// ours is on screen during the watch. We resolve the focused window
+    /// **once** (it's stable — we just clicked in it) and poll its
+    /// fingerprint until settled, then rehint once. Per case: a static
+    /// click is stable from the first poll → rehints in ~2 polls (~200ms);
+    /// a pane repaint keeps diffing > threshold until it settles → one
+    /// rehint at settle (no stale-then-correct double scan). **Tradeoff**:
+    /// content that stays identical for >2 polls and only *then* starts
+    /// changing ("delayed-start") settles on the stale frame and is missed
+    /// — re-press to refresh; single-scan side chosen deliberately.
     ///
     /// Fallback: if no fingerprint can be captured (screen-recording
-    /// permission absent — AX-walk apps may never have granted it — or
-    /// the AX/display lookup fails), fall back to the fixed-delay rehint
-    /// so hints still come back.
+    /// permission absent, or the AX/display lookup fails), fall back to
+    /// the fixed-delay rehint so hints still come back.
     private func startContentSettleWatch() {
         contentSettleTask?.cancel()
         contentSettleTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            guard let fp = await ScreenCapture.makeWindowFingerprinter() else {
-                self.scheduleStickyRehint()   // no fingerprinter → fixed-delay fallback
+            // Resolve once + grab the baseline; either failing → fixed-delay
+            // fallback (the window is present here, so this is rare).
+            guard let fp = await ScreenCapture.makeWindowFingerprinter(),
+                  let baseline = await fp.capture() else {
+                self.scheduleStickyRehint()
                 return
             }
             if Task.isCancelled { return }
             guard self.isActive, self.sticky, case .tap = self.mode else { return }
-            guard var prev = await fp.capture() else {
-                self.scheduleStickyRehint()   // capture failed → same fallback
-                return
-            }
-
-            let threshold = 6.0                  // mean abs diff / pixel (0–255)
-            let interval: UInt64 = 100_000_000   // 100ms
-            let stableNeeded = 2                 // consecutive sub-threshold polls = settled
-            let maxPolls = 12                    // ~1.2s ceiling → rehint anyway
-            var stable = 0
-
-            for poll in 1...maxPolls {
-                try? await Task.sleep(nanoseconds: interval)
-                if Task.isCancelled { return }
-                // Same gates as the other rehints: still in normal sticky
-                // TAP, and not mid-label-typing (never reshuffle labels
-                // under the user's fingers).
-                guard self.isActive, self.sticky,
-                      case .tap(let h) = self.mode, case .normal = self.tapSub,
-                      h.typedPrefix.isEmpty else { return }
-                guard let cur = await fp.capture() else { continue }
-                let diff = Self.meanAbsDiff(prev, cur)
-                prev = cur
-                print("[mouseless] settle poll \(poll): diff=\(String(format: "%.1f", diff)) stable=\(stable)")
-                if diff < threshold {
-                    stable += 1
-                    if stable >= stableNeeded {
-                        print("[mouseless] settle: stable → rehint (poll \(poll))")
-                        self.rehintSticky()
-                        return
-                    }
-                } else {
-                    stable = 0
-                }
-            }
-            print("[mouseless] settle: cap reached → rehint")
-            self.rehintSticky()
+            await self.runSettleLoop(
+                baseline: .frame(baseline),
+                gate: { [weak self] in
+                    // Still in normal sticky TAP, not mid-label-typing
+                    // (never reshuffle labels under the user's fingers).
+                    guard let self else { return false }
+                    guard self.isActive, self.sticky,
+                          case .tap(let h) = self.mode, case .normal = self.tapSub,
+                          h.typedPrefix.isEmpty else { return false }
+                    return true
+                },
+                nextFrame: {
+                    // Window is fixed for a commit; nil = transient hiccup.
+                    if let bytes = await fp.capture() { return .frame(bytes) }
+                    return .captureFailed
+                },
+                onSettled: { [weak self] in self?.rehintSticky() },
+                onNoWindow: { [weak self] in self?.rehintSticky() }   // unreachable here
+            )
         }
     }
 
