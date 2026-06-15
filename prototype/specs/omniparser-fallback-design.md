@@ -648,13 +648,13 @@ let image = try await SCScreenshotManager.captureImage(
 
 #### Screen Recording 权限
 
-**这是 AX 之外多加的一个授权门槛**——我们一直避开它，一旦走这条路，权限模型从"只要 AX"变成"AX + Screen Recording"。值得跟用户明确这个 trade-off。
+**这是 AX 之外多加的一个授权门槛**——权限模型是"AX + Screen Recording"。
 
-权限请求策略（lazy）：
+权限请求策略（**已从 lazy 改为启动时硬性 gate**）：
 
-- 启动时**不**请求 Screen Recording
-- 用户首次落进会触发 OmniParser 的 app（按框架探测）时，**才**用 `CGPreflightScreenCaptureAccess()` 检测，没授权弹原生 prompt
-- 没授权就降级：当次扫描 OmniParser 路径退化为"无候选"，AX 候选仍可用——跟现在 AX 黑洞 app 体验一致，**不会让 Mouseless 整体挂掉**
+- 早期是 lazy：启动不请求，首次落进 OP app 才弹 `CGPreflightScreenCaptureAccess()` prompt，没授权就 OP 路径降级为"无候选"（AX 候选仍可用）。
+- **现在是硬性要求**（`AppDelegate.ensureScreenRecording()`，与 `ensureAccessibility()` 并列）：启动时两个权限都检测、都弹 prompt，**两个都满足才启动**(否则 `M⚠` + 列出缺哪个 + 提示授权后重启)。改的原因:Screen Recording 现在不只 OP 在用——**内容 settle watch**(`WindowFingerprinter` 低分辨率小图,见 `modes.md` 机制 1/2)也靠它;没有它,OP 路由的 app 完全没 hint、且所有 app-switch/commit 重扫退回盲延迟。OP 是核心价值,不值得为"只想授 AX 的用户"保留半残体验。
+- Screen Recording 授权**进程内缓存**,授予后需**重启**才生效(`CGRequestScreenCaptureAccess()` 当次仍返回 false)——和 macOS 对其它 app 的行为一致。运行时 capture 仍保留 `CGPreflightScreenCaptureAccess()` 守卫(防用户运行中在设置里撤销),撤销则 capture 返回 nil 优雅降级。
 
 #### 坐标系对齐
 

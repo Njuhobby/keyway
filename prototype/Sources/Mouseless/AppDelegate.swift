@@ -10,7 +10,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupMenuBar()
 
-        if ensureAccessibility() {
+        // Both are HARD requirements (prompt both so neither short-
+        // circuits the other). Accessibility: the event tap. Screen
+        // Recording: the OmniParser fallback AND the content-settle watch
+        // (low-res fingerprints) both capture the screen — without it
+        // OP-routed apps get no hints and rehints fall back to blind
+        // delays, so we gate startup on it rather than lazily prompting.
+        let axOK = ensureAccessibility()
+        let screenOK = ensureScreenRecording()
+        if axOK && screenOK {
             // Caps Lock → F19 remap. The OS doesn't surface Caps Lock as
             // a normal keyDown (it's a modifier), so we rewrite it to F19
             // at the HID layer via hidutil. See TriggerRemap.swift.
@@ -100,10 +108,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         } else {
             statusItem.button?.title = "M⚠"
-            print("[mouseless] Accessibility not granted.")
-            print("           1. Open System Settings → Privacy & Security → Accessibility")
-            print("           2. Enable 'Mouseless' (or the swift binary path)")
-            print("           3. Fully quit this process and rerun `swift run`")
+            print("[mouseless] Required permissions not granted:")
+            if !axOK {
+                print("  • Accessibility — System Settings → Privacy & Security → Accessibility")
+            }
+            if !screenOK {
+                print("  • Screen Recording — System Settings → Privacy & Security → Screen Recording")
+            }
+            print("  Enable 'Mouseless' (or the swift binary path) for the above,")
+            print("  then fully quit this process and rerun `swift run`.")
         }
     }
 
@@ -125,7 +138,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(header)
         menu.addItem(.separator())
 
-        let recheck = NSMenuItem(title: "Re-check accessibility", action: #selector(recheckAccessibility), keyEquivalent: "r")
+        let recheck = NSMenuItem(title: "Re-check permissions", action: #selector(recheckPermissions), keyEquivalent: "r")
         recheck.target = self
         menu.addItem(recheck)
 
@@ -143,6 +156,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary)
     }
 
+    @discardableResult
+    private func ensureScreenRecording() -> Bool {
+        if CGPreflightScreenCaptureAccess() { return true }
+        // Not granted — fire the system TCC prompt. The grant only takes
+        // effect after a restart (macOS caches screen-recording status per
+        // process), so this launch still returns false; the user enables
+        // it, quits, and reruns — same flow as Accessibility.
+        CGRequestScreenCaptureAccess()
+        return false
+    }
+
     private func startTap() {
         let newSession = VimSession()
         let newTap = HotkeyTap(session: newSession)
@@ -156,9 +180,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    @objc private func recheckAccessibility() {
+    @objc private func recheckPermissions() {
         guard tap == nil else { return }
-        if ensureAccessibility() {
+        // Accessibility can flip live; Screen Recording is cached per
+        // process, so granting it needs a restart (see ensureScreenRecording).
+        // This re-check mainly recovers the Accessibility-only case.
+        if ensureAccessibility() && ensureScreenRecording() {
             startTap()
         }
     }
