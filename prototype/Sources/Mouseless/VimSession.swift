@@ -1197,11 +1197,6 @@ final class VimSession {
         // both schedule a re-enter for the same change.
         lastSeenFocusedWindow = Self.currentFocusedWindow()
 
-        // See doc comment above for the rationale.
-        let onScreen = Self.frontmostAppHasOnScreenWindow()
-        let delay: TimeInterval = onScreen ? 0.1 : 0.5
-        print("[mouseless] app/space changed → re-apply \(kind.map { "\($0)" } ?? "?") in \(Int(delay * 1000))ms (onScreen=\(onScreen))")
-
         // Cancel any in-flight same-window operation (post-click
         // re-hint, etc.) — this app switch supersedes it. Also cancel
         // any prior pending app-switch re-enter (rapid Cmd+Tab through
@@ -1233,24 +1228,62 @@ final class VimSession {
             return
         }
 
+        // ---- TAP: re-apply via the content-settle watch (measured, not
+        // a guessed delay). ----
+        //
+        // Re-resolve the new app's focused window each poll and watch its
+        // fingerprint until it stabilizes, then rehint once. This subsumes
+        // the old onScreen?0.1:0.5 guess: a cross-Space slide or the
+        // Cmd+Tab switcher HUD fade keeps the fingerprint changing, so the
+        // watch naturally waits them out instead of guessing; a window
+        // that's genuinely absent resolves to `.noWindow` persistently →
+        // `onNoWindow`, and `rehintSticky(fromAppSwitch:)` still surfaces
+        // the "no frontmost window" HUD (it scans Dock/extras and checks
+        // AXFocusedWindow). Reuses the `contentSettleTask` handle, which
+        // we just cancelled above and which every teardown path cancels.
+        // (SCROLL / WINDOW / MOVE keep the fixed-delay re-enter for now.)
+        if kind == .tap {
+            print("[mouseless] app/space changed → TAP re-apply via settle watch")
+            contentSettleTask = Task { @MainActor [weak self] in
+                guard let self else { return }
+                func frame() async -> SettleFrame {
+                    // quiet: the per-poll AX re-resolve would otherwise
+                    // flood the log. nil = no focused window → .noWindow.
+                    guard let fp = await ScreenCapture.makeWindowFingerprinter(quiet: true)
+                    else { return .noWindow }
+                    if let bytes = await fp.capture() { return .frame(bytes) }
+                    return .captureFailed
+                }
+                let baseline = await frame()
+                if Task.isCancelled { return }
+                guard self.isActive, self.currentModeKind == kind else { return }
+                await self.runSettleLoop(
+                    baseline: baseline,
+                    gate: { [weak self] in
+                        self?.isActive == true && self?.currentModeKind == kind
+                    },
+                    nextFrame: { await frame() },
+                    onSettled: { [weak self] in
+                        self?.rehintSticky(isolateApp: true, fromAppSwitch: true)
+                    },
+                    onNoWindow: { [weak self] in
+                        self?.rehintSticky(isolateApp: true, fromAppSwitch: true)
+                    }
+                )
+            }
+            return
+        }
+
+        // ---- SCROLL / WINDOW / MOVE: fixed settle delay (unchanged). ----
+        let onScreen = Self.frontmostAppHasOnScreenWindow()
+        let delay: TimeInterval = onScreen ? 0.1 : 0.5
+        print("[mouseless] app/space changed → re-apply \(kind.map { "\($0)" } ?? "?") in \(Int(delay * 1000))ms (onScreen=\(onScreen))")
         let item = DispatchWorkItem { [weak self] in
             guard let self else { return }
-            // If user has Esc'd or chorded into a different mode in
-            // the 100ms gap, respect that action — don't override.
-            // (The chord paths cancel `pendingAppSwitchReenter` via
-            // `teardownCurrentMode` so we shouldn't even fire, but
-            // this guard is belt-and-suspenders.)
+            // If user has Esc'd or chorded into a different mode in the
+            // gap, respect that — don't override.
             guard self.isActive, self.currentModeKind == kind else { return }
             switch kind {
-            case .tap?:
-                // `rehintSticky` handles deactivate + async AX/OP
-                // scan + mode assignment. `isolateApp: true` drops
-                // the Cmd+Tab switcher HUD from the capture.
-                // `fromAppSwitch: true` enables the "new app has no
-                // visible window" HUD if focused-window targets are
-                // empty (even when Dock / extras saved us from a
-                // total `ok=false` exit).
-                self.rehintSticky(isolateApp: true, fromAppSwitch: true)
             case .scroll?:
                 // enterScroll's own teardownCurrentMode at the top
                 // tears down the stale .scroll(oldController) before
@@ -1275,8 +1308,8 @@ final class VimSession {
                 } else {
                     self.enterWindowMove()
                 }
-            case nil:
-                return
+            case .tap?, nil:
+                return   // tap handled above; nil unreachable (hid-overlay returned)
             }
         }
         pendingAppSwitchReenter = item

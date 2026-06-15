@@ -231,12 +231,15 @@ enum ScreenCapture {
     /// recording permission is absent (AX-walk apps may never have
     /// granted it — the caller just skips the settle watch then) or the
     /// AX/display lookup fails.
-    static func makeWindowFingerprinter() async -> WindowFingerprinter? {
+    /// `quiet` suppresses the AX-chain / display-cache logging — set it for
+    /// the per-poll re-resolve in a settle watch, which would otherwise
+    /// flood the log many times per second.
+    static func makeWindowFingerprinter(quiet: Bool = false) async -> WindowFingerprinter? {
         guard CGPreflightScreenCaptureAccess() else { return nil }
-        guard let (windowEl, _) = focusedWindow() else { return nil }
+        guard let (windowEl, _) = focusedWindow(quiet: quiet) else { return nil }
         guard let rect = windowRect(windowEl) else { return nil }
         do {
-            let displays = try await cachedDisplays()
+            let displays = try await cachedDisplays(quiet: quiet)
             guard let display = displays.first(where: { $0.frame.intersects(rect) }) else {
                 return nil
             }
@@ -278,13 +281,13 @@ enum ScreenCapture {
     private static var cachedDisplaysValue: [SCDisplay]?
     private static var screenChangeObserver: NSObjectProtocol?
 
-    private static func cachedDisplays() async throws -> [SCDisplay] {
+    private static func cachedDisplays(quiet: Bool = false) async throws -> [SCDisplay] {
         installScreenChangeObserverIfNeeded()
         if let cached = cachedDisplaysValue {
-            print("[mouseless] ScreenCapture: cache HIT (\(cached.count) displays)")
+            if !quiet { print("[mouseless] ScreenCapture: cache HIT (\(cached.count) displays)") }
             return cached
         }
-        print("[mouseless] ScreenCapture: cache MISS, querying SCShareableContent")
+        if !quiet { print("[mouseless] ScreenCapture: cache MISS, querying SCShareableContent") }
         let content = try await SCShareableContent.excludingDesktopWindows(
             false, onScreenWindowsOnly: true
         )
@@ -354,15 +357,17 @@ enum ScreenCapture {
     /// (We used to also extract CGWindowID via the private
     /// `_AXUIElementGetWindow` API for `SCContentFilter(desktopIndependentWindow:)`,
     /// but display capture + crop doesn't need it — public APIs only now.)
-    private static func focusedWindow() -> (element: AXUIElement, pid: pid_t)? {
+    private static func focusedWindow(quiet: Bool = false) -> (element: AXUIElement, pid: pid_t)? {
         // Step 1: frontmost app via NSWorkspace (reliable on Electron;
         // AXFocusedApplication was not — see FocusedApp.swift).
         guard let (app, pid) = FocusedApp.current() else {
-            print("[mouseless] AX step 1 (frontmost app): NSWorkspace returned nil")
+            if !quiet { print("[mouseless] AX step 1 (frontmost app): NSWorkspace returned nil") }
             return nil
         }
-        let bundleID = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier ?? "?"
-        print("[mouseless] AX step 1 ok: pid=\(pid) bundleID=\(bundleID)")
+        if !quiet {
+            let bundleID = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier ?? "?"
+            print("[mouseless] AX step 1 ok: pid=\(pid) bundleID=\(bundleID)")
+        }
 
         // Step 2: AXFocusedWindow, with fallbacks for apps that don't
         // designate a focused window (some Electron apps after Cmd+Tab,
@@ -372,10 +377,10 @@ enum ScreenCapture {
             app, "AXFocusedWindow" as CFString, &winRef
         )
         if winErr == .success, let winRaw = winRef {
-            print("[mouseless] AX step 2 (AXFocusedWindow): ok")
+            if !quiet { print("[mouseless] AX step 2 (AXFocusedWindow): ok") }
             return (winRaw as! AXUIElement, pid)
         }
-        print("[mouseless] AX step 2 (AXFocusedWindow): err=\(axErrName(winErr)) nil=\(winRef == nil) — trying fallbacks")
+        if !quiet { print("[mouseless] AX step 2 (AXFocusedWindow): err=\(axErrName(winErr)) nil=\(winRef == nil) — trying fallbacks") }
 
         // Fallback A: AXMainWindow (set on app launch, doesn't need key state)
         var mainRef: CFTypeRef?
@@ -383,7 +388,7 @@ enum ScreenCapture {
             app, "AXMainWindow" as CFString, &mainRef
         )
         if mainErr == .success, let mainRaw = mainRef {
-            print("[mouseless] AX step 2 fallback A (AXMainWindow): ok")
+            if !quiet { print("[mouseless] AX step 2 fallback A (AXMainWindow): ok") }
             return (mainRaw as! AXUIElement, pid)
         }
 
@@ -396,10 +401,10 @@ enum ScreenCapture {
               let windows = windowsRef as? [AXUIElement],
               let first = windows.first
         else {
-            print("[mouseless] AX step 2 fallback B (AXWindows[0]): err=\(axErrName(windowsErr)) count=\((windowsRef as? [AXUIElement])?.count ?? -1) — giving up")
+            if !quiet { print("[mouseless] AX step 2 fallback B (AXWindows[0]): err=\(axErrName(windowsErr)) count=\((windowsRef as? [AXUIElement])?.count ?? -1) — giving up") }
             return nil
         }
-        print("[mouseless] AX step 2 fallback B (AXWindows[0]): ok, \(windows.count) windows total")
+        if !quiet { print("[mouseless] AX step 2 fallback B (AXWindows[0]): ok, \(windows.count) windows total") }
         return (first, pid)
     }
 
