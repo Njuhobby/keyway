@@ -51,7 +51,7 @@ enum ScrollAreaDetector {
                 if let r, ok {
                     out.append(Area(rect: r))
                 } else {
-                    print("[mouseless] scroll: \(role) rejected (rect=\(r.map { "\(Int($0.width))x\(Int($0.height))" } ?? "nil"))")
+                    Log.debug("[mouseless] scroll: \(role) rejected (rect=\(r.map { "\(Int($0.width))x\(Int($0.height))" } ?? "nil"))")
                 }
                 // Don't descend into a found scroll area — nested scroll
                 // areas are rare and descending walks the (potentially
@@ -79,7 +79,7 @@ enum ScrollAreaDetector {
                 guard let roles = seenRoles[d], !roles.isEmpty else { return nil }
                 return "d\(d)=[\(roles.sorted().joined(separator: ","))]"
             }.joined(separator: " ")
-            print("[mouseless] scroll: 0 areas — AX role census: \(census.isEmpty ? "(empty tree)" : census)")
+            Log.debug("[mouseless] scroll: 0 areas — AX role census: \(census.isEmpty ? "(empty tree)" : census)")
         }
         return deduped
     }

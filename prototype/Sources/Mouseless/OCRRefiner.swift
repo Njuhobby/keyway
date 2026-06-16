@@ -43,7 +43,7 @@ enum OCRRefiner {
         do {
             try handler.perform([request])
         } catch {
-            print("[mouseless] OCR recognizeText failed: \(error)")
+            Log.warn("[mouseless] OCR recognizeText failed: \(error)")
             return []
         }
         return (request.results ?? []) as [VNRecognizedTextObservation]
@@ -81,7 +81,7 @@ enum OCRRefiner {
         // Saves ~60-90ms on the common case + avoids OCR misrouting.
         let centerInInner = innerBoxes.contains { $0.contains(center) }
         if !centerInInner {
-            print("[mouseless] OCR refiner: center-no-conflict, skip OCR — point=(\(Int(center.x)),\(Int(center.y)))")
+            Log.debug("[mouseless] OCR refiner: center-no-conflict, skip OCR — point=(\(Int(center.x)),\(Int(center.y)))")
             return center
         }
 
@@ -99,7 +99,7 @@ enum OCRRefiner {
         // (single user-initiated event) and we already accept similar
         // latency on the hint-mode entry path.
         guard let captured = await ScreenCapture.captureFocusedWindow() else {
-            print("[mouseless] OCR refiner: screen recapture nil — fallback to box center")
+            Log.debug("[mouseless] OCR refiner: screen recapture nil — fallback to box center")
             return fallback
         }
         let image = captured.image
@@ -111,7 +111,7 @@ enum OCRRefiner {
         // accidentally clicking another window). Falling back to box
         // center is safer than OCRing the wrong window's pixels.
         guard windowRect.intersects(boxScreenRect) else {
-            print("[mouseless] OCR refiner: box outside current window — fallback to box center")
+            Log.debug("[mouseless] OCR refiner: box outside current window — fallback to box center")
             return fallback
         }
 
@@ -130,7 +130,7 @@ enum OCRRefiner {
         let imageBounds = CGRect(x: 0, y: 0, width: image.width, height: image.height)
         let clampedBoxInPx = boxInPx.intersection(imageBounds).integral
         guard let crop = image.cropping(to: clampedBoxInPx) else {
-            print("[mouseless] OCR refiner: crop failed (rect=\(clampedBoxInPx)) — fallback")
+            Log.warn("[mouseless] OCR refiner: crop failed (rect=\(clampedBoxInPx)) — fallback")
             return fallback
         }
 
@@ -159,7 +159,7 @@ enum OCRRefiner {
         do {
             try handler.perform([request])
         } catch {
-            print("[mouseless] OCR refiner: perform failed (\(error)) — fallback")
+            Log.warn("[mouseless] OCR refiner: perform failed (\(error)) — fallback")
             return fallback
         }
 
@@ -253,7 +253,7 @@ enum OCRRefiner {
         let tEnd = Date()
 
         let ms = { (a: Date, b: Date) in Int(b.timeIntervalSince(a) * 1000) }
-        print("[mouseless] OCR refiner: cap=\(ms(tStart, tCap))ms ocr=\(ms(tCap, tOCR))ms total=\(ms(tStart, tEnd))ms regions=\(textRegions.count) mode=\(mode) point=(\(Int(clickPoint.x)),\(Int(clickPoint.y)))")
+        Log.debug("[mouseless] OCR refiner: cap=\(ms(tStart, tCap))ms ocr=\(ms(tCap, tOCR))ms total=\(ms(tStart, tEnd))ms regions=\(textRegions.count) mode=\(mode) point=(\(Int(clickPoint.x)),\(Int(clickPoint.y)))")
         return clickPoint
     }
 

@@ -46,7 +46,7 @@ enum OmniParserPath {
         let tStart = Date()
 
         guard let captured = await ScreenCapture.captureFocusedWindow(isolateApp: isolateApp) else {
-            print("[mouseless] OP: ScreenCapture returned nil — skipping inference")
+            Log.warn("[mouseless] OP: ScreenCapture returned nil — skipping inference")
             return []
         }
         let tCapture = Date()
@@ -55,7 +55,7 @@ enum OmniParserPath {
         do {
             detections = try await OmniParserModel.infer(image: captured.image)
         } catch {
-            print("[mouseless] OP: inference error: \(error)")
+            Log.error("[mouseless] OP: inference error: \(error)")
             return []
         }
         let tInfer = Date()
@@ -96,7 +96,7 @@ enum OmniParserPath {
         let tMap = Date()
 
         let ms = { (a: Date, b: Date) in Int(b.timeIntervalSince(a) * 1000) }
-        print("[mouseless] OP timings: capture=\(ms(tStart, tCapture))ms infer=\(ms(tCapture, tInfer))ms filter=\(ms(tInfer, tFilter))ms map=\(ms(tFilter, tMap))ms total=\(ms(tStart, tMap))ms raw=\(detections.count) → \(candidates.count)")
+        Log.debug("[mouseless] OP timings: capture=\(ms(tStart, tCapture))ms infer=\(ms(tCapture, tInfer))ms filter=\(ms(tInfer, tFilter))ms map=\(ms(tFilter, tMap))ms total=\(ms(tStart, tMap))ms raw=\(detections.count) → \(candidates.count)")
         return candidates
     }
 
@@ -224,7 +224,7 @@ enum OmniParserPath {
             CGImageDestinationAddImage(dest, outImage, nil)
             _ = CGImageDestinationFinalize(dest)
             let ms = Int(Date().timeIntervalSince(t0) * 1000)
-            print("[mouseless] OP debug overlay: \(ms)ms → \(path)")
+            Log.debug("[mouseless] OP debug overlay: \(ms)ms → \(path)")
         }
     }
 }

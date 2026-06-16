@@ -42,6 +42,11 @@ user does **zero setup**. On quit it restores Caps Lock's original behavior.
 `main.swift` uses `setActivationPolicy(.accessory)` — no Dock icon, and it
 doesn't steal focus.
 
+Logging is quiet by default (errors + warnings only). Set
+`MOUSELESS_LOG=debug` for the full per-operation diagnostics (scan timings,
+AX walk steps, settle-watch polls, …); `info` / `warn` / `error` pick other
+thresholds. See `Log.swift`.
+
 ---
 
 ## 2. Permissions

@@ -40,10 +40,10 @@ enum TriggerRemap {
     static func applyAtLaunch() -> Bool {
         let ok = runHIDUtil(arguments: ["property", "--set", applyJSON])
         if ok {
-            print("[mouseless] Caps Lock → F19 remap applied via hidutil.")
+            Log.debug("[mouseless] Caps Lock → F19 remap applied via hidutil.")
         } else {
-            print("[mouseless] WARNING: hidutil remap failed. Caps Lock won't trigger Mouseless.")
-            print("           Run `./setup-trigger.sh` manually, or check that /usr/bin/hidutil exists.")
+            Log.warn("[mouseless] WARNING: hidutil remap failed. Caps Lock won't trigger Mouseless.")
+            Log.warn("           Run `./setup-trigger.sh` manually, or check that /usr/bin/hidutil exists.")
         }
         return ok
     }

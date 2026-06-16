@@ -58,11 +58,11 @@ enum ScreenCapture {
     static func captureFocusedWindow(isolateApp: Bool = false) async -> Captured? {
         let tStart = Date()
         guard let (windowEl, pid) = focusedWindow() else {
-            print("[mouseless] ScreenCapture: no focused window (AX chain returned nil)")
+            Log.error("[mouseless] ScreenCapture: no focused window (AX chain returned nil)")
             return nil
         }
         guard let windowRectInAX = windowRect(windowEl) else {
-            print("[mouseless] ScreenCapture: window has no AXPosition/AXSize")
+            Log.debug("[mouseless] ScreenCapture: window has no AXPosition/AXSize")
             return nil
         }
         let tAX = Date()
@@ -72,7 +72,7 @@ enum ScreenCapture {
         // User must grant + restart the app — there's no "wait for grant"
         // API. So this attempt fails; next trigger after restart works.
         guard CGPreflightScreenCaptureAccess() else {
-            print("[mouseless] ScreenCapture: requesting Screen Recording permission")
+            Log.warn("[mouseless] ScreenCapture: requesting Screen Recording permission")
             _ = CGRequestScreenCaptureAccess()
             return nil
         }
@@ -102,7 +102,7 @@ enum ScreenCapture {
                 guard let d = content.displays.first(where: {
                     $0.frame.intersects(windowRectInAX)
                 }) else {
-                    print("[mouseless] ScreenCapture: no SCDisplay contains the focused window")
+                    Log.debug("[mouseless] ScreenCapture: no SCDisplay contains the focused window")
                     return nil
                 }
                 display = d
@@ -111,7 +111,7 @@ enum ScreenCapture {
                 }) {
                     filter = SCContentFilter(display: d, excludingApplications: [dockApp], exceptingWindows: [])
                 } else {
-                    print("[mouseless] ScreenCapture: Dock app not found — full-display fallback")
+                    Log.debug("[mouseless] ScreenCapture: Dock app not found — full-display fallback")
                     filter = SCContentFilter(display: d, excludingWindows: [])
                 }
             } else {
@@ -119,7 +119,7 @@ enum ScreenCapture {
                 guard let d = displays.first(where: {
                     $0.frame.intersects(windowRectInAX)
                 }) else {
-                    print("[mouseless] ScreenCapture: no SCDisplay contains the focused window")
+                    Log.debug("[mouseless] ScreenCapture: no SCDisplay contains the focused window")
                     return nil
                 }
                 display = d
@@ -181,16 +181,16 @@ enum ScreenCapture {
                 height: floor(clampedInPoints.height * scale)
             )
             guard let cropped = displayImage.cropping(to: cropInPixels) else {
-                print("[mouseless] ScreenCapture: crop failed (rect=\(cropInPixels) image=\(displayImage.width)×\(displayImage.height))")
+                Log.error("[mouseless] ScreenCapture: crop failed (rect=\(cropInPixels) image=\(displayImage.width)×\(displayImage.height))")
                 return nil
             }
             let tCrop = Date()
 
             let ms = { (a: Date, b: Date) in Int(b.timeIntervalSince(a) * 1000) }
-            print("[mouseless] ScreenCapture timings: ax=\(ms(tStart, tAX))ms enum=\(ms(tAX, tEnum))ms filter=\(ms(tEnum, tFilter))ms capture=\(ms(tFilter, tCap))ms crop=\(ms(tCap, tCrop))ms total=\(ms(tStart, tCrop))ms isolateApp=\(isolateApp) display=\(displayImage.width)×\(displayImage.height) crop=\(cropped.width)×\(cropped.height)")
+            Log.debug("[mouseless] ScreenCapture timings: ax=\(ms(tStart, tAX))ms enum=\(ms(tAX, tEnum))ms filter=\(ms(tEnum, tFilter))ms capture=\(ms(tFilter, tCap))ms crop=\(ms(tCap, tCrop))ms total=\(ms(tStart, tCrop))ms isolateApp=\(isolateApp) display=\(displayImage.width)×\(displayImage.height) crop=\(cropped.width)×\(cropped.height)")
             return Captured(image: cropped, screenRect: windowRectInAX)
         } catch {
-            print("[mouseless] ScreenCapture failed: \(error.localizedDescription)")
+            Log.error("[mouseless] ScreenCapture failed: \(error.localizedDescription)")
             return nil
         }
     }
@@ -284,10 +284,10 @@ enum ScreenCapture {
     private static func cachedDisplays(quiet: Bool = false) async throws -> [SCDisplay] {
         installScreenChangeObserverIfNeeded()
         if let cached = cachedDisplaysValue {
-            if !quiet { print("[mouseless] ScreenCapture: cache HIT (\(cached.count) displays)") }
+            if !quiet { Log.debug("[mouseless] ScreenCapture: cache HIT (\(cached.count) displays)") }
             return cached
         }
-        if !quiet { print("[mouseless] ScreenCapture: cache MISS, querying SCShareableContent") }
+        if !quiet { Log.debug("[mouseless] ScreenCapture: cache MISS, querying SCShareableContent") }
         let content = try await SCShareableContent.excludingDesktopWindows(
             false, onScreenWindowsOnly: true
         )
@@ -310,7 +310,7 @@ enum ScreenCapture {
             // runs on the main queue so we can just touch it.
             MainActor.assumeIsolated {
                 ScreenCapture.cachedDisplaysValue = nil
-                print("[mouseless] ScreenCapture: display config changed, cache invalidated")
+                Log.debug("[mouseless] ScreenCapture: display config changed, cache invalidated")
             }
         }
     }
@@ -325,7 +325,7 @@ enum ScreenCapture {
         Task { @MainActor in
             let t0 = Date()
             guard let captured = await captureFocusedWindow() else {
-                print("[mouseless] debug capture: returned nil (see preceding log)")
+                Log.debug("[mouseless] debug capture: returned nil (see preceding log)")
                 return
             }
             let image = captured.image
@@ -335,14 +335,14 @@ enum ScreenCapture {
             guard let dest = CGImageDestinationCreateWithURL(
                 url as CFURL, "public.png" as CFString, 1, nil
             ) else {
-                print("[mouseless] debug capture: failed to open \(path)")
+                Log.debug("[mouseless] debug capture: failed to open \(path)")
                 return
             }
             CGImageDestinationAddImage(dest, image, nil)
             if CGImageDestinationFinalize(dest) {
-                print("[mouseless] debug capture: \(image.width)×\(image.height) in \(elapsed)ms → \(path)")
+                Log.debug("[mouseless] debug capture: \(image.width)×\(image.height) in \(elapsed)ms → \(path)")
             } else {
-                print("[mouseless] debug capture: write failed")
+                Log.debug("[mouseless] debug capture: write failed")
             }
         }
     }
@@ -361,12 +361,12 @@ enum ScreenCapture {
         // Step 1: frontmost app via NSWorkspace (reliable on Electron;
         // AXFocusedApplication was not — see FocusedApp.swift).
         guard let (app, pid) = FocusedApp.current() else {
-            if !quiet { print("[mouseless] AX step 1 (frontmost app): NSWorkspace returned nil") }
+            if !quiet { Log.debug("[mouseless] AX step 1 (frontmost app): NSWorkspace returned nil") }
             return nil
         }
         if !quiet {
             let bundleID = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier ?? "?"
-            print("[mouseless] AX step 1 ok: pid=\(pid) bundleID=\(bundleID)")
+            Log.debug("[mouseless] AX step 1 ok: pid=\(pid) bundleID=\(bundleID)")
         }
 
         // Step 2: AXFocusedWindow, with fallbacks for apps that don't
@@ -377,10 +377,10 @@ enum ScreenCapture {
             app, "AXFocusedWindow" as CFString, &winRef
         )
         if winErr == .success, let winRaw = winRef {
-            if !quiet { print("[mouseless] AX step 2 (AXFocusedWindow): ok") }
+            if !quiet { Log.debug("[mouseless] AX step 2 (AXFocusedWindow): ok") }
             return (winRaw as! AXUIElement, pid)
         }
-        if !quiet { print("[mouseless] AX step 2 (AXFocusedWindow): err=\(axErrName(winErr)) nil=\(winRef == nil) — trying fallbacks") }
+        if !quiet { Log.debug("[mouseless] AX step 2 (AXFocusedWindow): err=\(axErrName(winErr)) nil=\(winRef == nil) — trying fallbacks") }
 
         // Fallback A: AXMainWindow (set on app launch, doesn't need key state)
         var mainRef: CFTypeRef?
@@ -388,7 +388,7 @@ enum ScreenCapture {
             app, "AXMainWindow" as CFString, &mainRef
         )
         if mainErr == .success, let mainRaw = mainRef {
-            if !quiet { print("[mouseless] AX step 2 fallback A (AXMainWindow): ok") }
+            if !quiet { Log.debug("[mouseless] AX step 2 fallback A (AXMainWindow): ok") }
             return (mainRaw as! AXUIElement, pid)
         }
 
@@ -401,10 +401,10 @@ enum ScreenCapture {
               let windows = windowsRef as? [AXUIElement],
               let first = windows.first
         else {
-            if !quiet { print("[mouseless] AX step 2 fallback B (AXWindows[0]): err=\(axErrName(windowsErr)) count=\((windowsRef as? [AXUIElement])?.count ?? -1) — giving up") }
+            if !quiet { Log.debug("[mouseless] AX step 2 fallback B (AXWindows[0]): err=\(axErrName(windowsErr)) count=\((windowsRef as? [AXUIElement])?.count ?? -1) — giving up") }
             return nil
         }
-        if !quiet { print("[mouseless] AX step 2 fallback B (AXWindows[0]): ok, \(windows.count) windows total") }
+        if !quiet { Log.debug("[mouseless] AX step 2 fallback B (AXWindows[0]): ok, \(windows.count) windows total") }
         return (first, pid)
     }
 

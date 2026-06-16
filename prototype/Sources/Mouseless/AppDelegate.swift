@@ -38,7 +38,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             OmniParserModel.preload()
 
             if OmniParserPath.debugOverlayEnabled {
-                print("[mouseless] DEBUG overlay enabled (MOUSELESS_DEBUG_OVERLAY=1) — /tmp/mouseless-focused.png written on every OP scan, +30-80ms background")
+                Log.debug("[mouseless] DEBUG overlay enabled (MOUSELESS_DEBUG_OVERLAY=1) — /tmp/mouseless-focused.png written on every OP scan, +30-80ms background")
             }
 
             // Browser-extension bridge. Incoming messages:
@@ -108,15 +108,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         } else {
             statusItem.button?.title = "M⚠"
-            print("[mouseless] Required permissions not granted:")
+            Log.error("[mouseless] Required permissions not granted:")
             if !axOK {
-                print("  • Accessibility — System Settings → Privacy & Security → Accessibility")
+                Log.error("  • Accessibility — System Settings → Privacy & Security → Accessibility")
             }
             if !screenOK {
-                print("  • Screen Recording — System Settings → Privacy & Security → Screen Recording")
+                Log.error("  • Screen Recording — System Settings → Privacy & Security → Screen Recording")
             }
-            print("  Enable 'Mouseless' (or the swift binary path) for the above,")
-            print("  then fully quit this process and rerun `swift run`.")
+            Log.error("  Enable 'Mouseless' (or the swift binary path) for the above,")
+            Log.error("  then fully quit this process and rerun `swift run`.")
         }
     }
 
@@ -174,7 +174,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             session = newSession
             tap = newTap
             statusItem.button?.title = "M●"
-            print("[mouseless] running. Press Caps Lock to enter vim mode.")
+            Log.info("[mouseless] running. Press Caps Lock to enter vim mode.")
         } else {
             statusItem.button?.title = "M⚠"
         }

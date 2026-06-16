@@ -63,26 +63,26 @@ enum BrowserProvider {
         // In either case, no extension to ask → accept 0 hints.
         guard BridgeServer.shared.sendToActive(["cmd": "list_hints"],
                                                 expectingBrowserBundleID: bundleID) else {
-            print("[browser-provider] no matching extension connection — 0 hints")
+            Log.debug("[browser-provider] no matching extension connection — 0 hints")
             return []
         }
         guard let response = await BridgeServer.shared.awaitResponse(
             ofType: "hints",
             timeout: timeout
         ) else {
-            print("[browser-provider] timeout waiting for hints (>\(Int(timeout * 1000))ms) — 0 hints")
+            Log.debug("[browser-provider] timeout waiting for hints (>\(Int(timeout * 1000))ms) — 0 hints")
             return []
         }
         if let err = response["error"] as? String {
-            print("[browser-provider] extension reported error=\(err) — accepting 0 hints")
+            Log.debug("[browser-provider] extension reported error=\(err) — accepting 0 hints")
             return []
         }
         guard let rawHints = response["hints"] as? [[String: Any]] else {
-            print("[browser-provider] malformed response (no 'hints' array) — 0 hints")
+            Log.debug("[browser-provider] malformed response (no 'hints' array) — 0 hints")
             return []
         }
         let hints = rawHints.compactMap { Hint(rawDict: $0) }
-        print("[browser-provider] received \(hints.count) hints from extension")
+        Log.debug("[browser-provider] received \(hints.count) hints from extension")
         return hints
     }
 }
@@ -117,7 +117,7 @@ extension BrowserProvider {
               let w = num("w"), let h = num("h"),
               w > 0, h > 0 else { return nil }
         let source = (response["source"] as? String) ?? "?"
-        print("[browser-provider] find_first_input → (\(Int(x)),\(Int(y))) \(Int(w))x\(Int(h)) source=\(source)")
+        Log.debug("[browser-provider] find_first_input → (\(Int(x)),\(Int(y))) \(Int(w))x\(Int(h)) source=\(source)")
         return CGRect(x: x, y: y, width: w, height: h)
     }
 
@@ -142,22 +142,22 @@ extension BrowserProvider {
             ["cmd": "find_text", "query": query],
             expectingBrowserBundleID: bundleID
         ) else {
-            print("[browser-provider] find_text: no matching extension connection — 0 matches")
+            Log.debug("[browser-provider] find_text: no matching extension connection — 0 matches")
             return []
         }
         guard let response = await BridgeServer.shared.awaitResponse(
             ofType: "text_matches", timeout: timeout
         ) else {
-            print("[browser-provider] find_text: timeout (>\(Int(timeout * 1000))ms)")
+            Log.debug("[browser-provider] find_text: timeout (>\(Int(timeout * 1000))ms)")
             return []
         }
         if let err = response["error"] as? String {
-            print("[browser-provider] find_text: extension error=\(err)")
+            Log.debug("[browser-provider] find_text: extension error=\(err)")
             return []
         }
         guard let raw = response["matches"] as? [[String: Any]] else { return [] }
         let matches = raw.compactMap { TextMatch(rawDict: $0) }
-        print("[browser-provider] find_text q=\"\(query)\" → \(matches.count) matches")
+        Log.debug("[browser-provider] find_text q=\"\(query)\" → \(matches.count) matches")
         return matches
     }
 }

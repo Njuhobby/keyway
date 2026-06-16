@@ -111,7 +111,7 @@ final class BridgeServer: @unchecked Sendable {
 
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else {
-            print("[bridge] socket() failed errno=\(errno)")
+            Log.error("[bridge] socket() failed errno=\(errno)")
             return
         }
         var one: Int32 = 1
@@ -122,7 +122,7 @@ final class BridgeServer: @unchecked Sendable {
         let pathBytes = Array(path.utf8)
         let pathCapacity = MemoryLayout.size(ofValue: addr.sun_path)
         guard pathBytes.count < pathCapacity else {
-            print("[bridge] socket path too long (\(pathBytes.count) >= \(pathCapacity)): \(path)")
+            Log.debug("[bridge] socket path too long (\(pathBytes.count) >= \(pathCapacity)): \(path)")
             close(fd)
             return
         }
@@ -140,18 +140,18 @@ final class BridgeServer: @unchecked Sendable {
             }
         }
         guard bindResult == 0 else {
-            print("[bridge] bind() failed errno=\(errno) path=\(path)")
+            Log.error("[bridge] bind() failed errno=\(errno) path=\(path)")
             close(fd)
             return
         }
         guard listen(fd, 8) == 0 else {
-            print("[bridge] listen() failed errno=\(errno)")
+            Log.error("[bridge] listen() failed errno=\(errno)")
             close(fd)
             return
         }
 
         listenFD = fd
-        print("[bridge] listening on \(path)")
+        Log.debug("[bridge] listening on \(path)")
         acceptQueue.async { [weak self] in
             self?.acceptLoop()
         }
@@ -175,13 +175,13 @@ final class BridgeServer: @unchecked Sendable {
                 // EBADF here means stop() closed the listening socket
                 // — clean shutdown, not an error.
                 if errno != EBADF {
-                    print("[bridge] accept() failed errno=\(errno)")
+                    Log.warn("[bridge] accept() failed errno=\(errno)")
                 }
                 return
             }
             var one: Int32 = 1
             _ = setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
-            print("[bridge] client connected fd=\(client)")
+            Log.debug("[bridge] client connected fd=\(client)")
             // Don't set activeFD on accept any more. Multiple browsers /
             // profiles can connect concurrently; only one is the user's
             // current frontmost. The client itself signals that via
@@ -202,7 +202,7 @@ final class BridgeServer: @unchecked Sendable {
             if wasActive { activeFD = -1 }
             clientIdentities[client] = nil
             stateLock.unlock()
-            print("[bridge] client disconnected fd=\(client)")
+            Log.debug("[bridge] client disconnected fd=\(client)")
             // If the focused browser's bridge dropped, kill any in-flight
             // page scroll — its "stop" message can no longer arrive.
             if wasActive { onActiveClientDisconnect?() }
@@ -215,14 +215,14 @@ final class BridgeServer: @unchecked Sendable {
             // pages (e.g., GitHub PR diff with many comments) can run
             // 200-500 KB; 1 MB was fine for ping but tight for hints.
             if len == 0 || len > 16 * 1024 * 1024 {
-                print("[bridge] bad message length \(len) fd=\(client) — closing")
+                Log.warn("[bridge] bad message length \(len) fd=\(client) — closing")
                 return
             }
             var body = [UInt8](repeating: 0, count: Int(len))
             guard readFull(client, into: &body, count: Int(len)) else { return }
             let data = Data(body)
             guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                print("[bridge] bad JSON fd=\(client)")
+                Log.warn("[bridge] bad JSON fd=\(client)")
                 return
             }
             // Cheap log line: full dict for small messages, type+size
@@ -237,7 +237,7 @@ final class BridgeServer: @unchecked Sendable {
                 } else {
                     preview = "\(obj["type"] ?? obj["cmd"] ?? "?") (\(body.count) bytes)"
                 }
-                print("[bridge] recv fd=\(client) msg=\(preview)")
+                Log.debug("[bridge] recv fd=\(client) msg=\(preview)")
             }
 
             // If this message is a response someone is awaiting
@@ -265,7 +265,7 @@ final class BridgeServer: @unchecked Sendable {
                 let identity = clientIdentities[client]
                 stateLock.unlock()
                 if prev != client {
-                    print("[bridge] activeFD ← fd=\(client) browser=\(identity?.browser ?? "?")")
+                    Log.debug("[bridge] activeFD ← fd=\(client) browser=\(identity?.browser ?? "?")")
                 }
                 continue
             }
@@ -281,13 +281,13 @@ final class BridgeServer: @unchecked Sendable {
                 stateLock.lock()
                 clientIdentities[client] = ClientIdentity(browser: browser)
                 stateLock.unlock()
-                print("[bridge] client identity fd=\(client) browser=\(browser)")
+                Log.debug("[bridge] client identity fd=\(client) browser=\(browser)")
             }
 
             self.handler(obj) { [weak self] reply in
                 guard let self else { return }
                 guard let replyData = try? JSONSerialization.data(withJSONObject: reply) else {
-                    print("[bridge] reply serialization failed")
+                    Log.error("[bridge] reply serialization failed")
                     return
                 }
                 self.writeMessage(client: client, data: replyData)
@@ -319,7 +319,7 @@ final class BridgeServer: @unchecked Sendable {
             let expected = Self.browserKeyForBundleID(bundleID)
             if let identityBrowser = identity?.browser,
                expected != identityBrowser {
-                print("[bridge] sendToActive: bundleID=\(bundleID) wants browser=\(expected) but activeFD=\(fd) is browser=\(identityBrowser) — refusing")
+                Log.warn("[bridge] sendToActive: bundleID=\(bundleID) wants browser=\(expected) but activeFD=\(fd) is browser=\(identityBrowser) — refusing")
                 return false
             }
         }

@@ -68,9 +68,9 @@ enum OmniParserModel {
             do {
                 _ = try loadModel()
                 let ms = Int(Date().timeIntervalSince(t0) * 1000)
-                print("[mouseless] OmniParser model preloaded in \(ms)ms")
+                Log.debug("[mouseless] OmniParser model preloaded in \(ms)ms")
             } catch {
-                print("[mouseless] OmniParser preload failed: \(error)")
+                Log.error("[mouseless] OmniParser preload failed: \(error)")
             }
         }
     }
@@ -136,7 +136,7 @@ enum OmniParserModel {
         let tParse = Date()
 
         let ms = { (a: Date, b: Date) in Int(b.timeIntervalSince(a) * 1000) }
-        print("[mouseless] OmniParser inference: load=\(ms(tStart, tLoad))ms infer=\(ms(tLoad, tInfer))ms parse=\(ms(tInfer, tParse))ms detections=\(detections.count)")
+        Log.debug("[mouseless] OmniParser inference: load=\(ms(tStart, tLoad))ms infer=\(ms(tLoad, tInfer))ms parse=\(ms(tInfer, tParse))ms detections=\(detections.count)")
         return detections
     }
 
