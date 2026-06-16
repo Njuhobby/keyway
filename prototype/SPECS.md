@@ -5,8 +5,7 @@
 **读这一份**：项目定位、怎么跑、顶层架构、文件职责、关键权衡。
 **子文档**：具体 subsystem 的实现细节和踩坑记录，见 [§ 5 文档地图](#5-文档地图)。
 
-差异点（vs Homerow）：Electron 支持 + 多 mode / 子状态架构（DRAG + `/`-搜索 + SCROLL + WINDOW resize/move 已落；未来 select-text）是 wedge。
-hint mode 本身只是 MVP 基线。详见 `memory/competitor_homerow.md`、`memory/feedback_priorities.md`。
+覆盖范围：原生 AX walk + Electron/WebView 的 OmniParser 视觉兜底 + 浏览器扩展 DOM hint；多 mode / 子状态架构（DRAG + `/`-搜索 + SCROLL + WINDOW resize/move 已落；未来 select-text）。
 
 ---
 
@@ -36,10 +35,11 @@ cd prototype
 
 ## 2. 权限
 
-**只依赖 Accessibility。** 不需要 Screen Recording、不需要 Input Monitoring。
+**硬性依赖 Accessibility + Screen Recording**（启动时两个都 gate，缺任一不启动）。不需要 Input Monitoring。
 
-- 第一次启动会弹 AX 授权对话框（`AXIsProcessTrustedWithOptions` + `kAXTrustedCheckOptionPrompt`）。
-- 授权后必须**完全退出**并重启进程才能生效（系统不会热加载权限）。
+- **Accessibility**：读 AX 树 + 合成点击/按键。**Screen Recording**：OmniParser 视觉兜底 + 内容 settle watch 的低分辨率小图截屏（见 `specs/modes.md` 机制 1/2、`specs/omniparser-fallback-design.md`）。
+- 第一次启动两个授权对话框都弹（`AXIsProcessTrustedWithOptions` + `kAXTrustedCheckOptionPrompt`；`CGRequestScreenCaptureAccess`）。
+- 授权后必须**完全退出**并重启进程才能生效（系统不会热加载权限；Screen Recording 尤其是按进程缓存）。
 - 从 kitty / iTerm 启动 `./run.sh` 时：TCC 的 responsible process 是 terminal，权限挂 terminal 上；
   双击 `.app` 才会以 Mouseless 自身为 responsible process。开发期走 terminal 路径。
 
@@ -192,9 +192,8 @@ NSApplication
 | [`specs/hint-rendering.md`](specs/hint-rendering.md) | 标签生成、typing → commit、**统一合成点击**（AX action 已弃）、`HintOverlay` 多屏窗口、坐标系转换、badge 排版（inside / Dock / 级联）、HUD |
 | [`specs/omniparser-fallback-design.md`](specs/omniparser-fallback-design.md) | **已实现 (P5-P6)**：OP 视觉路径，OP-default + AX whitelist 路由（非 fall-through）；baseline 过滤；OCR click-point refiner（§4.6）；PoC 数据；captioner 搁置 |
 | [`specs/omniparser-integration-roadmap.md`](specs/omniparser-integration-roadmap.md) | **实施路线图**：P0-P6 已完成（CoreML spike → 截屏 → 路由 → 集成 → 端到端 → OCR refiner），P7（数据调参）/ P8（发布）待做 |
-| [`specs/per-app-correction-design.md`](specs/per-app-correction-design.md) | **设计草稿，未实现 —— 主要护城河**：per-app **AX walker 覆写**（声明式 JSON predicate，把长尾 app 怪异 AX 树翻译成可点元素）为主力，OP 为 fallback，NCC 模板匹配降级到附录（大概率永不做）。含 L0→L2 社区飞轮 + 治理 + teach 闭环 |
+| [`specs/per-app-correction-design.md`](specs/per-app-correction-design.md) | **设计草稿，未实现**：per-app **AX walker 覆写**（声明式 JSON predicate，把长尾 app 怪异 AX 树翻译成可点元素）为主力，OP 为 fallback，NCC 模板匹配降级到附录（大概率永不做）。含 L0→L2 社区飞轮 + 治理 + teach 闭环 |
 | [`specs/browser-support-design.md`](specs/browser-support-design.md) | **P0–P4 实现完成**（Chrome）：扩展 + Native Messaging Host + `BridgeServer`/`BrowserProvider` 打通 DOM 级 HINT；多 profile / 多浏览器路由 + `tab_changed` + 异步加载 `page_changed` 全在线；浏览器路径自治，**不 fallback 到 OP**。P5 Safari + 上架待做 |
-| [`specs/licensing-design.md`](specs/licensing-design.md) | **设计草稿，未实现 —— 上线收费前必做**：年付订阅。Merchant of Record（Lemon Squeezy）接管注册/登录/invoice/税务/license key/seat 限制；自建薄后端发 Ed25519 签名 entitlement token（离线可验 + 订阅失效会停）。seat=1、离线宽限 2 天、14 天 trial、不做侵入式反盗版。含 E2E 测试策略（时间压缩 hooks + 三层测试）|
 | [`specs/settings-design.md`](specs/settings-design.md) | **设计草稿，未实现 —— 上线前**：菜单栏 "Settings…"（Cmd+,）配置面板。v1 做值型（光标/滚动/窗口速度、双击阈值、跳屏距离）+ 主题色 + trigger 预设 + 开机自启；存 UserDefaults（默认值=当前硬编码，零风险）、live-apply。自定义键位映射推 v2（绑非 QWERTY 重构）|
 
 ---
@@ -230,7 +229,7 @@ NSApplication
    迁移路径：用 `UCKeyTranslate` / `CGEventKeyboardGetUnicodeString` 把 keyCode + flags 映射到字符再匹配。
 2. **浏览器 HINT（Chrome）—— P0-P4 已实现**。扩展（detector.js 改写 Vimium 规则、iframe 协调走 postMessage 链、shadow DOM 递归）+ 长连接 native messaging（背景 SW + bridge CLI）+ Mouseless 端 `BrowserProvider` 接进 `HintMode`。配套补丁：多 profile / 多浏览器 `i_am_active` 路由、`tab_changed` 信号修同窗口切 tab 盲点、MutationObserver-based `page_changed` 修异步加载、`navigation_complete` 信号修整页跳转后的刷新、anchor link commit 跳过 100ms post-commit rehint、SW 启动主动 inject 已开 tab、**`/`-search 在浏览器走 DOM TreeWalker 替代 OCR**（~10× 提速）、**app-switch cursor park 在浏览器走 DOM `activeElement` 替代 AX**。**浏览器路径自治不 fallback 到 OP**。**P5 Safari + Web Store / App Store 上架待做**。详见 [`specs/browser-support-design.md`](specs/browser-support-design.md)。
 
-3. **Electron / AX-bad app**（vs Homerow 的 wedge）—— **已实现 OmniParser 视觉路径 (P5-P6)**。
+3. **Electron / AX-bad app 覆盖** —— **已实现 OmniParser 视觉路径 (P5-P6)**。
    背景：Chromium 桥暴露什么取决于 app 的 ARIA 卫生，差的（WeChat、国产 SaaS）一片
    AXGroup 无 action；而且框架 ≠ AX 质量（WeChat 是 native AppKit 但聊天内容自渲染、AX 黑洞）。
    方案：**OP-default + AX whitelist 路由**——焦点窗口不在 `AppRegistry.AX_FOCUSED_WHITELIST`
@@ -255,8 +254,6 @@ NSApplication
 7. **多 hint 来源的标签空间冲突** —— 焦点 app 元素很多时会吃光字母组，menu extras 排到 `lj/lk/ll`。
    方案候选：menu extras 走单独的前缀（如 `;a`, `;s` …）或单独字母池。
 8. **Dock 分隔符 / Recents 占位过滤** —— 当前 Dock 把所有 `AXDockItem` 都收，包括分隔符。低价值的 hint 浪费标签。
-9. **Licensing / 订阅 / 激活（上线收费前必做）** —— 年付订阅。Merchant of Record（Lemon Squeezy）接管注册/登录/invoice/全球税务/license key/seat 限制；自建薄 serverless 后端发 Ed25519 签名 entitlement token（公钥内嵌 app，离线可验 + 订阅失效会停 + 防篡改）。seat=1、离线宽限 2 天、激活每 12h 静默 refresh、14 天 trial、换机自助 deactivate、不做侵入式反盗版。详见 [`specs/licensing-design.md`](specs/licensing-design.md)。
-10. **Settings 配置面板（上线前）** —— 菜单栏 "Settings…"（Cmd+,）。v1 做值型配置（光标/滚动/窗口速度的慢中快、双击阈值、跳屏距离）+ 主题色 + label 字号 + trigger 键预设 + 开机自启 + sticky 默认。存 UserDefaults（默认值 = 当前硬编码常量，没配过行为不变）、live-apply。各控制器里 `private let normalStep` 之类改读 `Settings.shared`。自定义键位映射推 v2（绑非 QWERTY 键盘布局重构，见 #1）。详见 [`specs/settings-design.md`](specs/settings-design.md)。
-11. **官网 + 上架（上线前）** —— 静态落地页（hero + **demo 视频**最关键 + 功能 + 价格 + FAQ + 隐私/条款），扔 Vercel/Netlify/CF Pages。购买按钮 = 跳 Lemon Squeezy hosted checkout（不在官网碰支付/Stripe，MoR 托管）；"管理订阅/发票" = 链 LS portal。App Store 上架 or 直接 notarized .dmg 分发（待定）。
-12. **改名（上线前，最先定）** —— "Mouseless" 已被占用。新名字渗透域名/官网/App Store/商标全链路，上线后改成本极高，应**最先确定**。约束：`.com`/`.app` 域名可得、App Store 无重名、商标无冲突、好拼好读、可搜索（不被通用词淹没）、无多语言负面歧义。
-13. **Apple Developer Program 注册（上线前，前置依赖）** —— $99/年。是**多个上线项的硬前置**：notarization（#9 反盗版靠 notarized + Gatekeeper、§licensing §8）、Developer ID 签名（直接 .dmg 分发必需）、App Store 上架（#11）都要它。个人 vs 公司账号需先定（公司账号要 D-U-N-S 号、审核更久 —— 收费卖软件 + 商标考虑建议公司主体，要预留申请时间）。注册 + D-U-N-S 有 lead time，应**尽早启动**，别卡在临上线。
+9. **Settings 配置面板** —— 菜单栏 "Settings…"（Cmd+,）。v1 做值型配置（光标/滚动/窗口速度的慢中快、双击阈值、跳屏距离）+ 主题色 + label 字号 + trigger 键预设 + 开机自启 + sticky 默认。存 UserDefaults（默认值 = 当前硬编码常量，没配过行为不变）、live-apply。各控制器里 `private let normalStep` 之类改读 `Settings.shared`。自定义键位映射推 v2（绑非 QWERTY 键盘布局重构，见 #1）。详见 [`specs/settings-design.md`](specs/settings-design.md)。
+10. **改名** —— "Mouseless" 这个名字已被别的项目占用，宜在更广泛发布前确定一个唯一名字（仓库/域名/可搜索性，不被通用词淹没）。
+11. **打包分发** —— 代码签名 + notarization（Developer ID，避免 Gatekeeper 拦截未签名 app），打 `.dmg` 或 Homebrew cask；可选一个带 **demo 视频**的简单落地页。notarization / Developer ID 签名需 Apple Developer Program（$99/年）。

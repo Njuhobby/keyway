@@ -1,90 +1,119 @@
-# mouseless
+# Mouseless
 
-> Throw away your mouse. For real this time.
+> Drive your Mac entirely from the keyboard.
 
-完整替代鼠标的 macOS 键盘操作层。不只点击——文字选择、拖拽、窗口、滚动、应用切换，全部用键盘。
+Mouseless is a macOS keyboard layer that lets you do with the keyboard what
+you'd normally reach for the mouse: click anything, scroll, drag, move and
+resize windows — without your hands leaving the home row.
 
----
+Press a trigger key, every clickable thing on screen gets a short letter
+label, you type the label, it clicks. The twist is **coverage**: Mouseless
+finds targets not just in native Cocoa apps (via the Accessibility API) but
+also inside Electron apps, web views and arbitrary pixels — by falling back
+to an on-device vision model — and inside web pages via a companion browser
+extension reading the DOM directly.
 
-## North Star
+> **Status: early prototype / research project.** It works and is usable
+> daily, but it is rough, unsigned, and the code lives under `prototype/`.
+> Expect sharp edges. Built in the open to share the approach.
 
-**Homerow 解决了"点哪里"，没解决"做什么"。mouseless 解决完整的鼠标替代。**
+<!-- TODO: demo GIF here — the single most important thing to add before sharing. -->
 
-杀手功能：**vim-style 文字选择**。这是 Homerow / Raycast / Apple Voice Control 都做不了的差异化锚点。
+## What it can do
 
----
+- **Hint mode** — label every clickable element, type the label to click
+  (left click, or right click with a modifier). The core interaction.
+- **Coverage beyond native AX** — Electron (Slack, VS Code, Discord),
+  WebViews and Catalyst apps expose almost nothing useful to the
+  Accessibility API. Mouseless fills that "AX black hole" with an on-device
+  [OmniParser](https://github.com/microsoft/OmniParser) vision model, and
+  hints web pages through a browser extension that reads the DOM.
+- **Scroll, window move/resize, drag** — separate keyboard modes, plus
+  Vimium-style modeless `d`/`u`/`gg`/`G` scrolling on real web pages.
+- **Follows you** — sticky mode re-hints as content loads, you switch apps,
+  or you change Spaces, by watching for the screen to settle.
 
-## 关键事实
+## How it works
 
-- 目标：18-24 个月内 $20K-60K MRR
-- 定价：$79/年 订阅（年付）/ $9.99/月
-- 主要对手：Homerow（1 人，估算 $20K-60K MRR）
-- 赛道窗口期：3-5 年（Apple Sherlock 之前）
-- 真实成功率（独立开发者）：5-10%（calibrated）
+Three hint sources, merged into one overlay:
 
-详细策略见 [`business-plan.md`](./business-plan.md)。
+1. **Accessibility walk** — for native macOS apps, walk the AX tree of the
+   focused window and collect clickable elements. Fast and pixel-perfect.
+2. **On-device vision fallback** — for AX-black-hole apps (Electron / web
+   views), capture the focused window and run a CoreML icon-detection model
+   to find clickable regions from pixels alone.
+3. **Browser extension** — for Chrome/Firefox, a content script runs a
+   Vimium-derived detector over the DOM and streams hint rects to the app
+   over a native-messaging bridge. Handles iframes and cross-Space follow.
 
----
+A couple of pieces that were interesting to build (see `prototype/specs/`):
 
-## 第 1 周（决策窗口）
+- **Cheap "wait for the screen to settle" detection.** Many rehints (after a
+  click, an app switch, a cross-Space slide) need to wait until the new
+  content has actually rendered — but there's no event for that. Instead of
+  guessing a fixed delay, Mouseless polls a tiny (64×36) grayscale
+  fingerprint of the window and rehints the moment two frames match. One
+  scan, timed to the content, not to a guess.
+- **Caps Lock as the trigger** without a kext: `hidutil` remaps Caps Lock to
+  F19 at the HID layer (macOS doesn't deliver Caps Lock as a normal keyDown),
+  applied on launch and reverted on quit.
 
-**目标**：用文字选择 prototype 验证技术可行性 + 测市场反应。
+## Requirements
 
-- [ ] Day 1-2：Swift + AppKit 项目骨架，注册全局快捷键
-- [ ] Day 3-4：调通 `AXSelectedTextRange` 在 Safari / Notes / Xcode 的读写
-- [ ] Day 5：实现最小 vim-mode（h/j/k/l 移动 + v 选择 + y 复制）
-- [ ] Day 6：录 30 秒 demo 视频（在 Safari 选中并复制一段引用）
-- [ ] Day 7：发到 X，配文 "Why Homerow isn't enough"
+- macOS 13 (Ventura) or later, Apple Silicon
+- A Swift toolchain (Xcode or the Swift command-line tools)
+- Two permissions, **both required** (granting either needs a restart to
+  take effect — macOS caches them per process):
+  - **Accessibility** — to read the AX tree and synthesize clicks/keys
+  - **Screen Recording** — for the vision fallback and the settle detection
 
-**决策点**：
-- demo 跑不通 → 调整路线或放弃
-- demo 跑通但 X 反响平平（< 5K 浏览，< 50 互动）→ 调整定位
-- demo 跑通且反响热烈（> 10K 浏览，等待名单 100+）→ 进入 6 个月 MVP 期
+## Build & run
 
----
-
-## 6 个自我评估问题
-
-决定要不要 all-in 之前先答：
-
-1. 以前发布过付费产品吗（哪怕 $1K MRR）？
-2. X / YouTube / 知乎有几千真实粉丝吗？
-3. 能拿出 18 个月生活费而不焦虑吗？
-4. 近 3 年有过持续 6 个月做无外部反馈的事吗？
-5. 身边有同行能商量产品决策吗？
-6. 你的痛点能在 30 个真实用户里复现吗？
-
-判定：
-- 4-6 个 Yes → 全职 all-in
-- 2-3 个 Yes → 兼职 12 周做 MVP demo 测水温
-- 0-1 个 Yes → 暂不做，先补短板
-
----
-
-## 联系 Dexter Leng（关键动作）
-
-Homerow + Vimac 同一作者，是这条赛道唯一走过完整周期的独立开发者。
-
-**强烈建议第 2-3 周写邮件给他**：`dexter@homerow.app`
-
-模板和理由见 business-plan.md 第 11 节。
-
----
-
-## 文件夹结构（建议）
-
-```
-mouseless/
-├── README.md              ← 你在这里
-├── business-plan.md       ← 完整战略文档
-├── prototype/             ← 第 1 周技术 spike（Xcode 项目）
-├── research/              ← 用户访谈、竞品分析、AX API 笔记
-├── content/               ← X 帖子草稿、demo 视频脚本
-└── decisions/             ← 关键决策记录（ADR 风格）
+```sh
+cd prototype
+./run.sh        # swift build + ad-hoc re-sign + (re)launch
 ```
 
----
+A `M` icon appears in the menu bar: `M●` ready, `M⚠` a permission is
+missing. Press **Caps Lock** to enter hint mode.
 
-## 下一步
+On first launch macOS prompts for the two permissions. Enable Mouseless in
+**System Settings → Privacy & Security** for both, fully quit, and rerun.
 
-打开 `business-plan.md`，对照第 9 节的 6 个问题给自己打分。先有诚实的自我判断，再决定要不要写第一行 Swift。
+> `run.sh` ad-hoc re-signs the binary so the permission grant survives
+> rebuilds, and Mouseless auto-remaps Caps Lock → F19 on launch and restores
+> it on quit. See [`prototype/SPECS.md`](prototype/SPECS.md) for the full
+> setup, the mode reference, and the architecture deep-dives under
+> `prototype/specs/`.
+
+### Browser extension (optional, for web-page hints)
+
+Load `prototype/extension/` as an unpacked extension (Chrome:
+`chrome://extensions` → Developer mode → Load unpacked; Firefox: build with
+`build-firefox.sh`, then load via `about:debugging`) and install the
+native-messaging host with the provided script. Without it, web pages still
+work through the vision fallback, just less precisely.
+
+## Permissions & privacy
+
+Mouseless runs entirely on your machine. **No telemetry, no network calls**
+other than the local socket between the app and the browser extension. The
+permissions are used only for what's described above; screen captures are
+processed in memory and not written to disk (outside an opt-in debug flag).
+
+## License
+
+**[AGPL-3.0-or-later](LICENSE).** Mouseless bundles an icon-detection model
+derived from [OmniParser](https://github.com/microsoft/OmniParser) (built on
+Ultralytics YOLO), whose weights are AGPL-licensed; the AGPL applies to the
+combined work, so the whole project is AGPL-3.0. If you run a modified
+version as a network service, the AGPL requires you to offer its source.
+
+## Acknowledgements
+
+- [Vimium](https://github.com/philc/vimium) — the browser extension's
+  element-detection heuristics are derived from it (MIT).
+- [OmniParser](https://github.com/microsoft/OmniParser) — the on-device
+  icon-detection model.
+- [Homerow](https://homerow.app) — prior art and inspiration for
+  keyboard-driven clicking on macOS.
