@@ -1,259 +1,370 @@
 # Mouseless Prototype — Specs
 
-完整替代鼠标的 macOS 键盘操作层。当前 prototype 实现的入口文档。
+A macOS keyboard layer that fully replaces the mouse. This is the entry
+document for the current prototype implementation.
 
-**读这一份**：项目定位、怎么跑、顶层架构、文件职责、关键权衡。
-**子文档**：具体 subsystem 的实现细节和踩坑记录，见 [§ 5 文档地图](#5-文档地图)。
+**Read this one for**: what the project is, how to run it, the top-level
+architecture, per-file responsibilities, and the key trade-offs.
+**Sub-documents**: implementation details and war stories for each
+subsystem — see [§5 Document map](#5-document-map).
 
-覆盖范围：原生 AX walk + Electron/WebView 的 OmniParser 视觉兜底 + 浏览器扩展 DOM hint；多 mode / 子状态架构（DRAG + `/`-搜索 + SCROLL + WINDOW resize/move 已落；未来 select-text）。
+Coverage: native AX walk + an OmniParser vision fallback for Electron/WebView
+apps + a browser extension for DOM hints. A multi-mode / sub-state
+architecture (DRAG + `/`-search + SCROLL + WINDOW resize/move are done;
+select-text is future work).
 
 ---
 
-## 1. 运行 / 构建
+## 1. Run / build
 
 ```sh
 cd prototype
-./run.sh           # swift build + ad-hoc 重签名 + 启动
+./run.sh           # swift build + ad-hoc re-sign + launch
 ```
 
-`run.sh` 三步缺一不可：
+All three steps of `run.sh` are required:
 
-1. `swift build` —— Swift 6 严格并发，platforms = `.macOS(.v13)`。
-2. `codesign --force --sign -` —— 用 ad-hoc 签名**覆盖** SwiftPM 的 linker-signed 签名。
-   后者对 TCC（Accessibility）授权不稳定，每次重建都让用户重新授权；ad-hoc 签名后授权稳定记住。
-3. `pkill -f Mouseless` —— 旧实例必须杀掉再起新的，否则旧 event tap 还在拦截事件。
+1. `swift build` — Swift 6 strict concurrency, platforms = `.macOS(.v13)`.
+2. `codesign --force --sign -` — **overwrite** SwiftPM's linker-signed
+   signature with an ad-hoc one. The linker signature makes TCC
+   (Accessibility) authorization unstable — every rebuild forces the user to
+   re-grant. With an ad-hoc signature the grant is remembered stably.
+3. `pkill -f Mouseless` — the old instance must be killed before launching a
+   new one, otherwise the old event tap is still intercepting events.
 
-启动后菜单栏出现 `M` 图标：
-- `M●` = 已就绪，按 **Caps Lock** 进入 vim mode
-- `M⚠` = Accessibility 未授权
+After launch an `M` icon appears in the menu bar:
+- `M●` = ready, press **Caps Lock** to enter hint mode
+- `M⚠` = a required permission is missing
 
-启动时 app 自动跑 hidutil 把 Caps Lock 重映射成 F19（见 §2.1），用户**零设置**。app 退出时自动还原 Caps Lock 原始行为。
+On launch the app runs `hidutil` to remap Caps Lock to F19 (see §2.1), so the
+user does **zero setup**. On quit it restores Caps Lock's original behavior.
 
-`main.swift` 用 `setActivationPolicy(.accessory)` —— 没有 Dock 图标，也不抢焦点。
+`main.swift` uses `setActivationPolicy(.accessory)` — no Dock icon, and it
+doesn't steal focus.
 
 ---
 
-## 2. 权限
+## 2. Permissions
 
-**硬性依赖 Accessibility + Screen Recording**（启动时两个都 gate，缺任一不启动）。不需要 Input Monitoring。
+**Hard dependency on Accessibility + Screen Recording** (both are gated at
+startup; missing either means the app won't start). Input Monitoring is not
+needed.
 
-- **Accessibility**：读 AX 树 + 合成点击/按键。**Screen Recording**：OmniParser 视觉兜底 + 内容 settle watch 的低分辨率小图截屏（见 `specs/modes.md` 机制 1/2、`specs/omniparser-fallback-design.md`）。
-- 第一次启动两个授权对话框都弹（`AXIsProcessTrustedWithOptions` + `kAXTrustedCheckOptionPrompt`；`CGRequestScreenCaptureAccess`）。
-- 授权后必须**完全退出**并重启进程才能生效（系统不会热加载权限；Screen Recording 尤其是按进程缓存）。
-- 从 kitty / iTerm 启动 `./run.sh` 时：TCC 的 responsible process 是 terminal，权限挂 terminal 上；
-  双击 `.app` 才会以 Mouseless 自身为 responsible process。开发期走 terminal 路径。
+- **Accessibility**: read the AX tree + synthesize clicks/keys.
+  **Screen Recording**: the OmniParser vision fallback + the low-res
+  fingerprint capture of the content-settle watch (see `specs/modes.md`
+  mechanisms 1/2 and `specs/omniparser-fallback-design.md`).
+- On first launch both permission dialogs appear
+  (`AXIsProcessTrustedWithOptions` + `kAXTrustedCheckOptionPrompt`;
+  `CGRequestScreenCaptureAccess`).
+- After granting you must **fully quit** and restart the process for it to
+  take effect (the OS doesn't hot-reload permissions; Screen Recording in
+  particular is cached per process).
+- When launching `./run.sh` from kitty / iTerm: TCC's responsible process is
+  the terminal, so the permission attaches to the terminal; double-clicking
+  the `.app` makes Mouseless itself the responsible process. During
+  development we go through the terminal.
 
-历史决策：曾尝试过 `CGWindowList` + Screen Recording 列举 menu extras。Sonoma+ 菜单栏渲染
-集中到 Control Center 进程，第三方 status item 看不到，即使授权也没用。已移除。详见 `specs/hint-discovery.md`。
+Historical decision: we once tried `CGWindowList` + Screen Recording to
+enumerate menu extras. On Sonoma+ the menu bar rendering is consolidated into
+the Control Center process, so third-party status items aren't visible — even
+with the permission granted it doesn't work. Removed. See
+`specs/hint-discovery.md`.
 
-### 2.1 触发键（Caps Lock → F19）
+### 2.1 Trigger key (Caps Lock → F19)
 
-触发键是 **F19**——一个标准键盘上没有的"Hyper 键"。物理 Caps Lock 经 `hidutil` 重映射成 F19 后被 CGEventTap 接管。
+The trigger key is **F19** — a "Hyper key" that doesn't exist on a standard
+keyboard. The physical Caps Lock is remapped to F19 via `hidutil` and then
+intercepted by the CGEventTap.
 
-**App 自动管理这个映射**，见 `TriggerRemap.swift`：
+**The app manages this mapping automatically**, see `TriggerRemap.swift`:
 
-- `applicationDidFinishLaunching` (AX 授权通过后) → `TriggerRemap.applyAtLaunch()` 调一次 `/usr/bin/hidutil property --set ...`
-- `applicationWillTerminate` → `TriggerRemap.revertAtQuit()` 调 `hidutil property --set '{"UserKeyMapping":[]}'`
+- `applicationDidFinishLaunching` (after AX authorization passes) →
+  `TriggerRemap.applyAtLaunch()` calls `/usr/bin/hidutil property --set ...`
+- `applicationWillTerminate` → `TriggerRemap.revertAtQuit()` calls
+  `hidutil property --set '{"UserKeyMapping":[]}'`
 
-用户视角：装上、授权、按 Caps Lock 就用上；quit Mouseless 后 Caps Lock 又是普通 toggle，零残留。
+User's view: install, grant, press Caps Lock and it works; after quitting
+Mouseless, Caps Lock is a normal toggle again — zero residue.
 
-底层就一行 `hidutil property --set ...` 把 HID usage `0x39` (Caps Lock) → `0x6E` (F19)。
-**不需要 root，不需要 kext**。Caps Lock 的 LED 不再随按键亮 —— 这是对的，键的身份已经不是 Caps Lock。
+Under the hood it's one line — `hidutil property --set ...` maps HID usage
+`0x39` (Caps Lock) → `0x6E` (F19). **No root, no kext required.** The Caps
+Lock LED no longer lights on press — which is correct, the key is no longer
+Caps Lock.
 
-**为什么走 F19 而不直接抓 Caps Lock**：macOS 对 Caps Lock 做特殊处理——只发 `flagsChanged` 事件改 `.maskAlphaShift` flag，**不发 keyDown**，CGEventTap 接不到一个可匹配的事件。重映射后系统在 HID 层就把这个键当 F19 处理，走普通 keyboard 事件流，event tap 拿得到，且没有 toggle 状态。
+**Why F19 instead of grabbing Caps Lock directly**: macOS treats Caps Lock
+specially — it only emits a `flagsChanged` event toggling the
+`.maskAlphaShift` flag, and **no keyDown**, so the CGEventTap never sees a
+matchable event. After remapping, the system treats the key as F19 at the HID
+layer — a normal keyboard event the event tap can catch, with no toggle state.
 
-**生命周期不完美的地方**：`applicationWillTerminate` 在 force-quit / 崩溃 / 系统关机时**不一定 fire**。这几种情况下 remap 残留到下次 reboot 或下次 Mouseless 启动（启动时 applyAtLaunch 是幂等的，重新应用一次没副作用）。用户感知到时可以手动 `hidutil property --set '{"UserKeyMapping":[]}'` 清掉。
+**Where the lifecycle isn't perfect**: `applicationWillTerminate` doesn't
+always fire on force-quit / crash / system shutdown. In those cases the remap
+persists until the next reboot or the next Mouseless launch (applyAtLaunch is
+idempotent, so re-applying has no side effects). A user who notices can clear
+it manually with `hidutil property --set '{"UserKeyMapping":[]}'`.
 
-### 2.2 setup-trigger.sh — 仅给高级用户
+### 2.2 setup-trigger.sh — for advanced users only
 
-正常使用根本不用碰这个脚本，app 自己搞定。它存在的两个场景：
+Normal use never touches this script; the app handles everything. It exists
+for two scenarios:
 
 ```sh
-./setup-trigger.sh             # 不启动 app、只手动应用 remap（测试 / 调试用）
-./setup-trigger.sh --persist   # 装一个 LaunchAgent，让 remap 在 Mouseless 不运行时也生效
+./setup-trigger.sh             # apply the remap manually without launching the app (test/debug)
+./setup-trigger.sh --persist   # install a LaunchAgent so the remap applies even when Mouseless isn't running
 ```
 
-`--persist` 模式的使用场景：用户依赖 F19 给**其他**工具用（比如自己绑了 F19→某 Alfred workflow），希望 Caps Lock = F19 **永远生效**，不止 Mouseless 运行时。
+The `--persist` use case: a user relies on F19 for **other** tools (e.g. they
+bound F19 → some Alfred workflow) and wants Caps Lock = F19 to be **always**
+in effect, not just while Mouseless runs.
 
-### 2.3 卸载
+### 2.3 Uninstall
 
 ```sh
-hidutil property --set '{"UserKeyMapping":[]}'                            # 当前 session 恢复
-launchctl unload ~/Library/LaunchAgents/com.mouseless.trigger-remap.plist  # 卸 LaunchAgent（如装过）
+hidutil property --set '{"UserKeyMapping":[]}'                              # restore for the current session
+launchctl unload ~/Library/LaunchAgents/com.mouseless.trigger-remap.plist  # unload the LaunchAgent (if installed)
 rm ~/Library/LaunchAgents/com.mouseless.trigger-remap.plist
 ```
 
 ---
 
-## 3. 顶层架构
+## 3. Top-level architecture
 
 ```
 NSApplication
 └── AppDelegate (main.swift)
-    ├── NSStatusItem ("M" 菜单栏图标)
-    ├── HotkeyTap         ← CGEventTap，拦截/放行所有键盘事件
-    │   └── VimSession    ← mode 状态机 + 命令面板缓冲
-    │       └── HintMode  ← AX 扫描 + 标签生成 + 提交点击
-    │           ├── HintOverlay (全屏透明窗口画 hint label)
-    │           └── HUD       (右下角 mode 提示)
-    └── MenuExtraCache    ← 后台维护"哪些 PID 有 menu extras"的 PID 集合
+    ├── NSStatusItem ("M" menu-bar icon)
+    ├── HotkeyTap         ← CGEventTap, intercepts/passes all keyboard events
+    │   └── VimSession    ← mode state machine + command-palette buffer
+    │       └── HintMode  ← AX scan + label generation + commit click
+    │           ├── HintOverlay (full-screen transparent window drawing hint labels)
+    │           └── HUD       (bottom-center mode indicator)
+    └── MenuExtraCache    ← background set of "which PIDs have menu extras"
 ```
 
-控制流：
+Control flow:
 
-1. **HotkeyTap** 是唯一事件入口。注册 `CGEvent.tapCreate` 监听 `keyDown` + `keyUp` + `flagsChanged`。
-   每个事件先检查 `eventSourceUserData == "MOUS"` —— 我们自己合成的直接放行（避免反馈环）。
-2. **F19（= Caps Lock）走 arm 机制，任何 mode 都适用**：按下不立即动作（arm）；松手时若期间没按 chord → `session.handleTriggerTap()`（按当前 mode 分派：OFF→进 TAP / TAP→切 sticky / SCROLL→切 TAP / palette→关）；arm 期间按 d → `session.enterScroll()`。详见 `modes.md` §2.1。
-3. **其他键**在已激活时交给 `VimSession.handle()`。返回 `true` = 消费，`false` = 放行（让 Cmd+Space / Cmd+Tab 等系统快捷键继续工作）。
-4. `VimSession` 按 mode（`.tap` / `.scroll`）和 palette 状态分发；mode 内部决定 hint / 移光标 / 滚动 / 退出。
-5. 提交点击**统一合成 mouse event**（AX 语义动作 AXPress/AXShowMenu 已弃用——不可靠，见 `hint-rendering.md` §3）。
-   合成事件统一打 `"MOUS"` 标记。
-
----
-
-## 4. 文件职责
-
-**核心**：
-
-| 文件 | 职责 |
-| --- | --- |
-| `main.swift` | NSApp 启动器，accessory activation policy |
-| `AppDelegate.swift` | 菜单栏、AX 权限检查、启动 HotkeyTap、`MenuExtraCache.warmUp()`、`OmniParserModel.preload()`、`TriggerRemap` 生命周期 |
-| `HotkeyTap.swift` | CGEventTap 注册（keyDown/keyUp/flagsChanged）+ 反馈环避免 + F19 arm/chord 分派 |
-| `VimSession.swift` | Mode 状态机（`.tap`/`.scroll`）、arm 分派（`handleTriggerTap`/`enterScroll`）、palette、按键路由 |
-| `HintMode.swift` | 收集 4 来源（焦点窗口 AX **或** OP / Dock / menubar / extras）→ 生成标签 → typing → commit（合成点击）|
-| `HintWindowCache.swift` | 焦点 app 的 per-`AXWindow` 缓存。sticky rescan 复用没动过的 window 子树 |
-| `MenuExtraCache.swift` | 后台维护"哪些 PID 有 menu extras"的 PID 集合 |
-| `HintOverlay.swift` | 每屏一个无边框透明窗口，绘制 hint 标签（大 rect 用 inside 放置） |
-| `HUD.swift` | 屏幕底部居中的 mode 提示。窗口宽度按文本自适应（min 100pt，文字两边各 16pt padding），每次 `show()` 重算尺寸 + 重新居中——避免 `WINDOW: no resizable window` 这种长一点的 HUD 文本被裁掉 |
-| `KeyCode.swift` | `kVK_ANSI_*` 物理键码常量（含 `f19=80`；ANSI 布局，非 QWERTY 会出错） |
-| `FocusedApp.swift` | 经 `NSWorkspace.frontmostApplication` 解析前台 app（Electron 上比 AXFocusedApplication 可靠） |
-| `MouseSynth.swift` | 合成 mouse click + drag down/up + 取光标位置（hint commit、bare `c` 点击、DRAG 共用） |
-| `TriggerRemap.swift` | App 启动 shell-out `hidutil` 把 Caps Lock → F19；退出还原 |
-| `KeyPoster.swift` | 合成键盘事件辅助（主路径未用；留给未来 select-text mode） |
-
-**键盘鼠标 / 滚动**：
-
-| 文件 | 职责 |
-| --- | --- |
-| `MouseMover.swift` | hjkl 连续移光标，**TAP + SCROLL 共用**（60fps timer；TAP 的 dragging 子状态下 `dragHeld=true` 时事件类型换成 `.leftMouseDragged`） |
-| `ScrollController.swift` | SCROLL 模式滚动合成 + 连续 + 加速 + 区域选择 + 光标 warp |
-| `DragController.swift` | DRAG 子状态（TAP 内）状态容器，单段：`init(at: CGPoint)` 立刻合成 mouseDown 并记 `startPoint`（bare `v` 在 TAP normal 触发）；Backspace 取消用 `startPoint` warp 回 + 起点 mouseUp；不持有 "preMode"——drop / cancel 都回 TAP normal 由 `VimSession.tapSub` 收敛（见 `modes.md` §6） |
-| `SearchOverlay.swift` | TAP `/`-搜索子状态的可视层：per-NSScreen borderless 透明 NSWindow，画黄色高亮框 + label chip（label 池复用 `HintMode.alphabet`，chip 在文本左侧）；按 `typed` 动态 dim 不匹配的 label。见 `modes.md` §6.5 |
-| `ScrollAreaDetector.swift` | AX-walk 焦点窗口找 `AXScrollArea`/`AXWebArea`（不依赖 OP 路由）|
-| `ScrollOverlay.swift` | 滚动区域 picker：蓝色光晕边框 + 数字标记 |
-| `WindowController.swift` | WINDOW resize 模式状态机 + 60fps timer：跟踪当前按住的 hjkl 边集合、每 tick 算 resize delta 直接 AX 写焦点窗口（无 fallback 路径——入口 gate 已保证 AX 可写）。每 tick 现读 `NSEvent.modifierFlags`：Shift = shrink、Option = 5pt 精细步长、两者正交可组合。见 `modes.md` §7 |
-| `WindowMoveController.swift` | WINDOW MOVE 模式状态机 + 60fps timer：跟踪按住的方向集合（`enum Direction { left, right, up, down }`），每 tick 只写 `AXPosition`（单 IPC，比 resize 省一次）。修饰键：bare 20pt / Shift 80pt fast / Option 5pt slow（Option > Shift 优先，仿 `MouseMover.moveSpeed`）。见 `modes.md` §8 |
-| `WindowOpOverlay.swift` | WINDOW resize / MOVE 共用：蓝色 border + 可选 4 个边缘 chip（`↑k / ↓j / ←h / →l`）。`show(rect:withChips:)` 控制是否画 chip——resize 画（绑边的暗示），MOVE 不画（hjkl 是方向不绑边）。仿 `HintOverlay` / `ScrollOverlay` 的 per-NSScreen borderless window 模式；chip 算位置时若不全包于当前屏内则跳过不画（用户要求：不画到屏幕外） |
-| `AXWindowOps.swift` | 窗口 AX helper：`frontmostWindow()`、`isResizable()`（probe `AXPosition`+`AXSize` 都可写）、`isMovable()`（只 probe `AXPosition`——MOVE 不需要 `AXSize`）、`hasTitleBarButton()`（判"真窗口"：至少有 Close/Min/Zoom/FullScreen 一个按钮——`AXSubrole` 对 AX 黑洞 app 不可靠，标题栏按钮对外壳 NSWindow chrome 都查得到）、`readRect()` / `writeRect()`（两 IPC，pos+size）/ `writePosition()`（单 IPC，只写 origin，给 MOVE 用） |
-
-**OmniParser 视觉路径**（AX-bad app 的焦点窗口 hint，见 `omniparser-fallback-design.md`）：
-
-| 文件 | 职责 |
-| --- | --- |
-| `AppRegistry.swift` | `AX_FOCUSED_WHITELIST` —— 焦点窗口走 AX 还是 OP 的路由决策；`browserBundleIDs` —— 浏览器 app 走 BrowserProvider |
-| `ScreenCapture.swift` | ScreenCaptureKit 截焦点窗口（display capture + crop，display 缓存）|
-| `OmniParserModel.swift` | CoreML YOLO 检测器（icon_detect.mlpackage，启动预加载）|
-| `OmniParserPath.swift` | 截图 → 推理 → §5.1 baseline 过滤 → 屏幕坐标候选；debug overlay |
-| `OCRRefiner.swift` | OP 点击精度：center 落进 inner box 时用 Vision OCR 重定位（含 CJK）。也对外暴露 `recognizeText(in:)` helper 给 TAP `/`-搜索子状态用（同 `.accurate` + zh/en config）|
-
-**浏览器路径**（Chrome / Safari 的焦点窗口 hint，见 `browser-support-design.md`）：
-
-| 文件 | 职责 |
-| --- | --- |
-| `BridgeServer.swift` | Mouseless 主进程的 Unix-domain socket 服务端（`~/Library/Application Support/Mouseless/bridge.sock`）。多客户端并发；`activeFD` 跟 `i_am_active` 信号绑定（多 profile / 多浏览器路由）；`sendToActive(_, expectingBrowserBundleID:)` 给主动外发请求 + bundleID 不匹配 refuse；`awaitResponse(ofType:timeout:)` async 一发一收等扩展回包 |
-| `BrowserProvider.swift` | `HintMode` 浏览器分支的 hint 来源。三个 async API：`fetchHints()` → 拉 hint 列表（含 `navigates` 字段标 anchor link）；`findText(query:)` → `/`-search 在浏览器走 DOM TreeWalker 替代 OCR；`findFirstInputRect()` → app-switch cursor park 走 DOM (`document.activeElement` / 第一个可见 input) 替代 AX。**浏览器路径自治：不 fallback 到 OP**——扩展回啥就是啥（即便 0 个）|
-| `Sources/mouseless-bridge/main.swift` | 第二个 SwiftPM target，编出 `mouseless-bridge` 二进制。Chrome Native Messaging host：被 Chrome 拉起，stdio ↔ Unix socket 双向纯字节转发（不解析）；socket 连不上时往 stdout 回一帧 `bridge_error` 让扩展能看到 |
-| `extension/manifest.json` | Chrome 扩展 Manifest V3：声明 `nativeMessaging` + `scripting` 权限 + `host_permissions: <all_urls>`，content scripts 注入到所有 frame |
-| `extension/background.js` | 扩展 service worker。持久 native port + keepalive；监听 `windows.onFocusChanged` 发 `i_am_active`；监听 `tabs.onActivated` 发 `tab_changed`；监听 `tabs.onUpdated status=complete` 发 `page_changed (navigation_complete)`；收 native 的 `list_hints` / `find_text` / `find_first_input` 转发给 active tab 的 content script；SW 连上时主动用 `scripting.executeScript` 把脚本注入到已经存在的 tab |
-| `extension/content_script.js` | 每个 frame 都跑：top frame 处理 bg 的 `list_hints` / `find_text` / `find_first_input` 请求；任何 frame 处理父 frame 的 `mouseless_hints_request` / `mouseless_text_request`（递归 postMessage 询问 iframe，合并 viewport 坐标）；MutationObserver 监听 "新 clickable 出现" → 发 `page_changed` |
-| `extension/detector.js` | DOM 级 hint / 文本 / 输入框检测：三个导出函数。`listHints()` —— Vimium 规则改写的可点元素检测（选择器 + ARIA roles + jsaction + ng-click + 可见性 + 5 点遮挡 + shadow DOM 递归，每个 hint 含 `nav` 标记 anchor link）。`findTextMatches(query)` —— TreeWalker + Range.getClientRects 找 viewport 内的字符级 substring 匹配（`/`-search 浏览器路径）。`findFirstInput()` —— `document.activeElement` 优先 / fallback 到第一个可见 input/textarea/contenteditable（app-switch cursor park 浏览器路径）。都接 `viewportOriginInScreen` 参数让 iframe 用父算好的坐标 |
-| `extension/install_dev_host.sh` | 写 `~/Library/.../NativeMessagingHosts/com.mouseless.bridge.json`，把扩展 ID 跟本地 bridge binary 路径绑定 |
-| `extension/vendor/vimium/MIT-LICENSE.txt` + `NOTICE.md` | Vimium attribution（detection 规则来自 Vimium，重写为干净 JS，MIT 许可保留）|
-
-**脚本**：
-
-| 文件 | 职责 |
-| --- | --- |
-| `setup-trigger.sh` | 高级用户用。`--persist` 装 LaunchAgent，让 F19 映射独立于 Mouseless 生命周期 |
+1. **HotkeyTap** is the single event entry point. It registers a
+   `CGEvent.tapCreate` listening for `keyDown` + `keyUp` + `flagsChanged`.
+   Each event is first checked for `eventSourceUserData == "MOUS"` — events we
+   synthesized ourselves are passed straight through (to avoid a feedback loop).
+2. **F19 (= Caps Lock) uses an arm mechanism, in any mode**: pressing it
+   doesn't act immediately (arm); on release, if no chord was pressed in
+   between → `session.handleTriggerTap()` (dispatched by the current mode:
+   OFF→enter TAP / TAP→toggle sticky / SCROLL→switch to TAP / palette→close);
+   pressing `d` while armed → `session.enterScroll()`. See `modes.md` §2.1.
+3. **Other keys**, when a mode is active, go to `VimSession.handle()`.
+   Returning `true` = consumed, `false` = passed through (so system shortcuts
+   like Cmd+Space / Cmd+Tab keep working).
+4. `VimSession` dispatches by mode (`.tap` / `.scroll`) and palette state; the
+   mode decides hint / move-cursor / scroll / exit internally.
+5. Committing a click **always synthesizes a mouse event** (the AX semantic
+   actions AXPress/AXShowMenu are deprecated — unreliable, see
+   `hint-rendering.md` §3). Synthesized events are all tagged `"MOUS"`.
 
 ---
 
-## 5. 文档地图
+## 4. File responsibilities
 
-各 subsystem 的细节、设计权衡、踩坑记录在 `specs/` 下：
+**Core**:
 
-| 文档 | 内容 |
+| File | Responsibility |
 | --- | --- |
-| [`specs/event-pipeline.md`](specs/event-pipeline.md) | HotkeyTap 注册、callback 三层 short-circuit、反馈环 `"MOUS"` 标记、修饰键透传策略（Cmd/Ctrl 放行，Shift/Option 消费） |
-| [`specs/modes.md`](specs/modes.md) | Mode 状态机（`.tap`/`.scroll`）、F19 arm 机制、palette、sticky、hjkl 移光标（TAP+SCROLL 统一）+ bare `c` 点击（Enter 放行给 app）、**所有键位表**、KeyCode 常量、新 mode 接入 |
-| [`specs/scroll-mode-design.md`](specs/scroll-mode-design.md) | **SCROLL 模式完整设计**：chord 进入（Caps Lock + d）、AXScrollArea/AXWebArea 检测、多区域 picker、d/u 滚动合成、gg/G 跳顶底、hjkl 移光标 + bare `c` 点击、零-AX Electron 限制 |
-| [`specs/hint-discovery.md`](specs/hint-discovery.md) | AX 三源（focused / Dock / menu extras）、`walk()` 收录条件、屏幕并集计算、**menu extras 踩坑史 + `MenuExtraCache` 设计**、并发安全 |
-| [`specs/hint-rendering.md`](specs/hint-rendering.md) | 标签生成、typing → commit、**统一合成点击**（AX action 已弃）、`HintOverlay` 多屏窗口、坐标系转换、badge 排版（inside / Dock / 级联）、HUD |
-| [`specs/omniparser-fallback-design.md`](specs/omniparser-fallback-design.md) | **已实现 (P5-P6)**：OP 视觉路径，OP-default + AX whitelist 路由（非 fall-through）；baseline 过滤；OCR click-point refiner（§4.6）；PoC 数据；captioner 搁置 |
-| [`specs/omniparser-integration-roadmap.md`](specs/omniparser-integration-roadmap.md) | **实施路线图**：P0-P6 已完成（CoreML spike → 截屏 → 路由 → 集成 → 端到端 → OCR refiner），P7（数据调参）/ P8（发布）待做 |
-| [`specs/per-app-correction-design.md`](specs/per-app-correction-design.md) | **设计草稿，未实现**：per-app **AX walker 覆写**（声明式 JSON predicate，把长尾 app 怪异 AX 树翻译成可点元素）为主力，OP 为 fallback，NCC 模板匹配降级到附录（大概率永不做）。含 L0→L2 社区飞轮 + 治理 + teach 闭环 |
-| [`specs/browser-support-design.md`](specs/browser-support-design.md) | **P0–P4 实现完成**（Chrome）：扩展 + Native Messaging Host + `BridgeServer`/`BrowserProvider` 打通 DOM 级 HINT；多 profile / 多浏览器路由 + `tab_changed` + 异步加载 `page_changed` 全在线；浏览器路径自治，**不 fallback 到 OP**。P5 Safari + 上架待做 |
-| [`specs/settings-design.md`](specs/settings-design.md) | **设计草稿，未实现 —— 上线前**：菜单栏 "Settings…"（Cmd+,）配置面板。v1 做值型（光标/滚动/窗口速度、双击阈值、跳屏距离）+ 主题色 + trigger 预设 + 开机自启；存 UserDefaults（默认值=当前硬编码，零风险）、live-apply。自定义键位映射推 v2（绑非 QWERTY 重构）|
+| `main.swift` | NSApp bootstrap, accessory activation policy |
+| `AppDelegate.swift` | Menu bar, permission checks, start HotkeyTap, `MenuExtraCache.warmUp()`, `OmniParserModel.preload()`, `TriggerRemap` lifecycle |
+| `HotkeyTap.swift` | CGEventTap registration (keyDown/keyUp/flagsChanged) + feedback-loop avoidance + F19 arm/chord dispatch |
+| `VimSession.swift` | Mode state machine (`.tap`/`.scroll`), arm dispatch (`handleTriggerTap`/`enterScroll`), palette, key routing |
+| `HintMode.swift` | Collect 4 sources (focused-window AX **or** OP / Dock / menubar / extras) → generate labels → typing → commit (synthesized click) |
+| `HintWindowCache.swift` | Per-`AXWindow` cache for the focused app. A sticky rescan reuses window subtrees that didn't change |
+| `MenuExtraCache.swift` | Background set of "which PIDs have menu extras" |
+| `HintOverlay.swift` | One borderless transparent window per screen, drawing hint labels (large rects use inside placement) |
+| `HUD.swift` | Bottom-center mode indicator. Window width auto-fits the text (min 100pt, 16pt padding on each side), recomputed and re-centered on every `show()` — avoids clipping longer HUD text like `WINDOW: no resizable window` |
+| `KeyCode.swift` | `kVK_ANSI_*` physical key-code constants (incl. `f19=80`; ANSI layout, wrong on non-QWERTY) |
+| `FocusedApp.swift` | Resolve the frontmost app via `NSWorkspace.frontmostApplication` (more reliable than AXFocusedApplication on Electron) |
+| `MouseSynth.swift` | Synthesize mouse click + drag down/up + get cursor position (shared by hint commit, bare `c` click, DRAG) |
+| `TriggerRemap.swift` | On launch, shell out to `hidutil` to map Caps Lock → F19; restore on quit |
+| `KeyPoster.swift` | Synthetic keyboard-event helper (unused on the main path; reserved for a future select-text mode) |
+
+**Mouse move / scroll**:
+
+| File | Responsibility |
+| --- | --- |
+| `MouseMover.swift` | Continuous hjkl cursor movement, **shared by TAP + SCROLL** (60fps timer; in TAP's dragging sub-state, with `dragHeld=true`, the event type becomes `.leftMouseDragged`) |
+| `ScrollController.swift` | SCROLL-mode scroll synthesis + continuous + acceleration + area selection + cursor warp |
+| `DragController.swift` | DRAG sub-state (inside TAP) state container, single segment: `init(at: CGPoint)` immediately synthesizes a mouseDown and records `startPoint` (triggered by bare `v` in TAP normal); Backspace-cancel warps back to `startPoint` + mouseUp there; holds no "preMode" — drop / cancel both return to TAP normal, converged by `VimSession.tapSub` (see `modes.md` §6) |
+| `SearchOverlay.swift` | Visual layer for TAP's `/`-search sub-state: per-NSScreen borderless transparent NSWindow drawing yellow highlight boxes + label chips (label pool reuses `HintMode.alphabet`, chip to the left of the text); dynamically dims labels that don't match `typed`. See `modes.md` §6.5 |
+| `ScrollAreaDetector.swift` | AX-walk the focused window to find `AXScrollArea`/`AXWebArea` (doesn't depend on OP routing) |
+| `ScrollOverlay.swift` | Scroll-area picker: blue glow border + numeric markers |
+| `WindowController.swift` | WINDOW resize state machine + 60fps timer: tracks the currently-held set of hjkl edges, computes a resize delta each tick and writes it straight to the focused window via AX (no fallback path — the entry gate guarantees AX is writable). Reads `NSEvent.modifierFlags` live each tick: Shift = shrink, Option = 5pt fine step, the two orthogonal and combinable. See `modes.md` §7 |
+| `WindowMoveController.swift` | WINDOW MOVE state machine + 60fps timer: tracks the held direction set (`enum Direction { left, right, up, down }`), writes only `AXPosition` each tick (one IPC, one fewer than resize). Modifiers: bare 20pt / Shift 80pt fast / Option 5pt slow (Option > Shift priority, mirroring `MouseMover.moveSpeed`). See `modes.md` §8 |
+| `WindowOpOverlay.swift` | Shared by WINDOW resize / MOVE: blue border + optional 4 edge chips (`↑k / ↓j / ←h / →l`). `show(rect:withChips:)` controls whether chips are drawn — resize draws them (edge-binding hint), MOVE doesn't (hjkl is direction, not edge-bound). Follows the per-NSScreen borderless-window pattern of `HintOverlay` / `ScrollOverlay`; when computing a chip position, skip drawing if it isn't fully contained in the current screen (user requirement: don't draw off-screen) |
+| `AXWindowOps.swift` | Window AX helpers: `frontmostWindow()`, `isResizable()` (probe that `AXPosition`+`AXSize` are both settable), `isMovable()` (probe `AXPosition` only — MOVE doesn't need `AXSize`), `hasTitleBarButton()` (decides "real window": has at least one of Close/Min/Zoom/FullScreen — `AXSubrole` is unreliable on AX-black-hole apps, but title-bar buttons are queryable on any shell NSWindow chrome), `readRect()` / `writeRect()` (two IPCs, pos+size) / `writePosition()` (one IPC, origin only, for MOVE) |
+
+**OmniParser vision path** (focused-window hints for AX-bad apps, see
+`omniparser-fallback-design.md`):
+
+| File | Responsibility |
+| --- | --- |
+| `AppRegistry.swift` | `AX_FOCUSED_WHITELIST` — the routing decision of whether the focused window goes AX or OP; `browserBundleIDs` — browser apps go to BrowserProvider |
+| `ScreenCapture.swift` | ScreenCaptureKit capture of the focused window (display capture + crop, with a display cache) |
+| `OmniParserModel.swift` | CoreML YOLO detector (icon_detect.mlpackage, preloaded at launch) |
+| `OmniParserPath.swift` | screenshot → inference → §5.1 baseline filtering → screen-coordinate candidates; debug overlay |
+| `OCRRefiner.swift` | OP click precision: when the center lands inside an inner box, re-locate it with Vision OCR (incl. CJK). Also exposes a `recognizeText(in:)` helper for TAP's `/`-search sub-state (same `.accurate` + zh/en config) |
+
+**Browser path** (focused-window hints for Chrome / Safari, see
+`browser-support-design.md`):
+
+| File | Responsibility |
+| --- | --- |
+| `BridgeServer.swift` | Unix-domain socket server in the Mouseless main process (`~/Library/Application Support/Mouseless/bridge.sock`). Concurrent multi-client; `activeFD` bound to the `i_am_active` signal (multi-profile / multi-browser routing); `sendToActive(_, expectingBrowserBundleID:)` for proactive outbound requests + refuses on bundleID mismatch; `awaitResponse(ofType:timeout:)` async send-one-receive-one waiting for the extension's reply |
+| `BrowserProvider.swift` | Hint source for `HintMode`'s browser branch. Three async APIs: `fetchHints()` → pull the hint list (incl. a `navigates` field marking anchor links); `findText(query:)` → `/`-search uses a DOM TreeWalker in browsers instead of OCR; `findFirstInputRect()` → app-switch cursor park uses the DOM (`document.activeElement` / first visible input) instead of AX. **The browser path is self-contained: no fallback to OP** — whatever the extension returns is it (even if zero) |
+| `Sources/mouseless-bridge/main.swift` | Second SwiftPM target, builds the `mouseless-bridge` binary. Chrome Native Messaging host: launched by Chrome, bidirectional raw byte forwarding stdio ↔ Unix socket (no parsing); if the socket can't connect, writes a `bridge_error` frame to stdout so the extension can see it |
+| `extension/manifest.json` | Chrome extension Manifest V3: declares `nativeMessaging` + `scripting` permissions + `host_permissions: <all_urls>`, content scripts injected into all frames |
+| `extension/background.js` | Extension service worker. Persistent native port + keepalive; listens to `windows.onFocusChanged` to send `i_am_active`; `tabs.onActivated` to send `tab_changed`; `tabs.onUpdated status=complete` to send `page_changed (navigation_complete)`; forwards native's `list_hints` / `find_text` / `find_first_input` to the active tab's content script; on SW connect, proactively injects the scripts into already-open tabs via `scripting.executeScript` |
+| `extension/content_script.js` | Runs in every frame: the top frame handles bg's `list_hints` / `find_text` / `find_first_input` requests; any frame handles its parent's `mouseless_hints_request` / `mouseless_text_request` (recursively postMessages iframes, merging viewport coordinates); a MutationObserver watches for "new clickable appeared" → sends `page_changed` |
+| `extension/detector.js` | DOM-level hint / text / input detection: three exported functions. `listHints()` — clickable-element detection rewritten from Vimium's rules (selector + ARIA roles + jsaction + ng-click + visibility + 5-point occlusion + shadow-DOM recursion, each hint carries a `nav` flag for anchor links). `findTextMatches(query)` — TreeWalker + Range.getClientRects to find character-level substring matches within the viewport (browser path for `/`-search). `findFirstInput()` — `document.activeElement` first / fallback to the first visible input/textarea/contenteditable (browser path for app-switch cursor park). All take a `viewportOriginInScreen` parameter so iframes use the coordinates their parent computed |
+| `extension/install_dev_host.sh` | Writes `~/Library/.../NativeMessagingHosts/com.mouseless.bridge.json`, binding the extension ID to the local bridge binary path |
+| `extension/vendor/vimium/MIT-LICENSE.txt` + `NOTICE.md` | Vimium attribution (the detection rules derive from Vimium, rewritten as clean JS, MIT license retained) |
+
+**Scripts**:
+
+| File | Responsibility |
+| --- | --- |
+| `setup-trigger.sh` | For advanced users. `--persist` installs a LaunchAgent so the F19 mapping is independent of Mouseless's lifecycle |
 
 ---
 
-## 6. 关键设计权衡（speed-read）
+## 5. Document map
 
-| 权衡 | 选择 | 理由 |
+Per-subsystem details, design trade-offs, and war stories live under
+`specs/`:
+
+| Document | Contents |
+| --- | --- |
+| [`specs/event-pipeline.md`](specs/event-pipeline.md) | HotkeyTap registration, the callback's three-layer short-circuit, the `"MOUS"` feedback-loop tag, modifier pass-through policy (Cmd/Ctrl passed, Shift/Option consumed) |
+| [`specs/modes.md`](specs/modes.md) | Mode state machine (`.tap`/`.scroll`), the F19 arm mechanism, palette, sticky, hjkl cursor movement (unified across TAP+SCROLL) + bare `c` click (Enter passed to the app), **the full keymap tables**, KeyCode constants, adding a new mode |
+| [`specs/scroll-mode-design.md`](specs/scroll-mode-design.md) | **Full SCROLL-mode design**: chord entry (Caps Lock + d), AXScrollArea/AXWebArea detection, multi-area picker, d/u scroll synthesis, gg/G jump to top/bottom, hjkl cursor movement + bare `c` click, the zero-AX Electron limitation |
+| [`specs/hint-discovery.md`](specs/hint-discovery.md) | The three AX sources (focused / Dock / menu extras), `walk()` inclusion criteria, screen-union computation, **the menu-extras war story + `MenuExtraCache` design**, concurrency safety |
+| [`specs/hint-rendering.md`](specs/hint-rendering.md) | Label generation, typing → commit, **the unified synthesized click** (AX actions abandoned), `HintOverlay`'s multi-screen windows, coordinate-system conversion, badge layout (inside / Dock / cascade), HUD |
+| [`specs/omniparser-fallback-design.md`](specs/omniparser-fallback-design.md) | **Implemented (P5-P6)**: the OP vision path, OP-default + AX-whitelist routing (not fall-through); baseline filtering; the OCR click-point refiner (§4.6); PoC data; the captioner shelved |
+| [`specs/omniparser-integration-roadmap.md`](specs/omniparser-integration-roadmap.md) | **Implementation roadmap**: P0-P6 done (CoreML spike → capture → routing → integration → end-to-end → OCR refiner), P7 (data tuning) / P8 (release) pending |
+| [`specs/per-app-correction-design.md`](specs/per-app-correction-design.md) | **Design draft, not implemented**: per-app **AX-walker overrides** (declarative JSON predicates that translate long-tail apps' weird AX trees into clickable elements) as the primary mechanism, OP as fallback, NCC template matching demoted to an appendix (likely never built). Includes an L0→L2 community flywheel + governance + teach loop |
+| [`specs/browser-support-design.md`](specs/browser-support-design.md) | **P0–P4 implemented** (Chrome): extension + Native Messaging Host + `BridgeServer`/`BrowserProvider` deliver DOM-level hints; multi-profile / multi-browser routing + `tab_changed` + async-load `page_changed` all live; the browser path is self-contained, **no fallback to OP**. P5 Safari + store submission pending |
+| [`specs/settings-design.md`](specs/settings-design.md) | **Design draft, not implemented**: a menu-bar "Settings…" (Cmd+,) config panel. v1 covers value-type settings (cursor/scroll/window speed, double-click threshold, jump distance) + theme color + trigger presets + launch-at-login; stored in UserDefaults (defaults = the current hardcoded constants, zero-risk), live-applied. Custom keymaps deferred to v2 (non-QWERTY rebinding refactor) |
+
+---
+
+## 6. Key design trade-offs (speed-read)
+
+| Trade-off | Choice | Reason |
 | --- | --- | --- |
-| 单元素 AX 属性获取 | `AXUIElementCopyMultipleAttributeValues` 一次拿 10 个属性 | per-element IPC 从 9+ 砍到 1，焦点 app 扫描从 ~840ms 降到 ~200ms |
-| Sticky rescan 复用 | per-`AXWindow` cache + `AXWindows` diff + commit-driven dirty | 关弹框这种"只销毁一窗、其他没动"的常见操作不重扫 |
-| Menu bar fast path | AXMenuBar 上读一次 `AXSelectedChildren`；空则不下钻 | 99% 时刻菜单栏没展开，跳过 N×4 个 axMenuIsOpen 探针 |
-| Menu extras 发现 | 后台 PID cache + NSWorkspace 增量 | 触发期 < 30ms；预热成本对用户透明 |
-| 点击实现 | **统一合成 mouse event**（不用 AX 动作） | AX 动作（AXPress/AXShowMenu）在 NSBrowser cell / 自定义 view / Electron 上常静默失败；合成点击行为可预测，跟用户心智一致 |
-| bare `c` 点击 | 当前光标位置合成点击（Shift 双击 / Option 右键） | 跟 hjkl 移光标配套（移→点闭环）；取代旧的 Enter-as-click，把 Enter 放行给 app（菜单确认、表单提交保留 app 语义） |
-| 移光标 / 滚动用裸键不用 Ctrl | hjkl 移光标（TAP+SCROLL 统一）、d/u 滚动 | power user（HHKB）常把 Ctrl+hjkl 系统级映射成方向键，会冲突 |
-| 焦点窗口 hint 路由 | AX whitelist → AX walk；其余 → OmniParser | 框架 ≠ AX 质量（WeChat 是 native 但 AX 黑洞）；OP 对所有 app 都 work 且 ~95ms 不比 AX walk 慢 |
-| 滚动区检测 | 只用 AX（`AXScrollArea`/`AXWebArea`），不用 OP | 滚动区是容器无视觉特征，OP 识别不了；结构 AX 即使内容 AX 烂也可靠 |
-| Overlay 数量 | 每屏一个窗口 | 单窗口跨屏 macOS 渲染不可靠 |
-| Overlay 层级 | `CGOverlayWindowLevel` (102) | 高于一切常规 UI 层（菜单栏 / modal / `.popUpMenu` = 101），让 AXMenuItem 的 inside-top-left label 不被下拉菜单的背景填充盖掉。早期版本用 `.statusBar` (25) 撞到这个坑 |
-| 异步操作的"等" | AX / NSWorkspace observer + async/await + timeout 兜底 | 不用固定 sleep 猜时间。OS 通知比经验值早就发了就早走；慢路径一直等到 AX 同步完。silent failure 时超时兜底防 Task 卡死 |
-| Cmd/Ctrl 透传 | 不消费 | 保 Spotlight、Mission Control、screenshot 等系统功能 |
-| Shift/Option | 消费 | 给 hint click action 用（Shift=双击 / Option=右键） |
-| 标签字符集 | home row 9 字母 + 10 数字 | 数字独立给 Dock，字母组留给其他来源 |
-| KeyCode 抽象 | 物理 `kVK_ANSI_*` 常量 | 简单；代价：非 QWERTY 布局错位（已知缺口） |
+| Per-element AX attribute fetch | `AXUIElementCopyMultipleAttributeValues` to grab 10 attributes at once | per-element IPC cut from 9+ to 1; focused-app scan dropped from ~840ms to ~200ms |
+| Sticky rescan reuse | per-`AXWindow` cache + `AXWindows` diff + commit-driven dirty | the common "destroy one window, leave the rest" op (e.g. closing a dialog) skips a rescan |
+| Menu bar fast path | read `AXSelectedChildren` once on AXMenuBar; if empty, don't descend | 99% of the time the menu bar isn't open, skipping N×4 axMenuIsOpen probes |
+| Menu-extras discovery | background PID cache + NSWorkspace deltas | < 30ms at trigger time; the warm-up cost is invisible to the user |
+| Click implementation | **unified synthesized mouse event** (no AX actions) | AX actions (AXPress/AXShowMenu) silently fail on NSBrowser cells / custom views / Electron; a synthesized click is predictable and matches the user's mental model |
+| bare `c` click | synthesize a click at the current cursor position (Shift double-click / Option right-click) | pairs with hjkl cursor movement (move→click loop); replaces the old Enter-as-click, freeing Enter to pass to the app (menu confirm, form submit keep app semantics) |
+| Cursor move / scroll use bare keys, not Ctrl | hjkl move cursor (unified TAP+SCROLL), d/u scroll | power users (HHKB) often map Ctrl+hjkl to arrow keys system-wide, which would conflict |
+| Focused-window hint routing | AX whitelist → AX walk; everything else → OmniParser | framework ≠ AX quality (WeChat is native but an AX black hole); OP works on all apps and at ~95ms is no slower than an AX walk |
+| Scroll-area detection | AX only (`AXScrollArea`/`AXWebArea`), not OP | a scroll area is a container with no visual features, OP can't recognize it; structural AX is reliable even when content AX is bad |
+| Number of overlays | one window per screen | a single window spanning screens renders unreliably on macOS |
+| Overlay level | `CGOverlayWindowLevel` (102) | above all normal UI layers (menu bar / modal / `.popUpMenu` = 101), so an AXMenuItem's inside-top-left label isn't covered by the dropdown's background fill. An early version used `.statusBar` (25) and hit exactly this |
+| "Waiting" for async ops | AX / NSWorkspace observers + async/await + timeout backstop | no fixed sleep guessing the time. Leave early if the OS notification fires before the empirical estimate; on the slow path wait until AX has synced. The timeout backstop keeps a Task from hanging on a silent failure |
+| Cmd/Ctrl pass-through | not consumed | preserve Spotlight, Mission Control, screenshot, and other system features |
+| Shift/Option | consumed | used for the hint click action (Shift=double-click / Option=right-click) |
+| Label character set | 9 home-row letters + 10 digits | digits go to the Dock exclusively, the letter pool is left for other sources |
+| KeyCode abstraction | physical `kVK_ANSI_*` constants | simple; cost: misalignment on non-QWERTY layouts (a known gap) |
 
 ---
 
-## 7. 已知缺口 / Future work
+## 7. Known gaps / future work
 
-按优先级：
+By priority:
 
-1. **键盘布局** —— `KeyCode.swift` 是 ANSI 物理位。非 QWERTY 字母 hint 全错。
-   迁移路径：用 `UCKeyTranslate` / `CGEventKeyboardGetUnicodeString` 把 keyCode + flags 映射到字符再匹配。
-2. **浏览器 HINT（Chrome）—— P0-P4 已实现**。扩展（detector.js 改写 Vimium 规则、iframe 协调走 postMessage 链、shadow DOM 递归）+ 长连接 native messaging（背景 SW + bridge CLI）+ Mouseless 端 `BrowserProvider` 接进 `HintMode`。配套补丁：多 profile / 多浏览器 `i_am_active` 路由、`tab_changed` 信号修同窗口切 tab 盲点、MutationObserver-based `page_changed` 修异步加载、`navigation_complete` 信号修整页跳转后的刷新、anchor link commit 跳过 100ms post-commit rehint、SW 启动主动 inject 已开 tab、**`/`-search 在浏览器走 DOM TreeWalker 替代 OCR**（~10× 提速）、**app-switch cursor park 在浏览器走 DOM `activeElement` 替代 AX**。**浏览器路径自治不 fallback 到 OP**。**P5 Safari + Web Store / App Store 上架待做**。详见 [`specs/browser-support-design.md`](specs/browser-support-design.md)。
+1. **Keyboard layout** — `KeyCode.swift` is ANSI physical positions. Letter
+   hints are all wrong on non-QWERTY. Migration path: use `UCKeyTranslate` /
+   `CGEventKeyboardGetUnicodeString` to map keyCode + flags to a character,
+   then match.
+2. **Browser HINT (Chrome) — P0-P4 done**. Extension (detector.js rewriting
+   Vimium's rules, iframe coordination via a postMessage chain, shadow-DOM
+   recursion) + long-lived native messaging (background SW + bridge CLI) +
+   `BrowserProvider` on the Mouseless side wired into `HintMode`. Supporting
+   patches: multi-profile / multi-browser `i_am_active` routing; the
+   `tab_changed` signal fixing the same-window tab-switch blind spot;
+   MutationObserver-based `page_changed` for async loads; the
+   `navigation_complete` signal for refresh after a full-page navigation;
+   anchor-link commit skipping the 100ms post-commit rehint; the SW
+   proactively injecting into open tabs on startup; **`/`-search using a DOM
+   TreeWalker instead of OCR in browsers** (~10× faster); **app-switch cursor
+   park using DOM `activeElement` instead of AX**. **The browser path is
+   self-contained, no fallback to OP.** **P5 Safari + Web Store / App Store
+   submission pending.** See [`specs/browser-support-design.md`](specs/browser-support-design.md).
+3. **Electron / AX-bad app coverage** — **OmniParser vision path implemented
+   (P5-P6)**. Background: what the Chromium bridge exposes depends on the
+   app's ARIA hygiene; bad ones (WeChat, domestic SaaS) are a sea of AXGroups
+   with no actions; and framework ≠ AX quality (WeChat is native AppKit but
+   self-renders chat content, an AX black hole). Approach: **OP-default +
+   AX-whitelist routing** — a focused window whose app isn't in
+   `AppRegistry.AX_FOCUSED_WHITELIST` goes through OP (ScreenCaptureKit
+   capture + CoreML YOLO + baseline filtering + OCR click-refine), ~95ms, no
+   slower than an AX walk. Remaining: P7 data tuning (confidence threshold /
+   whitelist edits), P8 release packaging, the per-app correction layer
+   (template matching, P8+). See
+   [`specs/omniparser-fallback-design.md`](specs/omniparser-fallback-design.md).
+4. **Scan spikes during an app's AX cleanup** — closing a dialog / sheet lands
+   a sticky rescan inside the target app's ~500ms cleanup window, where
+   per-IPC latency rises from ~0.2ms to ~40ms. IPC count is already at its
+   floor of 13 (cache + walkMenuBar in tandem), so optimization room on this
+   path is exhausted. An event-driven "wait until AX is stable, then scan"
+   approach hasn't been tried — notification timing is uncontrollable, and the
+   theoretical wall-clock time might not drop. **Independent of OmniParser
+   routing** — OP only solves AX-black-hole apps; under a cleanup spike AX can
+   still return candidates (just slowly), and only whitelisted apps take the
+   AX walk. See `specs/hint-discovery.md` §5 +
+   [`specs/omniparser-fallback-design.md`](specs/omniparser-fallback-design.md) §4.5.
+5. **New modes / sub-states** — the `Mode` enum already has extension points:
+   select-text, a right-click command mode (WINDOW resize `specs/modes.md` §7
+   / WINDOW MOVE §8 are done; TAP's internal sub-states DRAG `specs/modes.md`
+   §6 / `/`-search §6.5 are done). The wiring path is in `specs/modes.md` §12.
+6. **`/`-search supporting Chinese input** — the current search-typing
+   sub-state only accepts ASCII (`VimSession.searchTypingChar` whitelists a-z
+   + 0-9 + space). Chinese pages **can be OCR'd** (`OCRRefiner.recognizeText`
+   is configured for zh-Hans / zh-Hant) but **can't be typed into**. Root
+   cause: the CGEventTap intercepts keyDown before the IME, so the IME never
+   gets the raw key and can't compose. Three candidate paths:
+   - **(a) pop a modal NSPanel to receive input** (recommended) — on bare `/`,
+     show a small borderless panel that temporarily holds focus so the IME can
+     work in the panel's NSTextField; restore focus when the sub-state exits.
+     The cleanest state isolation.
+   - **(b) steal focus to a hidden NSTextField + NSTextInputClient** — no
+     panel, but be careful that the sticky-rescan frontmost-app observer will
+     be perturbed by the focus-stealing action.
+   - **(c) allow Cmd+V to paste the clipboard** — zero code risk but requires
+     the user to type the text elsewhere first and copy it.
 
-3. **Electron / AX-bad app 覆盖** —— **已实现 OmniParser 视觉路径 (P5-P6)**。
-   背景：Chromium 桥暴露什么取决于 app 的 ARIA 卫生，差的（WeChat、国产 SaaS）一片
-   AXGroup 无 action；而且框架 ≠ AX 质量（WeChat 是 native AppKit 但聊天内容自渲染、AX 黑洞）。
-   方案：**OP-default + AX whitelist 路由**——焦点窗口不在 `AppRegistry.AX_FOCUSED_WHITELIST`
-   的 app 走 OP（ScreenCaptureKit 截屏 + CoreML YOLO + baseline 过滤 + OCR click-refine），
-   ~95ms 不比 AX walk 慢。剩余：P7 数据调参（confidence 阈值 / whitelist 增删）、P8 发布打包、
-   per-app 修正层（模板匹配，护城河，P8 后）。详见
-   [`specs/omniparser-fallback-design.md`](specs/omniparser-fallback-design.md)。
-4. **App AX cleanup 期的扫描尖峰** —— 关弹框 / 关 sheet 后 sticky rescan 落进目标 app
-   的 ~500ms cleanup 窗口里，per-IPC 延迟从 ~0.2ms 涨到 ~40ms。IPC 数已经压到下限
-   13（cache + walkMenuBar 双管），优化空间在这条路径上耗尽。事件驱动等 AX 稳定再
-   扫的方案没尝试过——通知发出时机不可控，理论 wall-clock 时间可能不降。
-   **跟 OmniParser 路由是独立问题**——OP 只解决 AX 黑洞 app；cleanup 尖峰下
-   AX 仍能返回候选（只是慢），且白名单 app 才走 AX walk。详见
-   `specs/hint-discovery.md` §5 + [`specs/omniparser-fallback-design.md`](specs/omniparser-fallback-design.md) §4.5。
-5. **新 modes / 子状态** —— `Mode` enum 已经留好扩展点：select-text、right-click 命令模式（WINDOW resize `specs/modes.md` §7 / WINDOW MOVE §8 已实现；TAP 内部子状态 DRAG `specs/modes.md` §6 / `/`-搜索 §6.5 已实现）。接入路径见 `specs/modes.md` §12。
-6. **`/`-搜索支持中文输入** —— 当前 search typing 子状态只接 ASCII（`VimSession.searchTypingChar` 白名单 a-z + 0-9 + space），中文页面**能 OCR 出来**（`OCRRefiner.recognizeText` 已配 zh-Hans / zh-Hant），但**敲不进去**。根因：CGEventTap 在 IME 之前拦截 keyDown，IME 收不到原始按键就不能 compose。三条候选路径：
-   - **(a) 弹 modal NSPanel 收输入**（推荐）——bare `/` 时弹个小 borderless panel 暂时持焦点，让 IME 在 panel 的 NSTextField 里 work，子状态退出时还焦点。状态隔离最干净。
-   - **(b) 偷焦点到隐藏 NSTextField + NSTextInputClient**——不弹 panel，但要小心 sticky 重扫的 frontmost-app observer 会被偷焦点动作扰动。
-   - **(c) 允许 Cmd+V 贴剪贴板**——零代码风险但要求用户先在别处输入好复制。
-
-   MVP 暂时只英文够用，做的时候记得先评估 (a) 跟现有 SearchOverlay 视觉是否冲突。
-7. **多 hint 来源的标签空间冲突** —— 焦点 app 元素很多时会吃光字母组，menu extras 排到 `lj/lk/ll`。
-   方案候选：menu extras 走单独的前缀（如 `;a`, `;s` …）或单独字母池。
-8. **Dock 分隔符 / Recents 占位过滤** —— 当前 Dock 把所有 `AXDockItem` 都收，包括分隔符。低价值的 hint 浪费标签。
-9. **Settings 配置面板** —— 菜单栏 "Settings…"（Cmd+,）。v1 做值型配置（光标/滚动/窗口速度的慢中快、双击阈值、跳屏距离）+ 主题色 + label 字号 + trigger 键预设 + 开机自启 + sticky 默认。存 UserDefaults（默认值 = 当前硬编码常量，没配过行为不变）、live-apply。各控制器里 `private let normalStep` 之类改读 `Settings.shared`。自定义键位映射推 v2（绑非 QWERTY 键盘布局重构，见 #1）。详见 [`specs/settings-design.md`](specs/settings-design.md)。
-10. **改名** —— "Mouseless" 这个名字已被别的项目占用，宜在更广泛发布前确定一个唯一名字（仓库/域名/可搜索性，不被通用词淹没）。
-11. **打包分发** —— 代码签名 + notarization（Developer ID，避免 Gatekeeper 拦截未签名 app），打 `.dmg` 或 Homebrew cask；可选一个带 **demo 视频**的简单落地页。notarization / Developer ID 签名需 Apple Developer Program（$99/年）。
+   English-only is fine for the MVP; when building this, first evaluate
+   whether (a) visually conflicts with the existing SearchOverlay.
+7. **Label-space collision across hint sources** — when the focused app has
+   many elements it eats the whole letter pool, pushing menu extras to
+   `lj/lk/ll`. Candidate fixes: give menu extras a separate prefix (e.g. `;a`,
+   `;s` …) or a separate letter pool.
+8. **Dock separator / Recents placeholder filtering** — the Dock currently
+   collects every `AXDockItem`, including separators. Low-value hints waste
+   labels.
+9. **Settings config panel** — a menu-bar "Settings…" (Cmd+,). v1 covers
+   value-type settings (slow/medium/fast for cursor/scroll/window speed,
+   double-click threshold, jump distance) + theme color + label font size +
+   trigger-key presets + launch-at-login + sticky default. Stored in
+   UserDefaults (defaults = the current hardcoded constants, so unconfigured
+   behavior is unchanged), live-applied. The `private let normalStep`-style
+   constants in each controller switch to reading `Settings.shared`. Custom
+   keymaps deferred to v2 (the non-QWERTY layout rebinding refactor, see #1).
+   See [`specs/settings-design.md`](specs/settings-design.md).
+10. **Rename** — the name "Mouseless" is already taken by another project; a
+    unique name should be settled before a wider release (repo / domain /
+    searchability, not drowned out by a generic word).
+11. **Packaging & distribution** — code signing + notarization (Developer ID,
+    to avoid Gatekeeper blocking an unsigned app), shipped as a `.dmg` or a
+    Homebrew cask; optionally a simple landing page with a **demo video**.
+    Notarization / Developer ID signing requires the Apple Developer Program
+    ($99/yr).
