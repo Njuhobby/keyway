@@ -16,7 +16,7 @@ import Cocoa
 /// inside the focused window.
 ///
 /// The whitelist is small and grows slowly (we add an app only after
-/// using it under Mouseless and confirming AX coverage is genuinely
+/// using it under Keyway and confirming AX coverage is genuinely
 /// good). Wrong direction (whitelist missing an AX-good app) just
 /// means we pay an extra 80-90ms for OP — acceptable. Wrong direction
 /// (whitelist including an AX-bad app) means the user sees missing
@@ -84,7 +84,7 @@ enum AppRegistry {
     /// AX tree is broken under default Chrome (lazy renderer-side AX)
     /// and OP-on-OCR misses icon-only buttons / dynamic SPAs — the
     /// extension reads the DOM directly and returns precise hints.
-    /// Mouseless main process picks `.browser` over AX / OP when
+    /// Keyway main process picks `.browser` over AX / OP when
     /// frontmost is in this set; falls back to OP if the extension
     /// isn't connected. See `specs/browser-support-design.md`.
     static let browserBundleIDs: Set<String> = [

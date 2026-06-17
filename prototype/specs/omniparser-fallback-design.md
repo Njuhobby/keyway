@@ -1,10 +1,10 @@
 # OmniParser Fallback — Design Notes
 
-A design draft for wiring the visual path into Mouseless. **Not an implementation plan** — a memo of "what we know so far and what we still have to decide."
+A design draft for wiring the visual path into Keyway. **Not an implementation plan** — a memo of "what we know so far and what we still have to decide."
 
 **Core positioning**: AX is the primary path. AX is fast (steady state ~50ms) and information-rich (it gives you role, enabled, action). OmniParser is **only a fallback for when AX is clearly insufficient**. Fall-through, **not parallel**. Rationale in §4.
 
-The PoC code lives **outside** the repo: `~/Desktop/mouseless-omniparser-poc/` (throwaway, untracked).
+The PoC code lives **outside** the repo: `~/Desktop/keyway-omniparser-poc/` (throwaway, untracked).
 
 ---
 
@@ -39,7 +39,7 @@ Detection-only data for three full-screen screenshots (2992×1934):
 
 Conclusion per the spec §5 decision tree: **the OmniParser path is technically viable and worth a proper integration** — as a fallback, not a replacement.
 
-The PoC overlay images live in `~/Desktop/mouseless-omniparser-poc/screenshots/*_overlay.png`; they're the visual evidence for judging recall.
+The PoC overlay images live in `~/Desktop/keyway-omniparser-poc/screenshots/*_overlay.png`; they're the visual evidence for judging recall.
 
 ---
 
@@ -53,7 +53,7 @@ The PoC overlay images live in `~/Desktop/mouseless-omniparser-poc/screenshots/*
 
 **Why we gave up** (instead of continuing to downgrade transformers to ~4.49 and filling all the holes):
 
-- **Mouseless doesn't need semantic captions**: the hint label is a two-letter code **we assign ourselves** (`as`, `af`...), not natural language. The captioner output contributes zero to the step of drawing a hint.
+- **Keyway doesn't need semantic captions**: the hint label is a two-letter code **we assign ourselves** (`as`, `af`...), not natural language. The captioner output contributes zero to the step of drawing a hint.
 - The only scenario where the captioner could add value: inferring "this is a button / link / text field" from the box, so that under the OmniParser path you can pick the corresponding synthesized action. **But under the fall-through path, OmniParser is only enabled when AX is insufficient** — when AX is good enough, the role signal already came from AX; when AX is insufficient (a black-hole app), just synthesize a uniform mouse click, no further classification needed.
 - Caption inference latency: Florence-2 base autoregressing ~20 tokens on MPS is roughly 50-200ms per box. Captioning 100+ boxes full-screen at once is in the seconds range — **it simply can't enter the real-time path**. Even captioning just the one selected box (after commit), by then the click has already happened, too late.
 
@@ -113,7 +113,7 @@ collectAll:
     return dock_targets ∪ menubar_targets ∪ extras_targets ∪ focused_targets
 ```
 
-**`AX_FOCUSED_WHITELIST`** is in `Sources/Mouseless/AppRegistry.swift`. Initial contents: Apple's own AppKit apps (Finder, Mail, Safari, Pages, Xcode...), 10-15 entries. A third-party app must be empirically verified to have good AX coverage before it gets in.
+**`AX_FOCUSED_WHITELIST`** is in `Sources/Keyway/AppRegistry.swift`. Initial contents: Apple's own AppKit apps (Finder, Mail, Safari, Pages, Xcode...), 10-15 entries. A third-party app must be empirically verified to have good AX coverage before it gets in.
 
 #### Latency analysis (M3 Max, measured numbers)
 
@@ -135,7 +135,7 @@ thread B: screencap + OP infer + filter      60 + 30 + 5 = 95ms warm
 user-facing = max(A, B) = ~95ms
 ```
 
-**Counterintuitive**: OP-default is **even faster** than the whitelist path — because the AX focus walk (150-200ms) is Mouseless's heaviest operation, and once OP replaces it, wall-clock actually drops. The AX walk's speed advantage was in fact long since erased by modern ScreenCaptureKit + CoreML on Metal GPU (see the 29ms inference numbers from the P1 spike `omniparser-coreml-spike` + the 60ms warm screencap from P2's `ScreenCapture.swift`).
+**Counterintuitive**: OP-default is **even faster** than the whitelist path — because the AX focus walk (150-200ms) is Keyway's heaviest operation, and once OP replaces it, wall-clock actually drops. The AX walk's speed advantage was in fact long since erased by modern ScreenCaptureKit + CoreML on Metal GPU (see the 29ms inference numbers from the P1 spike `omniparser-coreml-spike` + the 60ms warm screencap from P2's `ScreenCapture.swift`).
 
 The whitelist is, performance-wise, **only equal/slightly worse**; the real reasons for its existence are different:
 - Doesn't depend on the Screen Recording permission (only meaningful to users who genuinely don't want to grant it)
@@ -159,7 +159,7 @@ The sticky rescan / `HintWindowCache` logic is retained — AX is the primary pa
 
 **Decision**: bundle ID in `AX_FOCUSED_WHITELIST` → AX focus walk; everything else → OP path. The Dock / menubar / extras AX walk always runs (§4.2).
 
-The implementation is in `Sources/Mouseless/AppRegistry.swift`:
+The implementation is in `Sources/Keyway/AppRegistry.swift`:
 
 ```swift
 @MainActor
@@ -269,7 +269,7 @@ Class 4 is an engineering problem (must be correct); classes 1-3 + 5 are the OP 
 
 #### The implemented version: fast-path first, OCR only when the center conflicts
 
-> Implementation in `Sources/Mouseless/OCRRefiner.swift`. **The early draft (preserved in the "historical decisions" below this section) was "blind OCR first" — empirical testing overturned it, and it's now "first judge whether the center really has a problem, OCR only when there is one."**
+> Implementation in `Sources/Keyway/OCRRefiner.swift`. **The early draft (preserved in the "historical decisions" below this section) was "blind OCR first" — empirical testing overturned it, and it's now "first judge whether the center really has a problem, OCR only when there is one."**
 
 Observation: **clicking text almost always hits the click handler** (text is inside the visible region, close to center). But **"OCR out some text and click the text center" is wrong** — empirically, on WeChat chat rows:
 
@@ -410,7 +410,7 @@ The OCR refiner pulls the OP path's "hint appears ≠ definitely effective" clos
 
 #### An observable affordance after commit
 
-Even with the OCR refiner added, misclicks can still happen. Consider briefly highlighting the click point after commit — to at least let the user know "the system clicked this position." If the UI doesn't respond, the user knows it's a precision problem of the OP path (vs suspecting Mouseless didn't receive the key) and can switch to the mouse and retry. It's a small UX investment that's meaningful for both debugging and trust.
+Even with the OCR refiner added, misclicks can still happen. Consider briefly highlighting the click point after commit — to at least let the user know "the system clicked this position." If the UI doesn't respond, the user knows it's a precision problem of the OP path (vs suspecting Keyway didn't receive the key) and can switch to the mouse and retry. It's a small UX investment that's meaningful for both debugging and trust.
 
 ---
 
@@ -522,7 +522,7 @@ OmniParser is a PyTorch model; there's no way to cram it into the Swift process.
 
 #### P1 spike experiment result ✅ CoreML selected
 
-`~/Desktop/mouseless-omniparser-coreml-spike/` got the PyTorch → CoreML conversion + inference benchmark working. Conclusion: **the CoreML path is far better than expected.**
+`~/Desktop/keyway-omniparser-coreml-spike/` got the PyTorch → CoreML conversion + inference benchmark working. Conclusion: **the CoreML path is far better than expected.**
 
 **The conversion process** (a few pins to get right):
 
@@ -564,7 +564,7 @@ YOLO11m is multi-class trained (80 classes, COCO standard), but the OmniParser f
 
 **Decision**: choose #2 (CoreML in Swift). The rationale isn't just "single-binary deployment," but "absurdly fast + an order of magnitude simpler than #1's IPC + Python runtime." Full roadmap in [`omniparser-integration-roadmap.md`](./omniparser-integration-roadmap.md) P2/P4/P8.
 
-The PoC v2 throwaway spike is in `~/Desktop/mouseless-omniparser-coreml-spike/`, `rm -rf`-able any time — production doesn't need it.
+The PoC v2 throwaway spike is in `~/Desktop/keyway-omniparser-coreml-spike/`, `rm -rf`-able any time — production doesn't need it.
 
 ### 6.2 Model resident vs on-demand load
 
@@ -613,7 +613,7 @@ Edge cases:
 | The focused app has no window (a menu bar agent app) | `AXFocusedWindow` = nil → OmniParser doesn't trigger, the AX path handles the menu bar |
 | Multiple windows visible at once (several Finders) | The first version only captures `AXFocusedWindow`; decide by observation whether to extend to all AXWindows |
 | The focused window is partially occluded by other windows | ScreenCaptureKit's `desktopIndependentWindow` mode ignores occlusion and draws the full window content — exactly what we need |
-| Full-screen games (self-rendered, bypassing NSWindow) | Rare. The whole of Mouseless can't work in a game to begin with, a known limitation |
+| Full-screen games (self-rendered, bypassing NSWindow) | Rare. The whole of Keyway can't work in a game to begin with, a known limitation |
 
 #### Implementation path: ScreenCaptureKit per-window
 
@@ -685,7 +685,7 @@ That document maps the decisions scattered across this design (§4.4 framework d
 
 - OmniParser repo: `github.com/microsoft/OmniParser`
 - Weights: `huggingface.co/microsoft/OmniParser-v2.0` (`icon_detect/model.pt` is YOLOv8)
-- PoC source code: `~/Desktop/mouseless-omniparser-poc/` (throwaway, `rm -rf`-able any time)
+- PoC source code: `~/Desktop/keyway-omniparser-poc/` (throwaway, `rm -rf`-able any time)
 - Related specs:
   - `SPECS.md` known gap #2 (Electron / web compatibility) ← OmniParser mainly solves this
   - `SPECS.md` known gap #3 + `hint-discovery.md` §5 (AX cleanup spike) ← OmniParser does **not** solve this, fix it separately

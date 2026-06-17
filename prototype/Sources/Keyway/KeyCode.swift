@@ -44,7 +44,7 @@ enum KeyCode {
 
     /// `kVK_F19`. Used as the trigger key after the user remaps Caps Lock
     /// → F19 via hidutil (see `setup-trigger.sh`). No app uses F19, so it
-    /// acts as a dedicated "Hyper" key for Mouseless without collisions.
+    /// acts as a dedicated "Hyper" key for Keyway without collisions.
     static let f19 = 80
 
     static let arrowLeft = 123

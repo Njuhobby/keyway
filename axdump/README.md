@@ -2,11 +2,11 @@
 
 A standalone macOS dev tool that dumps an app's **complete, unfiltered
 Accessibility (AX) tree** to stdout. It's the ground-truth instrument for
-Mouseless's **AX-coverage** work.
+Keyway's **AX-coverage** work.
 
 ## Why it exists / why it's separate
 
-Mouseless serves clickable elements from three sources: AX walk (whitelist
+Keyway serves clickable elements from three sources: AX walk (whitelist
 apps), the browser extension (DOM), and OmniParser (vision) for everything
 else. To widen the moat we want to reclaim "AX-weak" apps (Slack, Discord,
 VS Code, WeChat, …) — but the right fix differs per app:
@@ -19,11 +19,11 @@ VS Code, WeChat, …) — but the right fix differs per app:
 
 The design docs *disagree* on which case Slack is. So before building
 anything, **measure**: dump the real tree and look. This tool does only
-that. It lives in its own SwiftPM project (not inside the Mouseless app) so
+that. It lives in its own SwiftPM project (not inside the Keyway app) so
 it adds zero runtime cost / no trigger-key, and builds to a stable path you
 grant Accessibility once.
 
-Unlike Mouseless's `HintMode` walk, axdump applies **no filtering** — no
+Unlike Keyway's `HintMode` walk, axdump applies **no filtering** — no
 role allow-list, no visibility/size pruning, no depth cap. Every node is
 printed so wrapped/irregular elements are visible.
 
@@ -69,7 +69,7 @@ The `.build` path is stable across rebuilds, so you only grant it once.
 
 Chromium/Electron apps (VS Code, Slack, Discord, Notion, Obsidian, Spotify)
 build their accessibility tree **lazily** — only when an assistive
-technology is detected. Cold, their AX is nearly empty (so Mouseless falls
+technology is detected. Cold, their AX is nearly empty (so Keyway falls
 back to OmniParser). `--wake` sets `AXManualAccessibility` (Chromium's flag)
 + `AXEnhancedUserInterface` (AppKit's "an AT is present") on the app, waits
 ~1.5s for the renderer to build the tree, then dumps.
@@ -84,18 +84,18 @@ Output goes to stdout (redirect to a file); progress/errors go to stderr.
 ## Output format
 
 A summary header, then every window's tree, one node per line. The first
-column is a **`▶` marker** when Mouseless's *current* hint logic would turn
+column is a **`▶` marker** when Keyway's *current* hint logic would turn
 that node into a hint target (see below):
 
 ```
 # AX dump — Slack (com.tinyspeck.slackmacgap, pid 1234)
 # windows: 1
 # nodes: 3812, with AXPress/AXOpen: 274
-# ▶ Mouseless would hint: 96  (mirrors HintMode; grep '^▶')
+# ▶ Keyway would hint: 96  (mirrors HintMode; grep '^▶')
 #   approximations: 169-target cap and closed-AXMenu nuance NOT applied
 # roles: AXGroup×2901, AXStaticText×410, AXButton×120, …
 # format: <▶|·> <indent><role>[<subrole>] "label" actions=[…] rect=(x,y w×h) en=N id=… SELECTED
-#         ▶ = Mouseless's current logic would mark this a hint target
+#         ▶ = Keyway's current logic would mark this a hint target
 
 == window[0] "Slack — general" ==
    AXWindow "Slack — general" rect=(0,0 1440×900)
@@ -104,9 +104,9 @@ that node into a hint target (see below):
        AXStaticText "general" rect=(...)
 ```
 
-### The `▶` marker — "what Mouseless catches"
+### The `▶` marker — "what Keyway catches"
 
-Each line is tagged `▶` iff Mouseless's hint walker would mark it, mirroring
+Each line is tagged `▶` iff Keyway's hint walker would mark it, mirroring
 `HintMode`: reachable (depth < 12, parent not an `AXStaticText`/`AXImage`/
 `AXProgressIndicator` it won't recurse into, subtree on-screen + within the
 window), enabled, ≥ 8×8, has a meaningful label, and is clickable (role in
@@ -115,13 +115,13 @@ source-list fallback. (Kept in sync with `HintMode.swift`; the 169-target
 cap and the menubar-only closed-`AXMenu` nuance are not replicated.)
 
 So the dump shows two things at once:
-- `▶` lines = **what Mouseless hints today**.
+- `▶` lines = **what Keyway hints today**.
 - un-`▶`'d lines that are clearly interactive = **the gap** — the
   AX-coverage opportunity.
 
 Reading it for AX-coverage decisions (`grep '^▶'` for the caught set):
 - A control you want to click that's **un-`▶`'d but has `AXPress`/`AXOpen`**
-  (or sits under an `AXImage`/`AXGroup` Mouseless doesn't reach) → a per-app
+  (or sits under an `AXImage`/`AXGroup` Keyway doesn't reach) → a per-app
   rule can surface it.
 - A control present with **no actions and no meaningful label**, buried in
   `AXGroup`s, often still maps to something clickable → a per-app predicate

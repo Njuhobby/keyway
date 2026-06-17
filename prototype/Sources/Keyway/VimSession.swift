@@ -72,7 +72,7 @@ final class VimSession {
     /// Standalone scroll engine for the browser's in-page d/u/gg/G scroll
     /// (Vimium-style), driven by `page_scroll` messages the extension's
     /// content script sends when the user presses d/u/gg/G on a real web
-    /// page while NOT in any Mouseless mode. Reuses ScrollController's
+    /// page while NOT in any Keyway mode. Reuses ScrollController's
     /// wheel-posting (start/stop/jump) WITHOUT enter() — no area detection,
     /// no cursor warp, no overlay: it just posts a real scroll-wheel event
     /// at the current cursor, so the browser's native scroll engine handles
@@ -315,14 +315,14 @@ final class VimSession {
     }
 
     /// Handle a `page_scroll` command from the extension (content script
-    /// detected d/u/gg/G on a real web page, no Mouseless mode active).
+    /// detected d/u/gg/G on a real web page, no Keyway mode active).
     /// We post a real scroll-wheel event at the cursor via `pageScroll`,
     /// so the browser's native scroll engine does the work (correct
     /// containment, scrolls whatever's under the cursor). Continuous
     /// scrolling runs on `pageScroll`'s own 60fps timer — only start/stop/
     /// jump cross the bridge, never per-frame.
     ///
-    /// Ignored (and any running scroll stopped) when a Mouseless mode is
+    /// Ignored (and any running scroll stopped) when a Keyway mode is
     /// active: the content script shouldn't fire then (the tap eats d/u
     /// before the page), but guard defensively so mode scrolling and page
     /// scrolling can never run at once.
@@ -361,7 +361,7 @@ final class VimSession {
             // controller (user would press d/u and nothing useful
             // would happen).
             HUD.shared.show("SCROLL: no frontmost window")
-            Log.debug("[mouseless] enter SCROLL: aborted — no focused window")
+            Log.debug("[keyway] enter SCROLL: aborted — no focused window")
             return
         }
         mode = .scroll(controller)
@@ -369,7 +369,7 @@ final class VimSession {
         sticky = false
         renderModeHUD()   // show "SCROLL" (was stuck on "TAP" when chorded from TAP)
         startFollowingFrontmost()   // re-apply SCROLL on app activation
-        Log.debug("[mouseless] enter SCROLL mode")
+        Log.debug("[keyway] enter SCROLL mode")
     }
 
     /// Enter `.window` mode. Triggered by Caps Lock + w chord (HotkeyTap)
@@ -407,12 +407,12 @@ final class VimSession {
         }
         guard AXWindowOps.hasTitleBarButton(window) else {
             HUD.shared.show("WINDOW: no resizable window")
-            Log.debug("[mouseless] WINDOW: no title-bar buttons on frontmost window (Desktop / fullscreen / borderless) — refused")
+            Log.debug("[keyway] WINDOW: no title-bar buttons on frontmost window (Desktop / fullscreen / borderless) — refused")
             return
         }
         guard AXWindowOps.isResizable(window) else {
             HUD.shared.show("WINDOW: can't resize this window")
-            Log.debug("[mouseless] WINDOW: AXPosition/AXSize not writable on this window — refused")
+            Log.debug("[keyway] WINDOW: AXPosition/AXSize not writable on this window — refused")
             return
         }
         teardownCurrentMode()   // drop overlays / stop mover from prior mode
@@ -426,7 +426,7 @@ final class VimSession {
         sticky = false
         renderModeHUD()
         startFollowingFrontmost()   // re-apply WINDOW resize on app activation
-        Log.debug("[mouseless] enter WINDOW mode at \(Int(rect.minX)),\(Int(rect.minY)) \(Int(rect.width))×\(Int(rect.height))")
+        Log.debug("[keyway] enter WINDOW mode at \(Int(rect.minX)),\(Int(rect.minY)) \(Int(rect.width))×\(Int(rect.height))")
     }
 
     /// Enter `.windowMove` mode. Caps Lock + m chord (HotkeyTap). Same
@@ -449,12 +449,12 @@ final class VimSession {
         }
         guard AXWindowOps.hasTitleBarButton(window) else {
             HUD.shared.show("MOVE: no movable window")
-            Log.debug("[mouseless] MOVE: no title-bar buttons on frontmost window — refused")
+            Log.debug("[keyway] MOVE: no title-bar buttons on frontmost window — refused")
             return
         }
         guard AXWindowOps.isMovable(window) else {
             HUD.shared.show("MOVE: can't move this window")
-            Log.debug("[mouseless] MOVE: AXPosition not writable — refused")
+            Log.debug("[keyway] MOVE: AXPosition not writable — refused")
             return
         }
         teardownCurrentMode()
@@ -468,7 +468,7 @@ final class VimSession {
         sticky = false
         renderModeHUD()
         startFollowingFrontmost()   // re-apply WINDOW MOVE on app activation
-        Log.debug("[mouseless] enter MOVE mode at \(Int(rect.minX)),\(Int(rect.minY))")
+        Log.debug("[keyway] enter MOVE mode at \(Int(rect.minX)),\(Int(rect.minY))")
     }
 
     /// Enter TAP mode (hints visible). **Sets `mode` synchronously** so a
@@ -484,7 +484,7 @@ final class VimSession {
         mode = .tap(h)          // synchronous — no race window
         paletteBuffer = nil
         sticky = false
-        Log.debug("[mouseless] enter TAP mode")
+        Log.debug("[keyway] enter TAP mode")
         logFocusedAppRouting()
         startFollowingFrontmost()   // acts only while sticky (gated in callback)
 
@@ -691,7 +691,7 @@ final class VimSession {
     ///     render, infinite scroll).
     ///   - `tab_changed` — user switched active tab inside the focused
     ///     Chrome window (Cmd+1/2/3, click on tab strip, navigation
-    ///     back/forward). Mouseless can't detect this from macOS AX
+    ///     back/forward). Keyway can't detect this from macOS AX
     ///     because the NSWindow doesn't change — only the extension
     ///     sees it via `chrome.tabs.onActivated`.
     ///
@@ -761,7 +761,7 @@ final class VimSession {
             // appear" — no black-frame flash.
             await h.refreshInPlace()
             guard gen == self.rehintGeneration else { return }
-            Log.debug("[mouseless] page_changed → refreshed in-place")
+            Log.debug("[keyway] page_changed → refreshed in-place")
         }
     }
 
@@ -830,36 +830,36 @@ final class VimSession {
             if Task.isCancelled { return }
             switch (prev, cur) {
             case (_, .captureFailed):
-                Log.debug("[mouseless] settle poll \(poll): capture failed (skip)")
+                Log.debug("[keyway] settle poll \(poll): capture failed (skip)")
                 continue   // keep prev + stable
             case let (.frame(p), .frame(c)):
                 let diff = Self.meanAbsDiff(p, c)
-                Log.debug("[mouseless] settle poll \(poll): diff=\(String(format: "%.1f", diff)) stable=\(stable)")
+                Log.debug("[keyway] settle poll \(poll): diff=\(String(format: "%.1f", diff)) stable=\(stable)")
                 stable = diff < threshold ? stable + 1 : 0
                 prev = cur
                 if stable >= stableNeeded {
-                    Log.debug("[mouseless] settle: content stable → onSettled (poll \(poll))")
+                    Log.debug("[keyway] settle: content stable → onSettled (poll \(poll))")
                     onSettled()
                     return
                 }
             case (.noWindow, .noWindow):
                 stable += 1
-                Log.debug("[mouseless] settle poll \(poll): noWindow stable=\(stable)")
+                Log.debug("[keyway] settle poll \(poll): noWindow stable=\(stable)")
                 prev = cur
                 if stable >= stableNeeded {
-                    Log.debug("[mouseless] settle: persistently no window → onNoWindow (poll \(poll))")
+                    Log.debug("[keyway] settle: persistently no window → onNoWindow (poll \(poll))")
                     onNoWindow()
                     return
                 }
             default:
                 // frame ⇄ noWindow transition = a change; re-baseline.
-                Log.debug("[mouseless] settle poll \(poll): state change → reset")
+                Log.debug("[keyway] settle poll \(poll): state change → reset")
                 stable = 0
                 prev = cur
             }
         }
         // Cap reached — fire the terminal matching the last state.
-        Log.debug("[mouseless] settle: cap reached")
+        Log.debug("[keyway] settle: cap reached")
         switch prev {
         case .noWindow: onNoWindow()
         default:        onSettled()
@@ -1010,10 +1010,10 @@ final class VimSession {
         let before = Self.dockSignature(h.currentDockRects)
         let after = Self.dockSignature(HintMode.collectDockRects())
         guard before != after else {
-            Log.debug("[mouseless] app terminated → dock unchanged → ignore")
+            Log.debug("[keyway] app terminated → dock unchanged → ignore")
             return
         }
-        Log.debug("[mouseless] app terminated → dock changed → in-place refresh")
+        Log.debug("[keyway] app terminated → dock changed → in-place refresh")
         rehintGeneration += 1
         let gen = rehintGeneration
         Task { @MainActor in
@@ -1142,7 +1142,7 @@ final class VimSession {
         }
         guard changed else { return }
         lastSeenFocusedWindow = current
-        Log.debug("[mouseless] focused window change detected (poll) → re-apply")
+        Log.debug("[keyway] focused window change detected (poll) → re-apply")
         reapplyOnCurrentFrontmost()
     }
 
@@ -1243,7 +1243,7 @@ final class VimSession {
         // we just cancelled above and which every teardown path cancels.
         // (SCROLL / WINDOW / MOVE keep the fixed-delay re-enter for now.)
         if kind == .tap {
-            Log.debug("[mouseless] app/space changed → TAP re-apply via settle watch")
+            Log.debug("[keyway] app/space changed → TAP re-apply via settle watch")
             contentSettleTask = Task { @MainActor [weak self] in
                 guard let self else { return }
                 func frame() async -> SettleFrame {
@@ -1277,7 +1277,7 @@ final class VimSession {
         // ---- SCROLL / WINDOW / MOVE: fixed settle delay (unchanged). ----
         let onScreen = Self.frontmostAppHasOnScreenWindow()
         let delay: TimeInterval = onScreen ? 0.1 : 0.5
-        Log.debug("[mouseless] app/space changed → re-apply \(kind.map { "\($0)" } ?? "?") in \(Int(delay * 1000))ms (onScreen=\(onScreen))")
+        Log.debug("[keyway] app/space changed → re-apply \(kind.map { "\($0)" } ?? "?") in \(Int(delay * 1000))ms (onScreen=\(onScreen))")
         let item = DispatchWorkItem { [weak self] in
             guard let self else { return }
             // If user has Esc'd or chorded into a different mode in the
@@ -1378,7 +1378,7 @@ final class VimSession {
     /// midpoint — BUT only if the cursor isn't already inside that
     /// window. Skip-when-inside protects the case where the user was
     /// just looking at something specific in the focused app; an
-    /// unconditional warp would feel intrusive ("Mouseless moved my
+    /// unconditional warp would feel intrusive ("Keyway moved my
     /// cursor away from where I was looking"). When the cursor is
     /// outside the window (or on a different app), the warp is a
     /// useful nudge — places the cursor at a known good spot
@@ -1533,7 +1533,7 @@ final class VimSession {
     /// real input on a new app we can extend the rules.
     private static func focusedTextInputRect(inside windowRect: CGRect) -> CGRect? {
         guard let (app, _) = FocusedApp.current() else {
-            Log.debug("[mouseless] focusedInput: no frontmost app")
+            Log.debug("[keyway] focusedInput: no frontmost app")
             return nil
         }
         var focusedRef: CFTypeRef?
@@ -1541,7 +1541,7 @@ final class VimSession {
             app, "AXFocusedUIElement" as CFString, &focusedRef
         )
         guard readResult == .success, let raw = focusedRef else {
-            Log.debug("[mouseless] focusedInput: AXFocusedUIElement read failed (err=\(readResult.rawValue))")
+            Log.debug("[keyway] focusedInput: AXFocusedUIElement read failed (err=\(readResult.rawValue))")
             return nil
         }
         let element = raw as! AXUIElement
@@ -1576,25 +1576,25 @@ final class VimSession {
             valueSettable.boolValue && hasValueResult == .success
 
         guard matchedByRole || matchedByEditableValue else {
-            Log.debug("[mouseless] focusedInput: skipped role=\(role) subrole=\(subrole) " +
+            Log.debug("[keyway] focusedInput: skipped role=\(role) subrole=\(subrole) " +
                   "valueSettable=\(valueSettable.boolValue) hasValue=\(hasValueResult == .success)")
             return nil
         }
 
         guard let rect = AXWindowOps.readRect(element) else {
-            Log.debug("[mouseless] focusedInput: role=\(role) matched but no rect")
+            Log.debug("[keyway] focusedInput: role=\(role) matched but no rect")
             return nil
         }
         guard windowRect.intersects(rect) else {
-            Log.debug("[mouseless] focusedInput: role=\(role) rect outside window (input=\(rect) window=\(windowRect))")
+            Log.debug("[keyway] focusedInput: role=\(role) rect outside window (input=\(rect) window=\(windowRect))")
             return nil
         }
         guard rect.width >= 4, rect.height >= 4 else {
-            Log.debug("[mouseless] focusedInput: role=\(role) rect too small (\(rect.width)x\(rect.height))")
+            Log.debug("[keyway] focusedInput: role=\(role) rect too small (\(rect.width)x\(rect.height))")
             return nil
         }
         let how = matchedByRole ? "role" : "editable-value"
-        Log.debug("[mouseless] focusedInput: match via \(how) — role=\(role) subrole=\(subrole) rect=\(rect)")
+        Log.debug("[keyway] focusedInput: match via \(how) — role=\(role) subrole=\(subrole) rect=\(rect)")
         return rect
     }
 
@@ -1604,13 +1604,13 @@ final class VimSession {
         // Frontmost app via NSWorkspace — AXFocusedApplication was flaky
         // on Electron apps (returned nil for VS Code). See FocusedApp.swift.
         guard let (_, pid) = FocusedApp.current() else {
-            Log.debug("[mouseless] route: no frontmost app")
+            Log.debug("[keyway] route: no frontmost app")
             return
         }
         guard let running = NSRunningApplication(processIdentifier: pid),
               let bundleID = running.bundleIdentifier
         else {
-            Log.debug("[mouseless] route: frontmost app has no bundleID (pid=\(pid))")
+            Log.debug("[keyway] route: frontmost app has no bundleID (pid=\(pid))")
             return
         }
         let isBrowser = AppRegistry.isBrowserApp(bundleID: bundleID)
@@ -1623,7 +1623,7 @@ final class VimSession {
         } else {
             label = "OmniParser (default)"
         }
-        Log.debug("[mouseless] route: \(bundleID) -> \(label)")
+        Log.debug("[keyway] route: \(bundleID) -> \(label)")
     }
 
     func exit() {
@@ -1660,7 +1660,7 @@ final class VimSession {
         paletteBuffer = nil
         sticky = false
         HUD.shared.hide()
-        Log.debug("[mouseless] exit")
+        Log.debug("[keyway] exit")
     }
 
     // MARK: - Event entry point
@@ -1739,7 +1739,7 @@ final class VimSession {
 
         // Cmd / Ctrl held → system shortcut. Pass through so things like
         // Cmd+Shift+4 (screenshot), Cmd+Space (Spotlight), Cmd+Tab, and
-        // Ctrl+Up (Mission Control) still work while Mouseless is active.
+        // Ctrl+Up (Mission Control) still work while Keyway is active.
         // Shift / Option are reserved for hint click-action modifiers
         // (Shift = double-click, Option = right-click), so they stay.
         if !flags.intersection([.maskCommand, .maskControl]).isEmpty {
@@ -1747,7 +1747,7 @@ final class VimSession {
         }
 
         // ↑↓←→ arrow keys → always pass through, in any mode and with
-        // any modifier combo. Mouseless uses hjkl for its own cursor /
+        // any modifier combo. Keyway uses hjkl for its own cursor /
         // scroll / window motion; the arrow keys are left for the
         // focused app's native navigation (scroll a list, move the
         // text caret, walk a menu, etc.). Without this, the active
@@ -1825,7 +1825,7 @@ final class VimSession {
     /// h/j/k/l → which direction the window moves. Same encoding as
     /// MouseMover (cursor) / SCROLL / WINDOW resize (where j means
     /// "bottom border" which moves "down") — consistent vim layout
-    /// across all of Mouseless.
+    /// across all of Keyway.
     private static func windowMoveDirection(for keyCode: Int) -> WindowMoveController.Direction? {
         switch keyCode {
         case KeyCode.h: return .left
@@ -1895,7 +1895,7 @@ final class VimSession {
         // distract; user is focused on dragging.
         if case .tap(let h) = mode { h.hideOverlay() }
         renderModeHUD()
-        Log.debug("[mouseless] DRAG (TAP sub-state) start at \(Int(cursor.x)),\(Int(cursor.y))")
+        Log.debug("[keyway] DRAG (TAP sub-state) start at \(Int(cursor.x)),\(Int(cursor.y))")
     }
 
     /// Drag committed (Enter). MouseUp at the current cursor; sticky-
@@ -1946,7 +1946,7 @@ final class VimSession {
         scrollSub = .dragging(DragController(at: cursor))
         controller.hideOverlay()
         renderModeHUD()
-        Log.debug("[mouseless] DRAG (SCROLL sub-state) start at \(Int(cursor.x)),\(Int(cursor.y))")
+        Log.debug("[keyway] DRAG (SCROLL sub-state) start at \(Int(cursor.x)),\(Int(cursor.y))")
     }
 
     /// `.dragging` keystrokes in SCROLL. hjkl is handled by the early
@@ -2126,10 +2126,10 @@ final class VimSession {
         let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
         let useBrowser = bundleID.map { AppRegistry.isBrowserApp(bundleID: $0) } ?? false
         if useBrowser {
-            Log.debug("[mouseless] search: query=\"\(query)\" — DOM match via extension")
+            Log.debug("[keyway] search: query=\"\(query)\" — DOM match via extension")
             kickoffSearchViaBrowser(query: query)
         } else {
-            Log.debug("[mouseless] search: query=\"\(query)\" — capturing + OCR'ing focused window")
+            Log.debug("[keyway] search: query=\"\(query)\" — capturing + OCR'ing focused window")
             kickoffSearchViaOCR(query: query)
         }
     }
@@ -2140,12 +2140,12 @@ final class VimSession {
             let raw = await BrowserProvider.findText(query: query)
             // Cancel guard, same pattern as OCR path.
             guard case .searching = self.searchPhase else {
-                Log.debug("[mouseless] search: cancelled during DOM match")
+                Log.debug("[keyway] search: cancelled during DOM match")
                 return
             }
             let tEnd = Date()
             let ms = Int(tEnd.timeIntervalSince(tStart) * 1000)
-            Log.debug("[mouseless] search: DOM → \(raw.count) matches in \(ms)ms")
+            Log.debug("[keyway] search: DOM → \(raw.count) matches in \(ms)ms")
             if raw.isEmpty {
                 searchFailed(reason: "no matches for \"\(query)\"")
                 return
@@ -2171,12 +2171,12 @@ final class VimSession {
                 return
             }
             guard case .searching = self.searchPhase else {
-                Log.debug("[mouseless] search: cancelled during capture")
+                Log.debug("[keyway] search: cancelled during capture")
                 return
             }
             let observations = OCRRefiner.recognizeText(in: captured.image)
             guard case .searching = self.searchPhase else {
-                Log.debug("[mouseless] search: cancelled during OCR")
+                Log.debug("[keyway] search: cancelled during OCR")
                 return
             }
             let matches = Self.findMatches(query: query,
@@ -2184,7 +2184,7 @@ final class VimSession {
                                            windowRect: captured.screenRect)
             let tEnd = Date()
             let ms = Int(tEnd.timeIntervalSince(tStart) * 1000)
-            Log.debug("[mouseless] search: \(observations.count) obs → \(matches.count) matches in \(ms)ms")
+            Log.debug("[keyway] search: \(observations.count) obs → \(matches.count) matches in \(ms)ms")
             if matches.isEmpty {
                 searchFailed(reason: "no matches for \"\(query)\"")
                 return
@@ -2205,7 +2205,7 @@ final class VimSession {
     /// OCR returned nothing usable. Show a brief HUD note, then return
     /// to TAP normal with the hint overlay re-shown.
     private func searchFailed(reason: String) {
-        Log.debug("[mouseless] search failed: \(reason)")
+        Log.debug("[keyway] search failed: \(reason)")
         cancelSearch()
         HUD.shared.show("no matches")
     }
@@ -2340,7 +2340,7 @@ final class VimSession {
             x: match.rect.minX + 2,
             y: match.rect.minY + match.rect.height * 0.6
         )
-        Log.debug("[mouseless] search commit: label=\(match.label) text=\"\(match.text.prefix(40))\" rect=(\(Int(match.rect.minX)),\(Int(match.rect.minY)),\(Int(match.rect.width))x\(Int(match.rect.height))) → cursor (\(Int(landing.x)),\(Int(landing.y)))")
+        Log.debug("[keyway] search commit: label=\(match.label) text=\"\(match.text.prefix(40))\" rect=(\(Int(match.rect.minX)),\(Int(match.rect.minY)),\(Int(match.rect.width))x\(Int(match.rect.height))) → cursor (\(Int(landing.x)),\(Int(landing.y)))")
         SearchOverlay.shared.hide()
         // Synthesized .mouseMoved instead of CGWarpMouseCursorPosition
         // so the destination view sees the move and updates the
@@ -2776,7 +2776,7 @@ final class VimSession {
         case .down:  advanced = next.y > current.y + 0.5
         }
         guard advanced else {
-            Log.debug("[mouseless] jumpCursor: at screen edge, no-op (direction=\(direction))")
+            Log.debug("[keyway] jumpCursor: at screen edge, no-op (direction=\(direction))")
             return
         }
         MouseSynth.warp(to: next, dragging: dragHeld)
@@ -2950,7 +2950,7 @@ final class VimSession {
                 else { isBrowserCommit = false }
                 let isDockCommit = (hint.lastCommittedTarget?.role == "AXDockItem")
                 if isNavigating {
-                    Log.debug("[mouseless] sticky: skip 100ms rehint (link navigation, awaiting tabs.onUpdated)")
+                    Log.debug("[keyway] sticky: skip 100ms rehint (link navigation, awaiting tabs.onUpdated)")
                 } else if !isBrowserCommit && !isDockCommit {
                     // Non-browser apps have no page_changed signal, and a
                     // fixed-delay rehint is a blind guess at when the
@@ -3067,7 +3067,7 @@ final class VimSession {
             // Unknown command — clear the buffer, leave the palette open
             // so the user can type another command without reopening it.
             // There's deliberately no built-in `:q` command — Esc already
-            // deactivates the mode, and quitting the Mouseless process is
+            // deactivates the mode, and quitting the Keyway process is
             // a menu-bar action, not a hint-mode command (see SPECS §2.1).
             paletteBuffer = ""
             HUD.shared.show(":")

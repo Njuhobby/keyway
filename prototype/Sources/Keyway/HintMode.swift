@@ -430,7 +430,7 @@ final class HintMode {
         focusedTargetCount = collected.focused.count
                            + collected.focusedOmni.count
                            + collected.focusedBrowser.count
-        Log.debug("[mouseless] hint: \(targets.count) targets (focusedAX: \(collected.focused.count), focusedOP: \(collected.focusedOmni.count), focusedBrowser: \(collected.focusedBrowser.count), dock: \(collected.dock.count), extras: \(collected.menuBarExtras.count))")
+        Log.debug("[keyway] hint: \(targets.count) targets (focusedAX: \(collected.focused.count), focusedOP: \(collected.focusedOmni.count), focusedBrowser: \(collected.focusedBrowser.count), dock: \(collected.dock.count), extras: \(collected.menuBarExtras.count))")
         return true
     }
 
@@ -835,7 +835,7 @@ final class HintMode {
         }
         let t3 = Date()
 
-        Log.debug(String(format: "[mouseless] collect timings: focused=%.0fms [%@] (%d IPC, %d window cache hit, ax=%d op=%d browser=%d) dock=%.0fms (%d IPC) extras=%.0fms",
+        Log.debug(String(format: "[keyway] collect timings: focused=%.0fms [%@] (%d IPC, %d window cache hit, ax=%d op=%d browser=%d) dock=%.0fms (%d IPC) extras=%.0fms",
                      t1.timeIntervalSince(t0) * 1000, routeLabel, focusedIPC, cacheHits,
                      focusedOut.count, focusedOmniOut.count, focusedBrowserOut.count,
                      t2.timeIntervalSince(t1) * 1000, dockIPC,

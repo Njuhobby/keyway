@@ -1,13 +1,13 @@
-# Mouseless
+# Keyway
 
 > Drive your Mac entirely from the keyboard.
 
-Mouseless is a macOS keyboard layer that lets you do with the keyboard what
+Keyway is a macOS keyboard layer that lets you do with the keyboard what
 you'd normally reach for the mouse: click anything, scroll, drag, move and
 resize windows — without your hands leaving the home row.
 
 Press a trigger key, every clickable thing on screen gets a short letter
-label, you type the label, it clicks. The twist is **coverage**: Mouseless
+label, you type the label, it clicks. The twist is **coverage**: Keyway
 finds targets not just in native Cocoa apps (via the Accessibility API) but
 also inside Electron apps, web views and arbitrary pixels — by falling back
 to an on-device vision model — and inside web pages via a companion browser
@@ -25,7 +25,7 @@ extension reading the DOM directly.
   (left click, or right click with a modifier). The core interaction.
 - **Coverage beyond native AX** — Electron (Slack, VS Code, Discord),
   WebViews and Catalyst apps expose almost nothing useful to the
-  Accessibility API. Mouseless fills that "AX black hole" with an on-device
+  Accessibility API. Keyway fills that "AX black hole" with an on-device
   [OmniParser](https://github.com/microsoft/OmniParser) vision model, and
   hints web pages through a browser extension that reads the DOM.
 - **Scroll, window move/resize, drag** — separate keyboard modes, plus
@@ -51,7 +51,7 @@ A couple of pieces that were interesting to build (see `prototype/specs/`):
 - **Cheap "wait for the screen to settle" detection.** Many rehints (after a
   click, an app switch, a cross-Space slide) need to wait until the new
   content has actually rendered — but there's no event for that. Instead of
-  guessing a fixed delay, Mouseless polls a tiny (64×36) grayscale
+  guessing a fixed delay, Keyway polls a tiny (64×36) grayscale
   fingerprint of the window and rehints the moment two frames match. One
   scan, timed to the content, not to a guess.
 - **Caps Lock as the trigger** without a kext: `hidutil` remaps Caps Lock to
@@ -77,11 +77,11 @@ cd prototype
 A `M` icon appears in the menu bar: `M●` ready, `M⚠` a permission is
 missing. Press **Caps Lock** to enter hint mode.
 
-On first launch macOS prompts for the two permissions. Enable Mouseless in
+On first launch macOS prompts for the two permissions. Enable Keyway in
 **System Settings → Privacy & Security** for both, fully quit, and rerun.
 
 > `run.sh` ad-hoc re-signs the binary so the permission grant survives
-> rebuilds, and Mouseless auto-remaps Caps Lock → F19 on launch and restores
+> rebuilds, and Keyway auto-remaps Caps Lock → F19 on launch and restores
 > it on quit. See [`prototype/SPECS.md`](prototype/SPECS.md) for the full
 > setup, the mode reference, and the architecture deep-dives under
 > `prototype/specs/`.
@@ -96,14 +96,14 @@ work through the vision fallback, just less precisely.
 
 ## Permissions & privacy
 
-Mouseless runs entirely on your machine. **No telemetry, no network calls**
+Keyway runs entirely on your machine. **No telemetry, no network calls**
 other than the local socket between the app and the browser extension. The
 permissions are used only for what's described above; screen captures are
 processed in memory and not written to disk (outside an opt-in debug flag).
 
 ## License
 
-**[AGPL-3.0-or-later](LICENSE).** Mouseless bundles an icon-detection model
+**[AGPL-3.0-or-later](LICENSE).** Keyway bundles an icon-detection model
 derived from [OmniParser](https://github.com/microsoft/OmniParser) (built on
 Ultralytics YOLO), whose weights are AGPL-licensed; the AGPL applies to the
 combined work, so the whole project is AGPL-3.0. If you run a modified

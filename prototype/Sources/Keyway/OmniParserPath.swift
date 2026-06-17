@@ -28,14 +28,14 @@ enum OmniParserPath {
     }
 
     /// Master switch for the diagnostic overlay dump
-    /// (`/tmp/mouseless-focused.png` with kept/rejected boxes drawn).
+    /// (`/tmp/keyway-focused.png` with kept/rejected boxes drawn).
     /// Off in production — the PNG encode of a retina image costs
     /// 30-80ms even on a background queue (mostly disk write + zlib).
-    /// Toggle via `MOUSELESS_DEBUG_OVERLAY=1` in the env. `run.sh` sets
+    /// Toggle via `KEYWAY_DEBUG_OVERLAY=1` in the env. `run.sh` sets
     /// it automatically so dev runs always see the overlay. Production
     /// `.app` launches without it, paying zero overlay cost.
     static let debugOverlayEnabled: Bool =
-        ProcessInfo.processInfo.environment["MOUSELESS_DEBUG_OVERLAY"] == "1"
+        ProcessInfo.processInfo.environment["KEYWAY_DEBUG_OVERLAY"] == "1"
 
     /// Collect visual candidates for the currently focused window.
     /// Returns `[]` on any failure (no permission, capture failure,
@@ -46,7 +46,7 @@ enum OmniParserPath {
         let tStart = Date()
 
         guard let captured = await ScreenCapture.captureFocusedWindow(isolateApp: isolateApp) else {
-            Log.warn("[mouseless] OP: ScreenCapture returned nil — skipping inference")
+            Log.warn("[keyway] OP: ScreenCapture returned nil — skipping inference")
             return []
         }
         let tCapture = Date()
@@ -55,7 +55,7 @@ enum OmniParserPath {
         do {
             detections = try await OmniParserModel.infer(image: captured.image)
         } catch {
-            Log.error("[mouseless] OP: inference error: \(error)")
+            Log.error("[keyway] OP: inference error: \(error)")
             return []
         }
         let tInfer = Date()
@@ -72,7 +72,7 @@ enum OmniParserPath {
         if debugOverlayEnabled {
             saveDebugOverlay(image: captured.image,
                              kept: filtered, rejected: rejected,
-                             path: "/tmp/mouseless-focused.png")
+                             path: "/tmp/keyway-focused.png")
         }
 
         // Map normalized rect → screen-space rect using the window's
@@ -96,7 +96,7 @@ enum OmniParserPath {
         let tMap = Date()
 
         let ms = { (a: Date, b: Date) in Int(b.timeIntervalSince(a) * 1000) }
-        Log.debug("[mouseless] OP timings: capture=\(ms(tStart, tCapture))ms infer=\(ms(tCapture, tInfer))ms filter=\(ms(tInfer, tFilter))ms map=\(ms(tFilter, tMap))ms total=\(ms(tStart, tMap))ms raw=\(detections.count) → \(candidates.count)")
+        Log.debug("[keyway] OP timings: capture=\(ms(tStart, tCapture))ms infer=\(ms(tCapture, tInfer))ms filter=\(ms(tInfer, tFilter))ms map=\(ms(tFilter, tMap))ms total=\(ms(tStart, tMap))ms raw=\(detections.count) → \(candidates.count)")
         return candidates
     }
 
@@ -224,7 +224,7 @@ enum OmniParserPath {
             CGImageDestinationAddImage(dest, outImage, nil)
             _ = CGImageDestinationFinalize(dest)
             let ms = Int(Date().timeIntervalSince(t0) * 1000)
-            Log.debug("[mouseless] OP debug overlay: \(ms)ms → \(path)")
+            Log.debug("[keyway] OP debug overlay: \(ms)ms → \(path)")
         }
     }
 }

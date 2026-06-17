@@ -1,4 +1,4 @@
-# Mouseless Prototype — Specs
+# Keyway Prototype — Specs
 
 A macOS keyboard layer that fully replaces the mouse. This is the entry
 document for the current prototype implementation.
@@ -29,12 +29,12 @@ All three steps of `run.sh` are required:
    signature with an ad-hoc one. The linker signature makes TCC
    (Accessibility) authorization unstable — every rebuild forces the user to
    re-grant. With an ad-hoc signature the grant is remembered stably.
-3. `pkill -f Mouseless` — the old instance must be killed before launching a
+3. `pkill -f Keyway` — the old instance must be killed before launching a
    new one, otherwise the old event tap is still intercepting events.
 
-After launch an `M` icon appears in the menu bar:
-- `M●` = ready, press **Caps Lock** to enter hint mode
-- `M⚠` = a required permission is missing
+After launch a `K` icon appears in the menu bar:
+- `K●` = ready, press **Caps Lock** to enter hint mode
+- `K⚠` = a required permission is missing
 
 On launch the app runs `hidutil` to remap Caps Lock to F19 (see §2.1), so the
 user does **zero setup**. On quit it restores Caps Lock's original behavior.
@@ -43,7 +43,7 @@ user does **zero setup**. On quit it restores Caps Lock's original behavior.
 doesn't steal focus.
 
 Logging is quiet by default (errors + warnings only). Set
-`MOUSELESS_LOG=debug` for the full per-operation diagnostics (scan timings,
+`KEYWAY_LOG=debug` for the full per-operation diagnostics (scan timings,
 AX walk steps, settle-watch polls, …); `info` / `warn` / `error` pick other
 thresholds. See `Log.swift`.
 
@@ -67,7 +67,7 @@ needed.
   particular is cached per process).
 - When launching `./run.sh` from kitty / iTerm: TCC's responsible process is
   the terminal, so the permission attaches to the terminal; double-clicking
-  the `.app` makes Mouseless itself the responsible process. During
+  the `.app` makes Keyway itself the responsible process. During
   development we go through the terminal.
 
 Historical decision: we once tried `CGWindowList` + Screen Recording to
@@ -90,7 +90,7 @@ intercepted by the CGEventTap.
   `hidutil property --set '{"UserKeyMapping":[]}'`
 
 User's view: install, grant, press Caps Lock and it works; after quitting
-Mouseless, Caps Lock is a normal toggle again — zero residue.
+Keyway, Caps Lock is a normal toggle again — zero residue.
 
 Under the hood it's one line — `hidutil property --set ...` maps HID usage
 `0x39` (Caps Lock) → `0x6E` (F19). **No root, no kext required.** The Caps
@@ -105,7 +105,7 @@ layer — a normal keyboard event the event tap can catch, with no toggle state.
 
 **Where the lifecycle isn't perfect**: `applicationWillTerminate` doesn't
 always fire on force-quit / crash / system shutdown. In those cases the remap
-persists until the next reboot or the next Mouseless launch (applyAtLaunch is
+persists until the next reboot or the next Keyway launch (applyAtLaunch is
 idempotent, so re-applying has no side effects). A user who notices can clear
 it manually with `hidutil property --set '{"UserKeyMapping":[]}'`.
 
@@ -116,19 +116,19 @@ for two scenarios:
 
 ```sh
 ./setup-trigger.sh             # apply the remap manually without launching the app (test/debug)
-./setup-trigger.sh --persist   # install a LaunchAgent so the remap applies even when Mouseless isn't running
+./setup-trigger.sh --persist   # install a LaunchAgent so the remap applies even when Keyway isn't running
 ```
 
 The `--persist` use case: a user relies on F19 for **other** tools (e.g. they
 bound F19 → some Alfred workflow) and wants Caps Lock = F19 to be **always**
-in effect, not just while Mouseless runs.
+in effect, not just while Keyway runs.
 
 ### 2.3 Uninstall
 
 ```sh
 hidutil property --set '{"UserKeyMapping":[]}'                              # restore for the current session
-launchctl unload ~/Library/LaunchAgents/com.mouseless.trigger-remap.plist  # unload the LaunchAgent (if installed)
-rm ~/Library/LaunchAgents/com.mouseless.trigger-remap.plist
+launchctl unload ~/Library/LaunchAgents/com.keyway.trigger-remap.plist  # unload the LaunchAgent (if installed)
+rm ~/Library/LaunchAgents/com.keyway.trigger-remap.plist
 ```
 
 ---
@@ -138,7 +138,7 @@ rm ~/Library/LaunchAgents/com.mouseless.trigger-remap.plist
 ```
 NSApplication
 └── AppDelegate (main.swift)
-    ├── NSStatusItem ("M" menu-bar icon)
+    ├── NSStatusItem ("K" menu-bar icon)
     ├── HotkeyTap         ← CGEventTap, intercepts/passes all keyboard events
     │   └── VimSession    ← mode state machine + command-palette buffer
     │       └── HintMode  ← AX scan + label generation + commit click
@@ -221,21 +221,21 @@ Control flow:
 
 | File | Responsibility |
 | --- | --- |
-| `BridgeServer.swift` | Unix-domain socket server in the Mouseless main process (`~/Library/Application Support/Mouseless/bridge.sock`). Concurrent multi-client; `activeFD` bound to the `i_am_active` signal (multi-profile / multi-browser routing); `sendToActive(_, expectingBrowserBundleID:)` for proactive outbound requests + refuses on bundleID mismatch; `awaitResponse(ofType:timeout:)` async send-one-receive-one waiting for the extension's reply |
+| `BridgeServer.swift` | Unix-domain socket server in the Keyway main process (`~/Library/Application Support/Keyway/bridge.sock`). Concurrent multi-client; `activeFD` bound to the `i_am_active` signal (multi-profile / multi-browser routing); `sendToActive(_, expectingBrowserBundleID:)` for proactive outbound requests + refuses on bundleID mismatch; `awaitResponse(ofType:timeout:)` async send-one-receive-one waiting for the extension's reply |
 | `BrowserProvider.swift` | Hint source for `HintMode`'s browser branch. Three async APIs: `fetchHints()` → pull the hint list (incl. a `navigates` field marking anchor links); `findText(query:)` → `/`-search uses a DOM TreeWalker in browsers instead of OCR; `findFirstInputRect()` → app-switch cursor park uses the DOM (`document.activeElement` / first visible input) instead of AX. **The browser path is self-contained: no fallback to OP** — whatever the extension returns is it (even if zero) |
-| `Sources/mouseless-bridge/main.swift` | Second SwiftPM target, builds the `mouseless-bridge` binary. Chrome Native Messaging host: launched by Chrome, bidirectional raw byte forwarding stdio ↔ Unix socket (no parsing); if the socket can't connect, writes a `bridge_error` frame to stdout so the extension can see it |
+| `Sources/keyway-bridge/main.swift` | Second SwiftPM target, builds the `keyway-bridge` binary. Chrome Native Messaging host: launched by Chrome, bidirectional raw byte forwarding stdio ↔ Unix socket (no parsing); if the socket can't connect, writes a `bridge_error` frame to stdout so the extension can see it |
 | `extension/manifest.json` | Chrome extension Manifest V3: declares `nativeMessaging` + `scripting` permissions + `host_permissions: <all_urls>`, content scripts injected into all frames |
 | `extension/background.js` | Extension service worker. Persistent native port + keepalive; listens to `windows.onFocusChanged` to send `i_am_active`; `tabs.onActivated` to send `tab_changed`; `tabs.onUpdated status=complete` to send `page_changed (navigation_complete)`; forwards native's `list_hints` / `find_text` / `find_first_input` to the active tab's content script; on SW connect, proactively injects the scripts into already-open tabs via `scripting.executeScript` |
-| `extension/content_script.js` | Runs in every frame: the top frame handles bg's `list_hints` / `find_text` / `find_first_input` requests; any frame handles its parent's `mouseless_hints_request` / `mouseless_text_request` (recursively postMessages iframes, merging viewport coordinates); a MutationObserver watches for "new clickable appeared" → sends `page_changed` |
+| `extension/content_script.js` | Runs in every frame: the top frame handles bg's `list_hints` / `find_text` / `find_first_input` requests; any frame handles its parent's `keyway_hints_request` / `keyway_text_request` (recursively postMessages iframes, merging viewport coordinates); a MutationObserver watches for "new clickable appeared" → sends `page_changed` |
 | `extension/detector.js` | DOM-level hint / text / input detection: three exported functions. `listHints()` — clickable-element detection rewritten from Vimium's rules (selector + ARIA roles + jsaction + ng-click + visibility + 5-point occlusion + shadow-DOM recursion, each hint carries a `nav` flag for anchor links). `findTextMatches(query)` — TreeWalker + Range.getClientRects to find character-level substring matches within the viewport (browser path for `/`-search). `findFirstInput()` — `document.activeElement` first / fallback to the first visible input/textarea/contenteditable (browser path for app-switch cursor park). All take a `viewportOriginInScreen` parameter so iframes use the coordinates their parent computed |
-| `extension/install_dev_host.sh` | Writes `~/Library/.../NativeMessagingHosts/com.mouseless.bridge.json`, binding the extension ID to the local bridge binary path |
+| `extension/install_dev_host.sh` | Writes `~/Library/.../NativeMessagingHosts/com.keyway.bridge.json`, binding the extension ID to the local bridge binary path |
 | `extension/vendor/vimium/MIT-LICENSE.txt` + `NOTICE.md` | Vimium attribution (the detection rules derive from Vimium, rewritten as clean JS, MIT license retained) |
 
 **Scripts**:
 
 | File | Responsibility |
 | --- | --- |
-| `setup-trigger.sh` | For advanced users. `--persist` installs a LaunchAgent so the F19 mapping is independent of Mouseless's lifecycle |
+| `setup-trigger.sh` | For advanced users. `--persist` installs a LaunchAgent so the F19 mapping is independent of Keyway's lifecycle |
 
 ---
 
@@ -293,7 +293,7 @@ By priority:
 2. **Browser HINT (Chrome) — P0-P4 done**. Extension (detector.js rewriting
    Vimium's rules, iframe coordination via a postMessage chain, shadow-DOM
    recursion) + long-lived native messaging (background SW + bridge CLI) +
-   `BrowserProvider` on the Mouseless side wired into `HintMode`. Supporting
+   `BrowserProvider` on the Keyway side wired into `HintMode`. Supporting
    patches: multi-profile / multi-browser `i_am_active` routing; the
    `tab_changed` signal fixing the same-window tab-switch blind spot;
    MutationObserver-based `page_changed` for async loads; the
@@ -365,7 +365,7 @@ By priority:
    constants in each controller switch to reading `Settings.shared`. Custom
    keymaps deferred to v2 (the non-QWERTY layout rebinding refactor, see #1).
    See [`specs/settings-design.md`](specs/settings-design.md).
-10. **Rename** — the name "Mouseless" is already taken by another project; a
+10. **Rename** — the name "Keyway" is already taken by another project; a
     unique name should be settled before a wider release (repo / domain /
     searchability, not drowned out by a generic word).
 11. **Packaging & distribution** — code signing + notarization (Developer ID,

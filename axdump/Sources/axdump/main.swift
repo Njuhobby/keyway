@@ -2,14 +2,14 @@ import Cocoa
 import ApplicationServices
 
 // axdump — dump the COMPLETE, UNFILTERED Accessibility tree of a running
-// app's window(s) to stdout. Ground-truth tool for Mouseless's AX-coverage
+// app's window(s) to stdout. Ground-truth tool for Keyway's AX-coverage
 // work: before deciding whether an app can be served by per-app AX
 // predicate rules (the element IS in the tree, the hint walker just doesn't
 // reach it) or must fall back to OmniParser (the element is genuinely
 // ABSENT from the tree), we need to SEE what AX actually exposes. The specs
 // disagree on this for apps like Slack — so measure, don't guess.
 //
-// Unlike Mouseless's HintMode walk, this applies NO filtering: no role
+// Unlike Keyway's HintMode walk, this applies NO filtering: no role
 // allow-list, no visibility/size pruning, no depth cap. Every node is
 // printed with role / subrole / actions (key signal: AXPress?) / label /
 // rect / enabled / identifier, so wrapped-in-AXGroup or action-less-but-
@@ -85,10 +85,10 @@ func line(_ el: AXUIElement, depth: Int, role: String, actions: [String]) -> Str
     return "\(indent)\(role)\(subrole) \(label)\(acts)\(rectStr(el))\(enabled)\(ident)\(selected)\n"
 }
 
-// MARK: - "Would Mouseless hint this?" predicate
+// MARK: - "Would Keyway hint this?" predicate
 //
 // Mirrors HintMode's AX candidacy + reachability so the dump can MARK the
-// nodes Mouseless's CURRENT logic would turn into hint targets (left-margin
+// nodes Keyway's CURRENT logic would turn into hint targets (left-margin
 // "▶"). The gap between "marked" and "clickable-but-unmarked" is exactly
 // the AX-coverage signal we want to study.
 //
@@ -163,7 +163,7 @@ var roleCounts: [String: Int] = [:]
 var pressableCount = 0
 var truncated = false
 
-/// Append one DumpNode per element. `reachable` tracks whether Mouseless's
+/// Append one DumpNode per element. `reachable` tracks whether Keyway's
 /// hint walker would descend this far (ancestor skipRoles / closed AXMenu /
 /// subtree culling / depth). Returns the count of hint-marked nodes in this
 /// subtree — used by the AXRow source-list fallback (row is a target only
@@ -356,12 +356,12 @@ header += "# AX dump — \(name) (\(bundle), pid \(pid))\(wake ? "  [--wake: a11
 header += "# windows: \(windows.count)\n"
 header += "# nodes: \(nodeCount)\(truncated ? " (TRUNCATED at \(MAX_NODES))" : "")"
 header += ", with AXPress/AXOpen: \(pressableCount)\n"
-header += "# ▶ Mouseless would hint: \(hintCount)  (mirrors HintMode; grep '^▶')\n"
+header += "# ▶ Keyway would hint: \(hintCount)  (mirrors HintMode; grep '^▶')\n"
 header += "#   approximations: 169-target cap and closed-AXMenu nuance NOT applied\n"
 header += "# roles: " + roleCounts.sorted { $0.value > $1.value }
     .map { "\($0.key)×\($0.value)" }.joined(separator: ", ") + "\n"
 header += "# format: <▶|·> <indent><role>[<subrole>] \"label\" actions=[…] rect=(x,y w×h) en=N id=… SELECTED\n"
-header += "#         ▶ = Mouseless's current logic would mark this a hint target\n"
+header += "#         ▶ = Keyway's current logic would mark this a hint target\n"
 
 print(header + body)
 eprint("[axdump] \(name): \(nodeCount) nodes, \(pressableCount) AXPress/AXOpen, \(hintCount) would-be hints")

@@ -20,7 +20,7 @@ struct CollectedElements {
 
 Timing log (printed on every trigger, including IPC counts and cache hits):
 ```
-[mouseless] collect timings: focused=53ms (270 IPC, 0 window cache hit) dock=5ms (38 IPC) extras=31ms
+[keyway] collect timings: focused=53ms (270 IPC, 0 window cache hit) dock=5ms (38 IPC) extras=31ms
 ```
 
 Steady-state total time < 100ms. Known spike: after a destructive click (closing a dialog / closing a sheet), the first sticky rescan lands in the target app's AX cleanup window, and per-IPC latency jumps from ~0.2ms to ~40ms — see §5 for details.
@@ -223,9 +223,9 @@ invalidation** — it's handled naturally.
 - Commit-driven dirty already covers every "user actively changed the UI" case in the
   sticky flow — during a sticky session the user's only input is hint clicks, and
   every click marks dirty.
-- If the user changed the UI with a real mouse **while Mouseless was off** →
+- If the user changed the UI with a real mouse **while Keyway was off** →
   `VimSession.enter()` calls `cache.clear()` as a fallback, so every re-entry into
-  Mouseless starts from scratch.
+  Keyway starts from scratch.
 
 **Reuse cost**: 1 IPC to read the window's AXPosition + adding the offset in memory.
 Hitting a window saves the entire batchFetch of that window's subtree (on the order

@@ -4,8 +4,8 @@
 // Usage:
 //     swift prototype/extension/dev_bridge_ping.swift
 //
-// Connects to the Mouseless main process's Unix domain socket at
-// `~/Library/Application Support/Mouseless/bridge.sock`, sends a
+// Connects to the Keyway main process's Unix domain socket at
+// `~/Library/Application Support/Keyway/bridge.sock`, sends a
 // single `{"cmd":"ping"}`, prints the response, and exits.
 //
 // Used to verify P1 step 1 in isolation — before the bridge CLI and
@@ -15,7 +15,7 @@
 import Foundation
 import Darwin
 
-let SOCK = NSHomeDirectory() + "/Library/Application Support/Mouseless/bridge.sock"
+let SOCK = NSHomeDirectory() + "/Library/Application Support/Keyway/bridge.sock"
 
 let fd = socket(AF_UNIX, SOCK_STREAM, 0)
 guard fd >= 0 else { print("socket() failed errno=\(errno)"); exit(1) }
@@ -41,7 +41,7 @@ let r = withUnsafePointer(to: &addr) {
     }
 }
 guard r == 0 else {
-    print("connect() failed errno=\(errno) — is Mouseless running and is BridgeServer up?")
+    print("connect() failed errno=\(errno) — is Keyway running and is BridgeServer up?")
     exit(1)
 }
 

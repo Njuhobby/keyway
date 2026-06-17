@@ -153,7 +153,7 @@ Events carrying Cmd or Ctrl are **always passed**. This guarantees:
 - Ctrl+↑ → Mission Control
 - Cmd+W → close window
 
-A pitfall hit in the past: while Mouseless was active, Cmd+Space stopped working and the user was locked inside the mode.
+A pitfall hit in the past: while Keyway was active, Cmd+Space stopped working and the user was locked inside the mode.
 
 ### 4.2 Shift / Option do not pass through
 

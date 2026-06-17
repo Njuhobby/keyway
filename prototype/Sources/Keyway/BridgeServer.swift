@@ -3,7 +3,7 @@ import Darwin
 
 /// Unix-domain socket server for the browser-extension bridge.
 ///
-/// Listens on `~/Library/Application Support/Mouseless/bridge.sock`.
+/// Listens on `~/Library/Application Support/Keyway/bridge.sock`.
 /// Accepts multiple concurrent connections (one per open browser
 /// instance). Per connection: read length-prefixed JSON, hand to the
 /// caller-supplied handler, write the handler's response back using
@@ -41,7 +41,7 @@ final class BridgeServer: @unchecked Sendable {
     /// closure should hop to the main actor itself.
     var onActiveClientDisconnect: (@Sendable () -> Void)?
     private var listenFD: Int32 = -1
-    private let acceptQueue = DispatchQueue(label: "mouseless.bridge.accept", qos: .utility)
+    private let acceptQueue = DispatchQueue(label: "keyway.bridge.accept", qos: .utility)
 
     /// FD of the client that **most recently reported user focus**
     /// (via `{type: "i_am_active"}`). Multiple clients can connect at
@@ -59,7 +59,7 @@ final class BridgeServer: @unchecked Sendable {
     private let stateLock = NSLock()
 
     /// Per-client identity (browser kind + free-form session id) so
-    /// Mouseless's `sendToActive(expectingBrowser:)` can refuse to
+    /// Keyway's `sendToActive(expectingBrowser:)` can refuse to
     /// route, e.g., Safari-frontmost hint requests to a Chrome bridge.
     /// Populated when a client's `{cmd: "ping"}` carries a `browser`
     /// field. Cleared on disconnect.
@@ -90,7 +90,7 @@ final class BridgeServer: @unchecked Sendable {
     private var nextWaiterToken: UInt64 = 1
 
     private static var socketPath: String {
-        let dir = NSHomeDirectory() + "/Library/Application Support/Mouseless"
+        let dir = NSHomeDirectory() + "/Library/Application Support/Keyway"
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         return dir + "/bridge.sock"
     }
@@ -187,7 +187,7 @@ final class BridgeServer: @unchecked Sendable {
             // current frontmost. The client itself signals that via
             // `{type:"i_am_active"}` on Chrome's onFocusChanged. Until
             // then this fd doesn't get routed any outbound traffic.
-            let q = DispatchQueue(label: "mouseless.bridge.conn.\(client)", qos: .utility)
+            let q = DispatchQueue(label: "keyway.bridge.conn.\(client)", qos: .utility)
             q.async { [weak self] in
                 self?.connectionLoop(client: client)
             }
@@ -255,7 +255,7 @@ final class BridgeServer: @unchecked Sendable {
             //
             // `{type: "i_am_active"}`: extension's window just gained
             // user focus. This is the routing pointer for outbound
-            // `list_hints` requests. Without this, Mouseless can't
+            // `list_hints` requests. Without this, Keyway can't
             // tell which of N concurrent connections (one per Chrome
             // profile) belongs to the user's foreground window.
             if (obj["type"] as? String) == "i_am_active" {
@@ -295,7 +295,7 @@ final class BridgeServer: @unchecked Sendable {
         }
     }
 
-    // MARK: - Outbound (Mouseless → extension)
+    // MARK: - Outbound (Keyway → extension)
 
     /// Send a JSON message to the client that most recently reported
     /// focus (`i_am_active`). Returns false if no active client, the
@@ -303,7 +303,7 @@ final class BridgeServer: @unchecked Sendable {
     /// the active client identifies as a different browser than the
     /// caller wants.
     ///
-    /// The bundleID guard catches "Mouseless is on Safari but only
+    /// The bundleID guard catches "Keyway is on Safari but only
     /// Chrome's bridge is connected" — we don't want to silently send
     /// Chrome the request and overlay its hints on Safari. Returns
     /// false instead so `BrowserProvider` can fall back to OP.

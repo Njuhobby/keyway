@@ -145,7 +145,7 @@ Possible reasons: this version of Electron doesn't implement `AXManualAccessibil
 
 **Conclusion**: don't rely on this. Recognizing scroll areas in zero-AX Electron is left to the "keyboard-pan the mouse" fallback. **Don't try the AXManualAccessibility path again** (unless there's evidence that some Electron versions respond to it).
 
-Diagnostics: when 0 areas are detected, it logs `[mouseless] scroll: 0 areas — AX role census: ...`, which distinguishes "app is zero-AX" (all AXGroup) vs "our BFS missed it" (there's a scroll role but we didn't catch it).
+Diagnostics: when 0 areas are detected, it logs `[keyway] scroll: 0 areas — AX role census: ...`, which distinguishes "app is zero-AX" (all AXGroup) vs "our BFS missed it" (there's a scroll role but we didn't catch it).
 
 ### 4.3 Detection timing + cost
 

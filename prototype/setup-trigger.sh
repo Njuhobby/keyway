@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Remap the physical Caps Lock key → F19 so Mouseless can use it as the
+# Remap the physical Caps Lock key → F19 so Keyway can use it as the
 # trigger key. F19 is unused by any standard macOS app, so it works as
 # a collision-free dedicated key for us.
 #
@@ -26,12 +26,12 @@ apply_now() {
     hidutil property --set "$REMAP_JSON" > /dev/null
     echo "✓ Caps Lock → F19 remap applied to current session."
     echo
-    echo "Test it: open Mouseless (M● in menu bar), press Caps Lock."
+    echo "Test it: open Keyway (M● in menu bar), press Caps Lock."
     echo "Hint mode should activate when you press Caps Lock."
 }
 
 install_launch_agent() {
-    local plist="$HOME/Library/LaunchAgents/com.mouseless.trigger-remap.plist"
+    local plist="$HOME/Library/LaunchAgents/com.keyway.trigger-remap.plist"
     mkdir -p "$(dirname "$plist")"
     cat > "$plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -40,7 +40,7 @@ install_launch_agent() {
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.mouseless.trigger-remap</string>
+    <string>com.keyway.trigger-remap</string>
     <key>ProgramArguments</key>
     <array>
         <string>/usr/bin/hidutil</string>

@@ -3,7 +3,7 @@ import Foundation
 /// Lightweight leveled logging.
 ///
 /// Default level is `.info` — a quiet happy path (errors, warnings, and a few
-/// lifecycle lines only). Set `MOUSELESS_LOG=debug|info|warn|error` in the
+/// lifecycle lines only). Set `KEYWAY_LOG=debug|info|warn|error` in the
 /// environment to change it; `debug` turns on the full per-operation
 /// diagnostics (scan timings, AX walk steps, settle-watch polls, …).
 ///
@@ -16,7 +16,7 @@ enum Log {
     }
 
     static let level: Level = {
-        switch ProcessInfo.processInfo.environment["MOUSELESS_LOG"]?.lowercased() {
+        switch ProcessInfo.processInfo.environment["KEYWAY_LOG"]?.lowercased() {
         case "debug":            return .debug
         case "info":             return .info
         case "warn", "warning":  return .warn

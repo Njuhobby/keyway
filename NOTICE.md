@@ -1,6 +1,6 @@
 # NOTICE
 
-Mouseless
+Keyway
 Copyright (c) 2026 Yihao Jiang and contributors
 
 Licensed under the GNU Affero General Public License v3.0 or later
@@ -15,14 +15,14 @@ repository is original work.
 
 ### 1. OmniParser icon-detection model
 
-- **Where**: `prototype/Sources/Mouseless/icon_detect.mlpackage`
+- **Where**: `prototype/Sources/Keyway/icon_detect.mlpackage`
 - **What**: the CoreML model bundled for the on-device vision fallback is the
   icon detector from **Microsoft OmniParser** (OmniParser-v2.0,
   `icon_detect/model.pt` from the `microsoft/OmniParser-v2.0` model repo),
   exported to CoreML.
 - **License**: the detector is built on **Ultralytics YOLO**, whose weights
   are licensed under **AGPL-3.0**. Because this model is bundled and the AGPL
-  is viral over the combined work, the entire Mouseless project is licensed
+  is viral over the combined work, the entire Keyway project is licensed
   AGPL-3.0-or-later (this is the reason for the project's license choice).
 - **Upstream**:
   - OmniParser — https://github.com/microsoft/OmniParser (Microsoft)

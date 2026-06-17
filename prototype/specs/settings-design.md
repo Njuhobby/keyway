@@ -26,7 +26,7 @@ A `Settings.shared` thin wrapper around `UserDefaults`, **with a default for eve
     var cursorNormalStep: CGFloat { d.object(forKey: "cursorNormalStep") as? CGFloat ?? 6 }
     var cursorFastStep:   CGFloat { d.object(forKey: "cursorFastStep")   as? CGFloat ?? 18 }
     // ... the rest follow the same pattern
-    func reset() { /* clear all mouseless.* keys */ }
+    func reset() { /* clear all keyway.* keys */ }
 }
 ```
 

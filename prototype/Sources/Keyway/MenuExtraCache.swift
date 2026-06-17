@@ -66,7 +66,7 @@ final class MenuExtraCache: @unchecked Sendable {
             self.lock.lock()
             self.pids = found
             self.lock.unlock()
-            Log.debug("[mouseless] menu extras cache warmed: \(found.count) PIDs")
+            Log.debug("[keyway] menu extras cache warmed: \(found.count) PIDs")
         }
     }
 

@@ -15,12 +15,12 @@ import Foundation
 ///   - `applyAtLaunch()` —  called once after AX permission is granted.
 ///   - `revertAtQuit()` —  called from `applicationWillTerminate`.
 ///
-/// User-visible: install Mouseless → it just works. Quit Mouseless → Caps
+/// User-visible: install Keyway → it just works. Quit Keyway → Caps
 /// Lock goes back to normal typing toggle.
 ///
 /// Caveat: `applicationWillTerminate` isn't fired on force-quit / crash /
 /// system shutdown. In those cases the remap persists until the next
-/// reboot (or until Mouseless is launched again and reapplies, harmlessly).
+/// reboot (or until Keyway is launched again and reapplies, harmlessly).
 /// Acceptable degradation — the user can always reboot or run `hidutil
 /// property --set '{"UserKeyMapping":[]}'` to clear it manually.
 enum TriggerRemap {
@@ -40,9 +40,9 @@ enum TriggerRemap {
     static func applyAtLaunch() -> Bool {
         let ok = runHIDUtil(arguments: ["property", "--set", applyJSON])
         if ok {
-            Log.debug("[mouseless] Caps Lock → F19 remap applied via hidutil.")
+            Log.debug("[keyway] Caps Lock → F19 remap applied via hidutil.")
         } else {
-            Log.warn("[mouseless] WARNING: hidutil remap failed. Caps Lock won't trigger Mouseless.")
+            Log.warn("[keyway] WARNING: hidutil remap failed. Caps Lock won't trigger Keyway.")
             Log.warn("           Run `./setup-trigger.sh` manually, or check that /usr/bin/hidutil exists.")
         }
         return ok

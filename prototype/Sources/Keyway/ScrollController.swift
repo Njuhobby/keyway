@@ -59,14 +59,14 @@ final class ScrollController {
             // pointless. Only warp (to center) when the cursor is outside
             // the window (e.g. on another monitor / over the Dock).
             guard let rect = Self.focusedWindowRect() else {
-                Log.debug("[mouseless] scroll: no scroll area and no window rect")
+                Log.debug("[keyway] scroll: no scroll area and no window rect")
                 return false
             }
             if rect.contains(cursor) {
-                Log.debug("[mouseless] scroll: no AXScrollArea — cursor already in window, no warp")
+                Log.debug("[keyway] scroll: no AXScrollArea — cursor already in window, no warp")
             } else {
                 CGWarpMouseCursorPosition(CGPoint(x: rect.midX, y: rect.midY))
-                Log.debug("[mouseless] scroll: no AXScrollArea — warp to window center (cursor was outside)")
+                Log.debug("[keyway] scroll: no AXScrollArea — warp to window center (cursor was outside)")
             }
             return true
         }
@@ -78,7 +78,7 @@ final class ScrollController {
             warpToSelected()
         }
         ScrollOverlay.shared.show(areas: areas.map { $0.rect }, selected: selectedIndex)
-        Log.debug("[mouseless] scroll: \(areas.count) area(s), selected #\(selectedIndex + 1)")
+        Log.debug("[keyway] scroll: \(areas.count) area(s), selected #\(selectedIndex + 1)")
         return true
     }
 

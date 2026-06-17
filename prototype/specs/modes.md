@@ -63,7 +63,7 @@ Caps Lock(F19) in **any mode** first **arms** (does nothing on press); on releas
 
 So **pressing Caps Lock twice in a row = enter TAP + toggle sticky = straight to TAP sticky**. The cost: every Caps Lock single-click action takes effect only on **release** (~50ms, imperceptible). See §2.1.
 
-**Esc always deactivates**—returning to OFF (hide hints, clear sticky, close palette, exit scroll), but the **process does not exit** (Mouseless is still in the menu bar, Caps Lock is still F19). To actually quit the process, use menu bar Quit (see §3.1).
+**Esc always deactivates**—returning to OFF (hide hints, clear sticky, close palette, exit scroll), but the **process does not exit** (Keyway is still in the menu bar, Caps Lock is still F19). To actually quit the process, use menu bar Quit (see §3.1).
 
 To only close the palette and return to TAP without deactivating: press Backspace on an empty buffer, or press Caps Lock.
 
@@ -87,11 +87,11 @@ The trigger key is **Caps Lock** (a physical key; after being remapped to F19 vi
 
 ### 3.1 Three levels, don't confuse them
 
-Mouseless state has **three levels**, and what "exit" means differs depending on which level:
+Keyway state has **three levels**, and what "exit" means differs depending on which level:
 
 | Level | menu bar icon | hidutil remap | How to enter | How to leave |
 | --- | --- | --- | --- | --- |
-| **Process not running** | none | reverted | not yet launched / user menu bar Quit | launch Mouseless |
+| **Process not running** | none | reverted | not yet launched / user menu bar Quit | launch Keyway |
 | **Process running · OFF** | `M●` | active | launch / Esc out of a mode | Caps Lock to enter TAP / Caps Lock+d to enter SCROLL / menu bar Quit |
 | **Process running · TAP/SCROLL** | `M●` + overlay | active | see §2 | Esc / menu bar Quit |
 
@@ -135,7 +135,7 @@ Caps Lock + Shift/Cmd/Ctrl/Option (modifier keys) → not armed, passed through 
 | `c` (bare) | **left single-click** at the current cursor position (delayed ~150ms for disambiguation; paired with hjkl: move into place → `c` to click) |
 | `cc` (quick double-tap of `c`, within 150ms) | **double-click** at the current cursor position |
 | `Shift + c` | **right-click** at the current cursor position (immediate) |
-| `Enter` | **passed through** to the focused app (menu confirm, form submit, etc. are not eaten by Mouseless) |
+| `Enter` | **passed through** to the focused app (menu confirm, form submit, etc. are not eaten by Keyway) |
 | `v` (bare) | **enter the DRAG sub-state**—immediately `mouseDown` at the cursor position, hjkl to drag, Enter to drop, Backspace to cancel (see §6) |
 | `/` (bare) | **enter the `/`-search sub-state**—OCR the focused window, character-level match, reuse the hint label pool to mark results (see §6.5) |
 | `Backspace` | TAP normal: undo the last typed hint character (no-op when typed is empty); sub-states have their own semantics |
@@ -193,7 +193,7 @@ The observer's lifecycle is bound to "user is in an active state": every `enterX
 
 > Early versions had this follow only for sticky TAP, and every other mode's app switch left an overlay residue + operations still aimed at the original app (broken). After unifying it to "any active mode + app switch = re-apply on the new app", the UX aligns with user intuition: switching apps = "I now want to continue what I was just doing, on this app".
 
-> **Why wait (history + current state)**: early versions rescanned **immediately** on receiving the notification, naively assuming "notification fired = the new app is already frontmost = nothing to wait for". In practice there's some probability of getting an empty result—`didActivateApplication` fires when the OS *marks* the app active, but during the window when the AX tree isn't filled yet / ScreenCaptureKit is still capturing a half-painted frame, the scan returns 0 targets, which then triggers `rehintSticky`'s `else { exit() }` to silently kill the whole session, and what the user sees is "after switching apps, Mouseless seems gone". So a fixed delay was added to wait for the AX tree + pixels to be ready. **Now the TAP path no longer guesses with a fixed delay—it uses a settle watch to directly measure "is the content ready"** (re-parse the new window's fingerprint each frame, scan only after 2 consecutive stable frames), and the 100/500ms fixed delays below now apply **only to SCROLL / WINDOW / MOVE** (these three don't scan pixel-dense hints and aren't as timing-sensitive, not yet migrated). `isolateApp: true` is still kept (during the actual scan the screenshot excludes the Dock process and filters out the Cmd+Tab switcher HUD; the settle watch's fingerprint itself doesn't isolate, which instead lets the HUD fade-out count as a "change" that gets waited out).
+> **Why wait (history + current state)**: early versions rescanned **immediately** on receiving the notification, naively assuming "notification fired = the new app is already frontmost = nothing to wait for". In practice there's some probability of getting an empty result—`didActivateApplication` fires when the OS *marks* the app active, but during the window when the AX tree isn't filled yet / ScreenCaptureKit is still capturing a half-painted frame, the scan returns 0 targets, which then triggers `rehintSticky`'s `else { exit() }` to silently kill the whole session, and what the user sees is "after switching apps, Keyway seems gone". So a fixed delay was added to wait for the AX tree + pixels to be ready. **Now the TAP path no longer guesses with a fixed delay—it uses a settle watch to directly measure "is the content ready"** (re-parse the new window's fingerprint each frame, scan only after 2 consecutive stable frames), and the 100/500ms fixed delays below now apply **only to SCROLL / WINDOW / MOVE** (these three don't scan pixel-dense hints and aren't as timing-sensitive, not yet migrated). `isolateApp: true` is still kept (during the actual scan the screenshot excludes the Dock process and filters out the Cmd+Tab switcher HUD; the settle watch's fingerprint itself doesn't isolate, which instead lets the HUD fade-out count as a "change" that gets waited out).
 
 > **Extra delay when switching apps across Spaces (SCROLL/WINDOW/MOVE still use it, TAP no longer needs it)**: when the user Cmd+Tabs to an app on **another Space**, macOS runs a 250-400ms slide animation—under a fixed 100ms delay the scan lands right in the middle of the animation and captures a black transition frame (hit in practice). macOS has **no public API** to tell us "currently switching Space" or "about to switch Space"—there's only `activeSpaceDidChangeNotification`, which fires only **after** the animation completes ("Did" is past tense). So a heuristic is used: when `didActivateApplication` fires, `CGWindowListCopyWindowInfo(.optionOnScreenOnly, ...)` checks whether the activated app has a window visible on the current Space—if **not** (cross-Space switch / all minimized / all hidden all manifest as this), stretch the delay from 100ms to **500ms**; meanwhile subscribe to `activeSpaceDidChangeNotification`, and if it fires within 500ms (meaning it was a cross-Space switch and the animation just finished), cancel the pending 500ms and re-schedule 100ms (the window is now visible on the current Space). If no Space change within 500ms, the app genuinely has no visible window, the original 500ms fires + HUD `SCROLL/WINDOW/MOVE: no frontmost window`.
 >
@@ -270,7 +270,7 @@ Step 3: pick an input rect, fall back to the title bar on failure
 1. **Don't move the cursor if it's already in the window** —— the Step 2 short-circuit preserves the position the user deliberately chose (e.g. the mouse was already moved somewhere with hjkl during sticky TAP)
 2. **Only jump to text-type inputs** —— don't jump to button / link / menu item, to avoid accidentally triggering an unexpected action after Cmd+Tab
 3. **Don't force what AX doesn't expose** —— Electron-style apps simply accept the title bar fallback, no deep AX subtree walk (we tried a walker fallback + role-survey diagnostics before, the complexity wasn't worth the payoff, reverted). Once the per-app patch route is started, we could write a hardcoded rule for Slack like "compose is 80pt from the window bottom"
-4. **Observable** —— each branch logs `[mouseless] focusedInput: ...` (match via role / via editable-value / read failed / rect too small / rect outside window / skipped role=...), so when some app doesn't take effect, one line shows which gate stopped it
+4. **Observable** —— each branch logs `[keyway] focusedInput: ...` (match via role / via editable-value / read failed / rect too small / rect outside window / skipped role=...), so when some app doesn't take effect, one line shows which gate stopped it
 5. **`.mouseMoved` rather than `CGWarp`** —— same as the §6.5 search commit reasoning, so the target view receives the event and updates the cursor shape (I-beam) + hover state
 
 **The cursor after committing a Dock hint**: clicking a Dock icon's hint synthesizes a real mouse click, and the cursor **stays on the Dock icon**—awkward for what follows (especially if you want to scroll the just-opened app). Handled in two ways:
@@ -386,7 +386,7 @@ The implementation goes through **extension content script detection + native se
 
 - **Key detection is in the web page** (content script, capture phase): when focus is on an editable element (input/textarea/contenteditable, etc.) it passes through to let the user type; with Cmd/Ctrl/Alt it passes through; only bare d/u/gg/G are intercepted (`preventDefault`). The "editable check" reads `document.activeElement` synchronously in JS, which is why it must live on the web-page side rather than the native event tap.
 - **The actual scroll is in native**: the content script only sends `page_scroll` (start/stop/jump) commands at gesture boundaries, and native uses a resident `ScrollController` (no enter, no warp, no overlay) to **send a real CGEvent scroll wheel at the cursor**. The benefit: the scroll wheel goes through the browser kernel's scroll-containment logic, so it **scrolls the container under the cursor and doesn't leak to the page** (the YouTube sidebar vs main content interlock can't be solved by JS `scrollBy`, but a real scroll wheel is naturally correct); the 60fps continuous scroll runs locally in native, with IPC only on start/stop/jump.
-- **Auto-disabled on entering a mode**: once any Mouseless mode is entered, the native event tap swallows d/u before the web page receives the key → the content script doesn't fire → mode-less scroll auto-stops. Zero coordination.
+- **Auto-disabled on entering a mode**: once any Keyway mode is entered, the native event tap swallows d/u before the web page receives the key → the content script doesn't fire → mode-less scroll auto-stops. Zero coordination.
 - **Fallback**: entering a mode (`teardownCurrentMode`) and an extension disconnect (`onActiveClientDisconnect`) both stop any in-flight page scroll, preventing "entered a mode before releasing / SW died" from scrolling forever.
 
 Other apps (non-browsers) are unaffected and still need Caps Lock + d to enter SCROLL.
@@ -439,10 +439,10 @@ Press bare `/` to enter: find all occurrences of the query in the focused window
 
 **Two match paths** (`kickoffSearch` branches by frontmost bundleID):
 
-- **Browser frontmost** → goes through the extension DOM `MouselessDetector.findTextMatches(query)`: TreeWalker traverses visible text nodes + Range.getClientRects() yields rects within the viewport. **~5-20ms**, character-level 100% accurate. One match per visual line (a multi-line wrap auto-expands into multiple highlight boxes). Off-viewport ones aren't returned (OCR can't see off-screen content either, behavior aligned). **top frame only for v1** (iframe content deferred).
+- **Browser frontmost** → goes through the extension DOM `KeywayDetector.findTextMatches(query)`: TreeWalker traverses visible text nodes + Range.getClientRects() yields rects within the viewport. **~5-20ms**, character-level 100% accurate. One match per visual line (a multi-line wrap auto-expands into multiple highlight boxes). Off-viewport ones aren't returned (OCR can't see off-screen content either, behavior aligned). **top frame only for v1** (iframe content deferred).
 - **All other apps** → the old Vision OCR path: `ScreenCapture.captureFocusedWindow()` + `OCRRefiner.recognizeText` (zh + en bilingual) + `findMatches(query, observations, windowRect)` character-level boundingBox. **80-200ms**, may have OCR misreads ("complete" → "tomplete" and the like).
 
-The terminal log distinguishes the two: `[mouseless] search: ... — DOM match via extension` vs `... — capturing + OCR'ing focused window`.
+The terminal log distinguishes the two: `[keyway] search: ... — DOM match via extension` vs `... — capturing + OCR'ing focused window`.
 
 `MouseSynth.warp` uses a `.mouseMoved` synthesized event so the target view receives the event and the cursor flips to I-beam (the same design as the §4.3 cursor park).
 
@@ -593,7 +593,7 @@ Whole-window pan (no resize). It's **two independent modes** with WINDOW resize�
 | `Backspace` on empty | close the palette, return to the underlying mode |
 | Caps Lock (bare) | close the palette, return to the underlying mode (equivalent to empty buffer + Backspace) |
 | `Return` | execute the command |
-| `Esc` | deactivate Mouseless (back to OFF, the process is still in the menu bar) |
+| `Esc` | deactivate Keyway (back to OFF, the process is still in the menu bar) |
 
 Note the palette **only accepts letters** (`letterChar(for:)` explicitly lists only a–z). Digits / symbols are ignored. The reason: all current and future commands are
 short letter strings (`st`, `dr`), to make the user think less about "is this key a command".
@@ -651,7 +651,7 @@ Main constants:
 | --- | --- | --- |
 | `Cmd` | the whole event passes through | preserves Spotlight / Cmd+Tab / screenshot / close window, etc. |
 | `Ctrl` | the whole event passes through | preserves Mission Control / Ctrl+↑, etc.; also because power users use Ctrl+hjkl as arrow keys |
-| `↑ / ↓ / ← / →` (any mode, any modifier combination) | the whole event passes through | Mouseless uses hjkl for its own cursor / scroll / window move; the arrow keys yield to the focused app's native navigation (scroll a list, move the text caret, walk a menu, etc.). If not passed through, you couldn't page through with the arrow keys in sticky TAP |
+| `↑ / ↓ / ← / →` (any mode, any modifier combination) | the whole event passes through | Keyway uses hjkl for its own cursor / scroll / window move; the arrow keys yield to the focused app's native navigation (scroll a list, move the text caret, walk a menu, etc.). If not passed through, you couldn't page through with the arrow keys in sticky TAP |
 | `Enter` (TAP normal / SCROLL) | the whole event passes through | Enter often has its own semantics inside an app—confirm a menu, submit a form, decide an option. Combined with the arrow-key pass-through above, it forms the complete loop of "↑↓ nav a menu + Enter to select". The original Enter-click function moved to bare `c` (see §4 / §5). The dragging sub-state / search-typing / palette still use Enter internally (drop / kickoff OCR / execute), and those scenarios don't conflict with the app's Enter semantics |
 | `Shift` | consumed —— hint last character / `c` = **right-click** (held); cursor-move keys (hjkl) = accelerate; hjkl double-tap = jump a whole screen (otherwise 1/2). **Double-click clicking doesn't rely on Shift**, it's uniformly `cc` (§4.4) | Shift subconsciously = "another kind of click" = right-click; double-click is given to the independent `cc` gesture |
 | `Option` | consumed —— **click actions no longer use Option** (freed up for other uses); only the cursor-move keys = fine slow speed | the old "Option = right-click" is abolished (not comfortable enough); cursor move isn't a hint letter, no conflict |

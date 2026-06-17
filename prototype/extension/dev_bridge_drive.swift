@@ -1,25 +1,25 @@
 #!/usr/bin/env swift
-// Dev test driver for `mouseless-bridge`.
+// Dev test driver for `keyway-bridge`.
 //
 // Usage:
 //     swift prototype/extension/dev_bridge_drive.swift
 //
-// Spawns `mouseless-bridge` as a subprocess, writes one framed
+// Spawns `keyway-bridge` as a subprocess, writes one framed
 // `{"cmd":"ping"}` to its stdin, reads its framed reply from stdout,
 // prints both sides. End-to-end check of P1 step 2 without Chrome
 // in the loop: success means
 //
-//     test driver ─stdio─▶ mouseless-bridge ─socket─▶ Mouseless
-//     test driver ◀─stdio─ mouseless-bridge ◀─socket─ Mouseless
+//     test driver ─stdio─▶ keyway-bridge ─socket─▶ Keyway
+//     test driver ◀─stdio─ keyway-bridge ◀─socket─ Keyway
 //
 // all four hops work, framing intact in both directions.
 //
-// Requires Mouseless main process to be running with BridgeServer
+// Requires Keyway main process to be running with BridgeServer
 // up (see ./run.sh).
 
 import Foundation
 
-let bridgePath = ".build/arm64-apple-macosx/debug/mouseless-bridge"
+let bridgePath = ".build/arm64-apple-macosx/debug/keyway-bridge"
 if !FileManager.default.isExecutableFile(atPath: bridgePath) {
     FileHandle.standardError.write(Data("bridge binary not found at \(bridgePath) — run `swift build` first\n".utf8))
     exit(1)
@@ -36,7 +36,7 @@ proc.standardError = stderrPipe
 try proc.run()
 
 // Surface bridge's stderr (its log() lines) on our stderr in real
-// time so we can see "connected to Mouseless via ..." etc.
+// time so we can see "connected to Keyway via ..." etc.
 stderrPipe.fileHandleForReading.readabilityHandler = { handle in
     let data = handle.availableData
     if data.isEmpty {

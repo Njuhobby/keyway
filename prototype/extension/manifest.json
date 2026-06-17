@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Mouseless (dev)",
+  "name": "Keyway (dev)",
   "version": "0.0.13",
-  "description": "Bridge between Chrome and the Mouseless desktop app. Dev build — multi-profile / multi-browser active routing.",
+  "description": "Bridge between Chrome and the Keyway desktop app. Dev build — multi-profile / multi-browser active routing.",
   "minimum_chrome_version": "120",
   "permissions": ["nativeMessaging", "scripting"],
   "host_permissions": ["<all_urls>"],
@@ -10,7 +10,7 @@
     "service_worker": "background.js"
   },
   "action": {
-    "default_title": "Mouseless: click to ping native host"
+    "default_title": "Keyway: click to ping native host"
   },
   "content_scripts": [
     {

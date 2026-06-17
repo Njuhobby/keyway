@@ -1,9 +1,9 @@
-// Mouseless extension — DOM hint detector.
+// Keyway extension — DOM hint detector.
 //
 // Enumerates every element in the document (including shadow roots),
 // classifies clickability with the same rules Vimium uses, filters by
 // visibility and 5-point occlusion, returns hint rects in viewport
-// coords. Exposed as `window.MouselessDetector.listHints()`.
+// coords. Exposed as `window.KeywayDetector.listHints()`.
 //
 // MIT attribution: the classification rules and occlusion heuristic
 // are adapted from Vimium's `content_scripts/link_hints.js` (the
@@ -242,7 +242,7 @@
   //   viewportTopInScreen  = window.screenY + (outerHeight - innerHeight)
   // Approximate — ignores devtools-docked-right (would shift content
   // left) and the small bottom status-bar slice some browsers draw.
-  // Good enough for v1; Mouseless can refine using AX window rect
+  // Good enough for v1; Keyway can refine using AX window rect
   // diffing if labels drift on real pages.
   function viewportOriginInScreen() {
     return {
@@ -314,7 +314,7 @@
   }
 
   // True if clicking this element is highly likely to navigate the
-  // current tab to a different URL — used by Mouseless to skip the
+  // current tab to a different URL — used by Keyway to skip the
   // 100ms post-commit rehint (which would race the page load and hit
   // content_script_unavailable). False positives here aren't fatal:
   // they just mean we'll miss a refresh for an unusual link case;
@@ -343,7 +343,7 @@
 
   // ---------- TAP `/`-search support (browser path) ----------
   //
-  // On browser apps, `/`-search in Mouseless uses this DOM-level
+  // On browser apps, `/`-search in Keyway uses this DOM-level
   // matcher instead of Vision OCR. Faster (typically <10ms for
   // typical pages vs 80-200ms OCR), 100% accurate (no OCR errors),
   // doesn't need ScreenCaptureKit screenshots. Only matches text
@@ -352,7 +352,7 @@
   // need scroll-then-click which we don't model.
   //
   // Returns the same shape as `listHints` (rect in screen coords,
-  // text snippet) so the Mouseless side can hand off straight to
+  // text snippet) so the Keyway side can hand off straight to
   // SearchOverlay without conversion.
 
   function findTextMatches(query, opts) {
@@ -434,7 +434,7 @@
 
   // ---------- App-switch cursor park (browser path) ----------
   //
-  // Mouseless drops the cursor into a text input on app activation
+  // Keyway drops the cursor into a text input on app activation
   // when the user was last typing there. Chrome's AX is unreliable
   // for web content focus (renderer accessibility is off by default)
   // — DOM resolves this in microseconds with 100% accuracy. Same
@@ -520,5 +520,5 @@
     return null;
   }
 
-  window.MouselessDetector = { listHints, findTextMatches, findFirstInput };
+  window.KeywayDetector = { listHints, findTextMatches, findFirstInput };
 })();

@@ -18,7 +18,7 @@ import Vision
 ///      ... nms=True` from P1 spike), so no NMS in Swift.
 ///
 /// See `omniparser-fallback-design.md` §5 + the P1 walkthrough at
-/// `~/Desktop/mouseless-p1-walkthrough.md`.
+/// `~/Desktop/keyway-p1-walkthrough.md`.
 @MainActor
 enum OmniParserModel {
     /// One detection from the model. `rect` is in **normalized [0,1]**
@@ -48,14 +48,14 @@ enum OmniParserModel {
 
     private static var cachedModel: VNCoreMLModel?
 
-    /// Pre-warm the model in the background at app launch. Mouseless is a
+    /// Pre-warm the model in the background at app launch. Keyway is a
     /// menu bar app that runs all the time — pre-loading at launch
     /// trades a small (invisible) startup cost for a snappy first OP
     /// trigger. Without this, the first Caps Lock on an AX-bad app
     /// would block for ~1-1.5s while CoreML maps the .mlpackage.
     ///
     /// Safe to call multiple times — re-uses the cached load.
-    /// Errors are logged but not thrown — Mouseless continues without
+    /// Errors are logged but not thrown — Keyway continues without
     /// the OP path if model load fails, AX path remains functional.
     static func preload() {
         // Stay on @MainActor — `cachedModel` is @MainActor and
@@ -68,9 +68,9 @@ enum OmniParserModel {
             do {
                 _ = try loadModel()
                 let ms = Int(Date().timeIntervalSince(t0) * 1000)
-                Log.debug("[mouseless] OmniParser model preloaded in \(ms)ms")
+                Log.debug("[keyway] OmniParser model preloaded in \(ms)ms")
             } catch {
-                Log.error("[mouseless] OmniParser preload failed: \(error)")
+                Log.error("[keyway] OmniParser preload failed: \(error)")
             }
         }
     }
@@ -136,7 +136,7 @@ enum OmniParserModel {
         let tParse = Date()
 
         let ms = { (a: Date, b: Date) in Int(b.timeIntervalSince(a) * 1000) }
-        Log.debug("[mouseless] OmniParser inference: load=\(ms(tStart, tLoad))ms infer=\(ms(tLoad, tInfer))ms parse=\(ms(tInfer, tParse))ms detections=\(detections.count)")
+        Log.debug("[keyway] OmniParser inference: load=\(ms(tStart, tLoad))ms infer=\(ms(tLoad, tInfer))ms parse=\(ms(tInfer, tParse))ms detections=\(detections.count)")
         return detections
     }
 

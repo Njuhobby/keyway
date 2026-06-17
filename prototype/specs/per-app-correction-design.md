@@ -1,6 +1,6 @@
 # Per-App Correction Layer Design (AX walker overrides as the primary mechanism)
 
-> **Status: design draft, not yet implemented**. An **important standalone module** planned for after OmniParser integration (P0-P6), and also Mouseless's main **moat**. This doc locks in the design reasoning + the rejected/downgraded approaches, so that when the priority comes up we can implement it directly from here.
+> **Status: design draft, not yet implemented**. An **important standalone module** planned for after OmniParser integration (P0-P6), and also Keyway's main **moat**. This doc locks in the design reasoning + the rejected/downgraded approaches, so that when the priority comes up we can implement it directly from here.
 >
 > Related: `omniparser-fallback-design.md` (the OP visual-path body), `browser-support-design.md` (browsers go through the extension DOM, which is this same line of thinking applied to the browser domain).
 >
@@ -24,7 +24,7 @@ NCC template matching was **downgraded from the early design's "primary mechanis
 
 ## 1. Motivation: AX-bad ≠ AX-absent
 
-The fundamental problem once the OmniParser path went live: OP is not 100% accurate (misses icon-only buttons, mislabels title-bar text), the confidence threshold isn't universal, and boxes are anonymous (it doesn't know whether something is a camera or a folder). So a mature Mouseless must have **per-app personalized correction**.
+The fundamental problem once the OmniParser path went live: OP is not 100% accurate (misses icon-only buttons, mislabels title-bar text), the confidence threshold isn't universal, and boxes are anonymous (it doesn't know whether something is a camera or a folder). So a mature Keyway must have **per-app personalized correction**.
 
 But the key secondary insight (the one that determines the primary mechanism): **the vast majority of "OP-bad" apps actually do have AX — it just isn't "absent," it's "non-standard."**
 
@@ -170,7 +170,7 @@ teaching (once per rule):
   1. User is in Slack, the Compose button has no hint
   2. Trigger teach (menu bar "Teach a missing hint…" option)
   3. User points the mouse at the Compose button
-  4. Mouseless uses AXUIElementCopyElementAtPosition to grab that element
+  4. Keyway uses AXUIElementCopyElementAtPosition to grab that element
   5. Read its role / subrole / actions → generate a candidate predicate
      ("role=AXImage, must_have_action=AXPress")
   6. Save into the local patch.json
@@ -204,7 +204,7 @@ For the moat to spin up, it relies on community co-building. Progressing by comp
 | Stage | Mechanism | Consumption barrier | Contribution barrier | Flywheel |
 |---|---|---|---|---|
 | **L0** bundled curated | patches for the top ~30 apps packaged into the .app | 0 actions | (we hand-write them) | doesn't grow |
-| **L1** GitHub repo + auto pull | `Njuhobby/mouseless-patches` public repo, pull latest on launch + local cache + offline fallback | 0 actions | knows PRs | slow flywheel |
+| **L1** GitHub repo + auto pull | `Njuhobby/keyway-patches` public repo, pull latest on launch + local cache + offline fallback | 0 actions | knows PRs | slow flywheel |
 | **L2** one-click share | after teaching in-app, click "share" → GitHub OAuth auto-opens a PR (patch.json + screenshot) | 0 actions | **0 friction** | true flywheel |
 | L3 marketplace | VS Code-extension-store-like (search/install/rate) | fully consumption-only | — | strong but high engineering effort, **not doing it** |
 
@@ -295,7 +295,7 @@ Tier 0 risk: a decorative `AXImage+AXPress` (no-op handler) gets collected and b
 
 **Tier 2: AI synthesis (runnable right now, no self-trained model needed)**
 
-Add a debug command to Mouseless that one-click exports a bundle from the problem app: `{full AX tree JSON, screenshot PNG, walker output, OP output}`. Hand the bundle to a vision-capable LLM (during development = Claude); it looks at the screenshot + AX dump + walker gap and **writes patch.json directly** — finding patterns in structured data + judging "should-be-clickable vs decorative" is exactly the kind of synthesis task LLMs are good at. The loop: hit the hotkey in the problem app → export bundle → LLM produces patch → verify → commit.
+Add a debug command to Keyway that one-click exports a bundle from the problem app: `{full AX tree JSON, screenshot PNG, walker output, OP output}`. Hand the bundle to a vision-capable LLM (during development = Claude); it looks at the screenshot + AX dump + walker gap and **writes patch.json directly** — finding patterns in structured data + judging "should-be-clickable vs decorative" is exactly the kind of synthesis task LLMs are good at. The loop: hit the hotkey in the problem app → export bundle → LLM produces patch → verify → commit.
 
 **Tier 3: bake synthesis into the app (ultimate scale)**
 

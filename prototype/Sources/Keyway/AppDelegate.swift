@@ -38,7 +38,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             OmniParserModel.preload()
 
             if OmniParserPath.debugOverlayEnabled {
-                Log.debug("[mouseless] DEBUG overlay enabled (MOUSELESS_DEBUG_OVERLAY=1) — /tmp/mouseless-focused.png written on every OP scan, +30-80ms background")
+                Log.debug("[keyway] DEBUG overlay enabled (KEYWAY_DEBUG_OVERLAY=1) — /tmp/keyway-focused.png written on every OP scan, +30-80ms background")
             }
 
             // Browser-extension bridge. Incoming messages:
@@ -88,7 +88,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     return
                 }
                 // type:"page_scroll" → content script detected d/u/gg/G on a
-                // real web page (no Mouseless mode). Post a real wheel event
+                // real web page (no Keyway mode). Post a real wheel event
                 // at the cursor. Only start/stop/jump arrive, not per-frame.
                 if type == "page_scroll" {
                     let action = (msg["action"] as? String) ?? ""
@@ -103,19 +103,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 reply([
                     "type": "pong",
                     "echo": msg,
-                    "from": "mouseless-main"
+                    "from": "keyway-main"
                 ])
             }
         } else {
-            statusItem.button?.title = "M⚠"
-            Log.error("[mouseless] Required permissions not granted:")
+            statusItem.button?.title = "K⚠"
+            Log.error("[keyway] Required permissions not granted:")
             if !axOK {
                 Log.error("  • Accessibility — System Settings → Privacy & Security → Accessibility")
             }
             if !screenOK {
                 Log.error("  • Screen Recording — System Settings → Privacy & Security → Screen Recording")
             }
-            Log.error("  Enable 'Mouseless' (or the swift binary path) for the above,")
+            Log.error("  Enable 'Keyway' (or the swift binary path) for the above,")
             Log.error("  then fully quit this process and rerun `swift run`.")
         }
     }
@@ -123,17 +123,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         // Restore normal Caps Lock behavior on graceful quit. Force-quit
         // and crashes leave the remap in place until next reboot or next
-        // Mouseless launch (which reapplies — idempotent).
+        // Keyway launch (which reapplies — idempotent).
         TriggerRemap.revertAtQuit()
         BridgeServer.shared.stop()
     }
 
     private func setupMenuBar() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.title = "M"
+        statusItem.button?.title = "K"
 
         let menu = NSMenu()
-        let header = NSMenuItem(title: "Mouseless prototype · Caps Lock to enter vim", action: nil, keyEquivalent: "")
+        let header = NSMenuItem(title: "Keyway prototype · Caps Lock to enter vim", action: nil, keyEquivalent: "")
         header.isEnabled = false
         menu.addItem(header)
         menu.addItem(.separator())
@@ -142,7 +142,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         recheck.target = self
         menu.addItem(recheck)
 
-        let quit = NSMenuItem(title: "Quit Mouseless", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        let quit = NSMenuItem(title: "Quit Keyway", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         menu.addItem(quit)
 
         statusItem.menu = menu
@@ -173,10 +173,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if newTap.start() {
             session = newSession
             tap = newTap
-            statusItem.button?.title = "M●"
-            Log.info("[mouseless] running. Press Caps Lock to enter vim mode.")
+            statusItem.button?.title = "K●"
+            Log.info("[keyway] running. Press Caps Lock to enter vim mode.")
         } else {
-            statusItem.button?.title = "M⚠"
+            statusItem.button?.title = "K⚠"
         }
     }
 

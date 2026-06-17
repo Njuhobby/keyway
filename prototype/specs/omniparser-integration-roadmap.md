@@ -2,7 +2,7 @@
 
 A phased implementation plan to bring the design in `omniparser-fallback-design.md` into actual code.
 
-**Overall goal**: Make Mouseless able to scan out hints even in AX black-hole apps (Electron / Catalyst / WKWebView-wrapped web shells), end-to-end wall-clock < 400ms, with no misclick UX regression.
+**Overall goal**: Make Keyway able to scan out hints even in AX black-hole apps (Electron / Catalyst / WKWebView-wrapped web shells), end-to-end wall-clock < 400ms, with no misclick UX regression.
 
 **Whole-project estimate**: 2-4 weeks of focused development + 1 week of tuning on real data. Each phase below gives an independent time estimate and risks.
 
@@ -102,7 +102,7 @@ P0/P1/P2 can run in parallel (if you have the hands). P3-P8 are serial.
 **Scope decision**: **only capture the focused window**, not the focused screen, not the full screen. See the discussion in `omniparser-fallback-design.md` §6.4 — the core rationale: the AX path always works well on the Dock / menu bar / menu extras, OmniParser precisely fills the "AX black hole among sub-elements inside the focused window" problem, the screenshot scope is complementary to and non-overlapping with the AX path + recall is higher (a window ~1500×900 → 1280² resize gives better recall than full screen 3000×2000 → 1280²).
 
 **Output**:
-- `Sources/Mouseless/ScreenCapture.swift`: `focusedWindowImage() async throws -> CGImage?` (nil means the focused app has no window)
+- `Sources/Keyway/ScreenCapture.swift`: `focusedWindowImage() async throws -> CGImage?` (nil means the focused app has no window)
 - Permission request UI: lazy prompt (only pops the first time the OP path is taken)
 - Window detection that cooperates with AX: use `AXFocusedWindow` + `_AXUIElementGetWindow` to get the CGWindowID
 
@@ -119,7 +119,7 @@ P0/P1/P2 can run in parallel (if you have the hands). P3-P8 are serial.
 3. **Permission handling**:
    - At launch, do **not** request Screen Recording
    - On the first OP-path trigger, detect `CGPreflightScreenCaptureAccess()`; if there's no permission, pop the native authorization prompt
-   - If not authorized: the OP path for that invocation degrades to "no candidates" (consistent with the current experience on AX black-hole apps), without blocking Mouseless as a whole
+   - If not authorized: the OP path for that invocation degrades to "no candidates" (consistent with the current experience on AX black-hole apps), without blocking Keyway as a whole
 4. **AX-bad app verification**: run it once on AX black-hole apps like WeChat / Slack / VS Code, and confirm `AXFocusedWindow` ✅ is obtainable, CGWindowID ✅ is obtainable, ScreenCaptureKit ✅ produces an image. **The AX black hole is only a sub-element-layer problem; the top-level window skeleton is available for all apps**.
 5. **Verify latency**: typically < 30ms on M-series.
 
@@ -137,7 +137,7 @@ P0/P1/P2 can run in parallel (if you have the hands). P3-P8 are serial.
 > **History**: P3 was originally "two-layer framework detection" — entirely overturned after hitting WeChat. WeChat is native AppKit but an AX black hole, which shows that framework ≠ AX quality. Changed to an explicit whitelist. The `FrameworkDetector.swift` implementation was committed in commit `04f57f4` and deleted in `b0e4...` (this P3 pivot).
 
 **Output**:
-- `Sources/Mouseless/AppRegistry.swift`: `AX_FOCUSED_WHITELIST: Set<String>` + `shouldUseAXForFocused(bundleID:) -> Bool`
+- `Sources/Keyway/AppRegistry.swift`: `AX_FOCUSED_WHITELIST: Set<String>` + `shouldUseAXForFocused(bundleID:) -> Bool`
 - Initial whitelist: ~15 Apple-built AppKit apps (Finder, Mail, Safari, Pages, Xcode, etc.)
 - Add a routing decision log to VimSession.enter() (for debugging)
 
@@ -299,7 +299,7 @@ P0/P1/P2 can run in parallel (if you have the hands). P3-P8 are serial.
 | Misclick rate | clicks with no response on the OP path < 10% (0 not required) |
 
 **Data collection**:
-- On each OP trigger, log details: `[mouseless] OP: bundle=<X> screencap=<Xms> infer=<Xms> boxes_raw=<N> boxes_filtered=<N> render=<Xms>`
+- On each OP trigger, log details: `[keyway] OP: bundle=<X> screencap=<Xms> infer=<Xms> boxes_raw=<N> boxes_filtered=<N> render=<Xms>`
 - After a day or two of use, review the logs and look for:
   - false triggers (an appkit app going to OP)
   - missed detections (cases where the user falls back to the mouse)
@@ -325,7 +325,7 @@ P0/P1/P2 can run in parallel (if you have the hands). P3-P8 are serial.
 
 1. **Model file bundling**: put the `.mlpackage` into `.app/Contents/Resources/`, and code signing covers it automatically
 2. **Info.plist update**:
-   - `NSScreenCaptureUsageDescription`: fill in something like "Mouseless needs to take screenshots on apps that don't support accessibility to identify clickable elements"
+   - `NSScreenCaptureUsageDescription`: fill in something like "Keyway needs to take screenshots on apps that don't support accessibility to identify clickable elements"
 3. **Notarization verification**: the CoreML model won't trigger issues (Apple's own format); run `notarytool` once to confirm
 4. **Settings panel update** (if there is one):
    - Show the routing decision for the current app (AX whitelist vs OP default)
@@ -346,15 +346,15 @@ Every new component must clearly define "what to do on failure":
 | Component | Failure mode | Handling |
 | --- | --- | --- |
 | ScreenCapture | no permission / call failure | return nil, the OP path degrades to "no candidates," AX candidates are still available |
-| CoreML inference | model load failure | log error, the OP path degrades to "no candidates," **Mouseless as a whole is still usable** |
+| CoreML inference | model load failure | log error, the OP path degrades to "no candidates," **Keyway as a whole is still usable** |
 | OCR | Vision call failure | the refiner falls back to `box.center` |
 
 **Core principle**: if any link in the OP path goes down, **it only affects the focused-app sub-elements source** — the dock/menubar/extras AX sources keep working, and the user can at least hint to those.
 
 ### Telemetry / debugging
 
-- Prefix all OP-path-related logs with `[mouseless OP]` for easy grep
-- Debug mode (environment variable `MOUSELESS_OP_DEBUG=1`): dump the screenshot + box overlay image to `/tmp`
+- Prefix all OP-path-related logs with `[keyway OP]` for easy grep
+- Debug mode (environment variable `KEYWAY_OP_DEBUG=1`): dump the screenshot + box overlay image to `/tmp`
 - Log the routing decision on each trigger (AX whitelist vs OP default + bundleID)
 
 ### Out of scope (not doing for now)

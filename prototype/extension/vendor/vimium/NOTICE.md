@@ -1,6 +1,6 @@
 # Vimium attribution
 
-Mouseless's clickable-element detector (`prototype/extension/detector.js`)
+Keyway's clickable-element detector (`prototype/extension/detector.js`)
 adapts the classification rules and visibility / occlusion heuristics
 from [Vimium](https://github.com/philc/vimium)'s
 `content_scripts/link_hints.js` (the `LocalHints` object, approximately
@@ -35,7 +35,7 @@ new framework heuristics), reference the date and commit SHA here so
 divergence is traceable.
 
 (Note: an earlier iteration of the in-page d/u scroller adapted Vimium's
-`content_scripts/scroller.js`; that was replaced — Mouseless now detects
+`content_scripts/scroller.js`; that was replaced — Keyway now detects
 the keys in the content script but delegates the actual scroll to the
 native side, which posts a real OS scroll-wheel event. No Vimium scroller
 code remains.)

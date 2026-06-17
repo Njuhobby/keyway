@@ -1,26 +1,26 @@
-// mouseless-bridge — Chrome Native Messaging host.
+// keyway-bridge — Chrome Native Messaging host.
 //
 // Browser launches this binary (per `chrome.runtime.connectNative(...)`)
 // and gives us its stdin/stdout. Our job: be a transparent pipe between
-// those and the Unix-domain socket Mouseless main process is listening
+// those and the Unix-domain socket Keyway main process is listening
 // on. Same wire format both sides (4-byte native-byte-order uint32
 // length + UTF-8 JSON body), so we don't parse — just shovel bytes.
 //
 // Lifecycle: the browser spawns one bridge per `connectNative` call
 // and reaps us when the extension's port disconnects (extension
 // unloaded, tab closed if the port lived in a content script, etc.).
-// We additionally exit on Mouseless socket close.
+// We additionally exit on Keyway socket close.
 
 import Foundation
 import Darwin
 
-let SOCKET_PATH = NSHomeDirectory() + "/Library/Application Support/Mouseless/bridge.sock"
+let SOCKET_PATH = NSHomeDirectory() + "/Library/Application Support/Keyway/bridge.sock"
 
 // MARK: - Stderr logging
 // Chrome captures stderr; appears in chrome://extensions when the
 // extension is opened in "inspect views: service worker".
 func log(_ msg: String) {
-    let line = "[mouseless-bridge] \(msg)\n"
+    let line = "[keyway-bridge] \(msg)\n"
     _ = line.withCString { ptr in
         write(2, ptr, strlen(ptr))
     }
@@ -111,7 +111,7 @@ func connectSocket() -> Int32? {
         }
     }
     guard r == 0 else {
-        log("connect() failed errno=\(errno) path=\(SOCKET_PATH) — is Mouseless running?")
+        log("connect() failed errno=\(errno) path=\(SOCKET_PATH) — is Keyway running?")
         close(fd)
         return nil
     }
@@ -120,7 +120,7 @@ func connectSocket() -> Int32? {
 
 // MARK: - Main
 
-// SIGPIPE: if stdout (Chrome) or socket (Mouseless) closes during a
+// SIGPIPE: if stdout (Chrome) or socket (Keyway) closes during a
 // write we'd get killed. Ignore globally; SO_NOSIGPIPE on the socket
 // belt-and-suspenders. stdout/stderr also covered by signal handler.
 signal(SIGPIPE, SIG_IGN)
@@ -137,7 +137,7 @@ guard let sockFD = connectSocket() else {
     _ = writeFull(1, body)
     exit(1)
 }
-log("connected to Mouseless via \(SOCKET_PATH)")
+log("connected to Keyway via \(SOCKET_PATH)")
 
 // Two relay loops, one per direction. Run on background queues
 // (`DispatchQueue.global`) so each blocks only its own thread. First
@@ -145,7 +145,7 @@ log("connected to Mouseless via \(SOCKET_PATH)")
 let group = DispatchGroup()
 let done = DispatchSemaphore(value: 0)
 
-// stdin (Chrome) → socket (Mouseless)
+// stdin (Chrome) → socket (Keyway)
 group.enter()
 DispatchQueue.global(qos: .userInteractive).async {
     defer { group.leave(); done.signal() }
@@ -158,7 +158,7 @@ DispatchQueue.global(qos: .userInteractive).async {
     log("stdin EOF — chrome disconnected")
 }
 
-// socket (Mouseless) → stdout (Chrome)
+// socket (Keyway) → stdout (Chrome)
 group.enter()
 DispatchQueue.global(qos: .userInteractive).async {
     defer { group.leave(); done.signal() }
@@ -168,7 +168,7 @@ DispatchQueue.global(qos: .userInteractive).async {
             return
         }
     }
-    log("socket EOF — Mouseless main process disconnected")
+    log("socket EOF — Keyway main process disconnected")
 }
 
 // Park main thread until either direction ends, then shut down.

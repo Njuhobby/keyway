@@ -1,7 +1,7 @@
-// Mouseless extension — background service worker.
+// Keyway extension — background service worker.
 //
-// Persistent native-messaging connection to `com.mouseless.bridge`.
-// The Mouseless main process sends `{cmd:"list_hints"}` over the port
+// Persistent native-messaging connection to `com.keyway.bridge`.
+// The Keyway main process sends `{cmd:"list_hints"}` over the port
 // whenever the user enters TAP on a browser window; we forward to the
 // active tab's content script, get the hint list back, and ship it
 // over the port. The SW also pings every 20s — keeps the port alive
@@ -34,12 +34,12 @@ const chrome = (typeof globalThis.browser !== "undefined")
   ? globalThis.browser
   : globalThis.chrome;
 
-const HOST = "com.mouseless.bridge";
+const HOST = "com.keyway.bridge";
 const KEEPALIVE_MS = 20_000;
 const RECONNECT_BASE_MS = 1_000;
 const RECONNECT_MAX_MS = 30_000;
 
-// Tell Mouseless which browser binary this extension lives in. Keep
+// Tell Keyway which browser binary this extension lives in. Keep
 // in sync with `browserKeyForBundleID` in BridgeServer.swift.
 function detectBrowser() {
   const ua = navigator.userAgent || "";
@@ -52,7 +52,7 @@ function detectBrowser() {
   if (/OPR\//.test(ua))   return "opera";
   if (/Brave\//.test(ua)) return "brave";
   // Arc identifies as Chrome in UA — there's no reliable browser-side
-  // distinction. Fall through to chrome. Mouseless's bundleID guard
+  // distinction. Fall through to chrome. Keyway's bundleID guard
   // still routes Arc-frontmost queries correctly because both
   // com.google.Chrome and company.thebrowser.Browser map to "chrome"
   // / "arc" respectively — we leave it as chrome here and accept that
@@ -73,23 +73,23 @@ function disconnectPort(reason) {
     try { port.disconnect(); } catch (e) { /* already dead */ }
     port = null;
   }
-  if (reason) console.log("[mouseless-bg] disconnected:", reason);
+  if (reason) console.log("[keyway-bg] disconnected:", reason);
 }
 
 function scheduleReconnect() {
   const wait = Math.min(reconnectDelay, RECONNECT_MAX_MS);
   reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
-  console.log("[mouseless-bg] reconnect in", wait + "ms");
+  console.log("[keyway-bg] reconnect in", wait + "ms");
   setTimeout(connect, wait);
 }
 
 function connect() {
   if (port) return;
-  console.log("[mouseless-bg] connecting to", HOST);
+  console.log("[keyway-bg] connecting to", HOST);
   try {
     port = chrome.runtime.connectNative(HOST);
   } catch (e) {
-    console.warn("[mouseless-bg] connectNative threw:", e.message);
+    console.warn("[keyway-bg] connectNative threw:", e.message);
     scheduleReconnect();
     return;
   }
@@ -101,18 +101,18 @@ function connect() {
     scheduleReconnect();
   });
 
-  // Send an initial ping so Mouseless knows we're alive and to
+  // Send an initial ping so Keyway knows we're alive and to
   // confirm the link end-to-end. Reset backoff once we have a port —
   // future disconnects start their own escalation. The `browser`
-  // field is what Mouseless's bundleID-routing guard matches against.
+  // field is what Keyway's bundleID-routing guard matches against.
   reconnectDelay = RECONNECT_BASE_MS;
   port.postMessage({ cmd: "ping", note: "extension SW connected", browser: BROWSER });
-  console.log("[mouseless-bg] connected, sent initial ping (browser=" + BROWSER + ")");
+  console.log("[keyway-bg] connected, sent initial ping (browser=" + BROWSER + ")");
 
-  // Immediately tell Mouseless if this profile happens to be the
+  // Immediately tell Keyway if this profile happens to be the
   // currently-focused one. SW startup doesn't trigger windows.onFocus-
   // Changed — that's CHANGE-driven — so we have to probe explicitly
-  // for the boot case where Mouseless launches AFTER Chrome and the
+  // for the boot case where Keyway launches AFTER Chrome and the
   // user's already in a focused Chrome window.
   chrome.windows.getLastFocused().then((w) => {
     if (w && w.focused) { reportActive("initial focus check"); reportScrollGate("connect"); }
@@ -132,19 +132,19 @@ function connect() {
     try {
       port.postMessage({ cmd: "keepalive", at: Date.now() });
     } catch (e) {
-      console.warn("[mouseless-bg] keepalive write failed:", e.message);
+      console.warn("[keyway-bg] keepalive write failed:", e.message);
       disconnectPort("keepalive write failed");
       scheduleReconnect();
     }
   }, KEEPALIVE_MS);
 }
 
-// Mouseless → extension router. The only inbound message we currently
-// handle from native is `{cmd:"list_hints"}` (Mouseless wants the
+// Keyway → extension router. The only inbound message we currently
+// handle from native is `{cmd:"list_hints"}` (Keyway wants the
 // active tab's clickable list). pong / keepalive_ack ignored.
 async function handleFromNative(msg) {
   if (!msg || typeof msg !== "object") {
-    console.log("[mouseless-bg] recv non-object from native:", msg);
+    console.log("[keyway-bg] recv non-object from native:", msg);
     return;
   }
   if (msg.cmd === "list_hints") {
@@ -162,7 +162,7 @@ async function handleFromNative(msg) {
       }
       if (!tab) tab = (await chrome.tabs.query({ active: true }))[0];
       if (!tab || !tab.id) {
-        console.warn("[mouseless-bg] list_hints: no active tab found via any query");
+        console.warn("[keyway-bg] list_hints: no active tab found via any query");
         port?.postMessage({ type: "hints", url: null, hints: [], error: "no_active_tab" });
         return;
       }
@@ -177,7 +177,7 @@ async function handleFromNative(msg) {
         resp = await chrome.tabs.sendMessage(tab.id, { type: "list_hints" }, { frameId: 0 });
       } catch (e) {
         // chrome:// and Web Store pages don't allow content scripts.
-        console.warn("[mouseless-bg] list_hints: tabs.sendMessage failed:", e.message);
+        console.warn("[keyway-bg] list_hints: tabs.sendMessage failed:", e.message);
         port?.postMessage({
           type: "hints", url: tab.url, hints: [],
           error: "content_script_unavailable",
@@ -185,7 +185,7 @@ async function handleFromNative(msg) {
         return;
       }
       if (!resp || resp.type !== "hints") {
-        console.warn("[mouseless-bg] list_hints: bad cs response:", resp);
+        console.warn("[keyway-bg] list_hints: bad cs response:", resp);
         port?.postMessage({ type: "hints", url: tab.url, hints: [], error: "bad_response" });
         return;
       }
@@ -196,9 +196,9 @@ async function handleFromNative(msg) {
         ms: resp.ms,
         hints: resp.hints,
       });
-      console.log("[mouseless-bg] list_hints →", resp.hints.length, "hints, sent to native");
+      console.log("[keyway-bg] list_hints →", resp.hints.length, "hints, sent to native");
     } catch (e) {
-      console.warn("[mouseless-bg] list_hints handler threw:", e);
+      console.warn("[keyway-bg] list_hints handler threw:", e);
     }
     return;
   }
@@ -247,10 +247,10 @@ async function handleFromNative(msg) {
         ms: resp.ms,
         matches: resp.matches,
       });
-      console.log("[mouseless-bg] find_text q=\"" + query + "\" →",
+      console.log("[keyway-bg] find_text q=\"" + query + "\" →",
                   resp.matches.length, "matches, sent to native");
     } catch (e) {
-      console.warn("[mouseless-bg] find_text handler threw:", e);
+      console.warn("[keyway-bg] find_text handler threw:", e);
     }
     return;
   }
@@ -290,36 +290,36 @@ async function handleFromNative(msg) {
         rect: resp.rect,
         source: resp.source,
       });
-      console.log("[mouseless-bg] find_first_input → " + (resp.rect ? resp.source : "null"));
+      console.log("[keyway-bg] find_first_input → " + (resp.rect ? resp.source : "null"));
     } catch (e) {
-      console.warn("[mouseless-bg] find_first_input handler threw:", e);
+      console.warn("[keyway-bg] find_first_input handler threw:", e);
     }
     return;
   }
 
   // Other server-initiated messages (future: invalidate caches, etc.).
-  console.log("[mouseless-bg] recv from native:", msg);
+  console.log("[keyway-bg] recv from native:", msg);
 }
 
-// "I'm active" tells Mouseless that THIS profile/browser is currently
-// the user's focused window — Mouseless routes outbound list_hints to
+// "I'm active" tells Keyway that THIS profile/browser is currently
+// the user's focused window — Keyway routes outbound list_hints to
 // whichever client most recently reported this. Multiple Chrome
-// profiles each have their own SW + bridge, so without this Mouseless
+// profiles each have their own SW + bridge, so without this Keyway
 // can't tell them apart.
 function reportActive(reason) {
   if (!port) return;
   try {
     port.postMessage({ type: "i_am_active" });
   } catch (e) {
-    console.warn("[mouseless-bg] reportActive failed:", e.message);
+    console.warn("[keyway-bg] reportActive failed:", e.message);
     return;
   }
-  console.log("[mouseless-bg] reported i_am_active:", reason);
+  console.log("[keyway-bg] reported i_am_active:", reason);
 }
 
-// Tell Mouseless whether the user's currently-focused tab has a live
+// Tell Keyway whether the user's currently-focused tab has a live
 // content script — i.e. whether d/u/gg/G scrolling is being handled
-// here in the page (Vimium-style). Mouseless uses this to suppress
+// here in the page (Vimium-style). Keyway uses this to suppress
 // Caps Lock+d → SCROLL on real web pages (it's meaningless there) while
 // KEEPING it as a fallback on chrome:// / Web Store / PDF viewer pages,
 // which have no content script.
@@ -336,7 +336,7 @@ async function reportScrollGate(reason) {
     if (tab && tab.id) {
       try {
         const resp = await chrome.tabs.sendMessage(
-          tab.id, { type: "mouseless_cs_alive" }, { frameId: 0 }
+          tab.id, { type: "keyway_cs_alive" }, { frameId: 0 }
         );
         live = !!(resp && resp.alive);
       } catch (e) {
@@ -348,20 +348,20 @@ async function reportScrollGate(reason) {
   }
   try {
     port.postMessage({ type: "scroll_gate", live, browser: BROWSER });
-    console.log("[mouseless-bg] scroll_gate live=" + live + " (" + reason + ")");
+    console.log("[keyway-bg] scroll_gate live=" + live + " (" + reason + ")");
   } catch (e) { /* port dead — will reconnect */ }
 }
 
 async function refreshExistingTabs() {
   if (!chrome.scripting) {
-    console.warn("[mouseless-bg] no chrome.scripting (missing permission?) — skipping refresh");
+    console.warn("[keyway-bg] no chrome.scripting (missing permission?) — skipping refresh");
     return;
   }
   let tabs = [];
   try {
     tabs = await chrome.tabs.query({});
   } catch (e) {
-    console.warn("[mouseless-bg] tabs.query failed:", e.message);
+    console.warn("[keyway-bg] tabs.query failed:", e.message);
     return;
   }
   let injected = 0, skipped = 0, failed = 0;
@@ -382,20 +382,20 @@ async function refreshExistingTabs() {
       failed++;
     }
   }
-  console.log("[mouseless-bg] refreshed existing tabs:",
+  console.log("[keyway-bg] refreshed existing tabs:",
               injected, "injected,", failed, "rejected (chrome:// etc),", skipped, "skipped");
 }
 
 // Page-load completion. Fires when a tab finishes navigating —
 // crucial because content scripts inject at `document_idle` (after
-// the new page's DOMContentLoaded + some delay). If Mouseless asks
+// the new page's DOMContentLoaded + some delay). If Keyway asks
 // for hints during that gap (e.g., sticky TAP's 100ms post-commit
 // rehint after the user clicked a link), tabs.sendMessage fails with
 // "Receiving end does not exist". P4's MutationObserver doesn't save
 // us either — the new page's initial DOM is fully rendered before
 // our observer is attached, so no mutation fires.
 //
-// Signal "page_changed" once the navigation completes — Mouseless's
+// Signal "page_changed" once the navigation completes — Keyway's
 // gates handle the rest (only acts if in TAP on focused browser).
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   if (changeInfo.status !== "complete") return;
@@ -414,7 +414,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
       reason: "navigation_complete",
       tabId,
     });
-    console.log("[mouseless-bg] page_changed (navigation complete) → tabId=" + tabId);
+    console.log("[keyway-bg] page_changed (navigation complete) → tabId=" + tabId);
   } catch (e) { /* port dead */ }
   // New page finished loading in the focused tab → its content-script
   // liveness may have changed (e.g. navigated from a web page to
@@ -425,8 +425,8 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 // Within-window tab switch (Cmd+1/2/3, clicking tab strip, Cmd+[ back
 // navigation). Doesn't fire chrome.windows.onFocusChanged (window is
 // the same), doesn't change AXFocusedWindow (window is the same), so
-// Mouseless's focused-window poll never notices. We have to tell it
-// explicitly: same handler as page_changed on the Mouseless side
+// Keyway's focused-window poll never notices. We have to tell it
+// explicitly: same handler as page_changed on the Keyway side
 // (gates + cooldown + refreshInPlace).
 //
 // Filter by "is this profile's window the user's currently-focused
@@ -442,7 +442,7 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
   }
   try {
     port.postMessage({ type: "tab_changed", tabId: activeInfo.tabId });
-    console.log("[mouseless-bg] tab_changed → tabId=" + activeInfo.tabId);
+    console.log("[keyway-bg] tab_changed → tabId=" + activeInfo.tabId);
   } catch (e) {
     /* port dead — will reconnect */
   }
@@ -468,7 +468,7 @@ chrome.windows.onFocusChanged.addListener((winId) => {
 // Content script → bg → native: page_changed signal forwarded as-is.
 // We don't debounce here — the content script only sends on a real new
 // clickable AND throttles itself to ≤1 per 500ms (notifyPageChangedThrottled,
-// so a playing-video page can't flood us). Mouseless's cooldown coalesces
+// so a playing-video page can't flood us). Keyway's cooldown coalesces
 // further on the receiving end.
 chrome.runtime.onMessage.addListener((msg, sender) => {
   if (!msg || typeof msg !== "object") return;
@@ -477,12 +477,12 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
   try {
     port.postMessage({ type: "page_changed", url: msg.url, frameId: sender?.frameId });
   } catch (e) {
-    console.warn("[mouseless-bg] page_changed forward failed:", e.message);
+    console.warn("[keyway-bg] page_changed forward failed:", e.message);
   }
 });
 
 // Content script → bg → native: d/u/gg/G scroll commands. The content
-// script detects the keys (editable check, mode gating) and asks Mouseless
+// script detects the keys (editable check, mode gating) and asks Keyway
 // to post a real wheel event at the cursor. Forwarded verbatim; only
 // gesture boundaries (start/stop/jump) come through, not per-frame.
 chrome.runtime.onMessage.addListener((msg, sender) => {
@@ -499,7 +499,7 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
       frameId: sender?.frameId,
     });
   } catch (e) {
-    console.warn("[mouseless-bg] page_scroll forward failed:", e.message);
+    console.warn("[keyway-bg] page_scroll forward failed:", e.message);
   }
 });
 
@@ -512,7 +512,7 @@ chrome.runtime.onStartup.addListener(connect);
 // the user thinks the bridge is wedged, clicking the toolbar icon
 // forces a reconnect.
 chrome.action.onClicked.addListener(() => {
-  console.log("[mouseless-bg] action.onClicked — forcing reconnect");
+  console.log("[keyway-bg] action.onClicked — forcing reconnect");
   disconnectPort("manual reconnect");
   connect();
 });

@@ -1,4 +1,4 @@
-// Mouseless content script.
+// Keyway content script.
 //
 // One copy runs in every frame (manifest `all_frames: true`). Three
 // jobs split by frame role:
@@ -8,7 +8,7 @@
 //      of its own hints and all iframe hints (recursive).
 //
 //   2. Any frame — listens on `window.message` for a parent's
-//      `mouseless_hints_request`. Replies with its own subtree
+//      `keyway_hints_request`. Replies with its own subtree
 //      hints (its own DOM + its own iframes, recursive).
 //
 //   3. Top frame only — on document_idle, run detector once and
@@ -42,7 +42,7 @@
   // callbacks can run without going through the full classifier on
   // every mutation). Misses some heuristic-driven cases (jsaction
   // listener, ng-click family) but catches the bulk — the cost of a
-  // missed signal is just "Mouseless doesn't refresh this round";
+  // missed signal is just "Keyway doesn't refresh this round";
   // user can Caps Lock again. Erring on permissive side.
   const CLICKABLE_SELECTOR = [
     "a[href]", "button", "input", "select", "textarea",
@@ -55,13 +55,13 @@
   // ---------- (3) Auto-log on top frame ----------
 
   if (IS_TOP) {
-    if (!window.MouselessDetector) {
-      console.warn("[mouseless cs] detector not loaded — check manifest order");
+    if (!window.KeywayDetector) {
+      console.warn("[keyway cs] detector not loaded — check manifest order");
     } else {
       const t0 = performance.now();
-      const hints = window.MouselessDetector.listHints();
+      const hints = window.KeywayDetector.listHints();
       const ms = (performance.now() - t0).toFixed(1);
-      console.log("[mouseless cs]", hints.length, "hints on", location.host,
+      console.log("[keyway cs]", hints.length, "hints on", location.host,
                   "in", ms + "ms (top frame only — iframes added on demand)",
                   hints);
     }
@@ -72,7 +72,7 @@
   window.addEventListener("message", async (e) => {
     const data = e.data;
     if (!data || typeof data !== "object") return;
-    if (data.type !== "mouseless_hints_request") return;
+    if (data.type !== "keyway_hints_request") return;
     if (typeof data.id !== "string") return;
     if (!data.origin || typeof data.origin.x !== "number" || typeof data.origin.y !== "number") return;
 
@@ -84,7 +84,7 @@
     }
     try {
       e.source.postMessage({
-        type: "mouseless_hints_response",
+        type: "keyway_hints_response",
         id: data.id,
         hints,
       }, "*");
@@ -103,7 +103,7 @@
   window.addEventListener("message", async (e) => {
     const data = e.data;
     if (!data || typeof data !== "object") return;
-    if (data.type !== "mouseless_text_request") return;
+    if (data.type !== "keyway_text_request") return;
     if (typeof data.id !== "string") return;
     if (typeof data.query !== "string") return;
     if (!data.origin || typeof data.origin.x !== "number" || typeof data.origin.y !== "number") return;
@@ -114,7 +114,7 @@
     } catch (err) { /* swallow */ }
     try {
       e.source.postMessage({
-        type: "mouseless_text_response",
+        type: "keyway_text_response",
         id: data.id,
         matches: textMatches,
       }, "*");
@@ -185,11 +185,11 @@
       // Liveness probe from the background SW. Background pings the
       // active tab's top frame on focus / tab / navigation changes; a
       // reply means "this tab has a live content script", which is what
-      // gates Caps Lock+d on the Mouseless side (real web page → d/u
+      // gates Caps Lock+d on the Keyway side (real web page → d/u
       // scrolling is handled here, so Caps Lock+d → SCROLL is
       // suppressed; chrome:// / Web Store have no content script → no
       // reply → Caps Lock+d still enters SCROLL as a fallback).
-      if (msg.type === "mouseless_cs_alive") {
+      if (msg.type === "keyway_cs_alive") {
         sendResponse({ type: "cs_alive", alive: true });
         return false;   // synchronous
       }
@@ -199,7 +199,7 @@
         // input that's currently focused (document.activeElement), or
         // first visible <input>/<textarea>/contenteditable in
         // document order. Top frame only for v1.
-        const result = window.MouselessDetector?.findFirstInput({
+        const result = window.KeywayDetector?.findFirstInput({
           viewportOriginInScreen: topOrigin(),
         });
         sendResponse({
@@ -221,8 +221,8 @@
   // the top.
 
   async function gatherHintsRecursive(origin) {
-    if (!window.MouselessDetector) return [];
-    const myHints = window.MouselessDetector.listHints({ viewportOriginInScreen: origin });
+    if (!window.KeywayDetector) return [];
+    const myHints = window.KeywayDetector.listHints({ viewportOriginInScreen: origin });
 
     const iframes = Array.from(document.querySelectorAll("iframe"));
     if (iframes.length === 0) return myHints;
@@ -238,9 +238,9 @@
   // child frames are queried via postMessage with both the query AND
   // the parent-computed origin.
   async function gatherTextMatchesRecursive(query, origin) {
-    if (!window.MouselessDetector || !window.MouselessDetector.findTextMatches) return [];
+    if (!window.KeywayDetector || !window.KeywayDetector.findTextMatches) return [];
     if (!query) return [];
-    const myMatches = window.MouselessDetector.findTextMatches(query, {
+    const myMatches = window.KeywayDetector.findTextMatches(query, {
       viewportOriginInScreen: origin,
     });
 
@@ -256,7 +256,7 @@
   // ---------- (4) DOM-change detection ----------
   //
   // Watch for newly-added clickable elements (async lazy loads, SPA
-  // re-renders) and notify Mouseless main process so it can refresh
+  // re-renders) and notify Keyway main process so it can refresh
   // the hint overlay in place. Each frame observes its own DOM.
   // Top frame fires `chrome.runtime.sendMessage` to bg; child frames
   // postMessage to their parent, which relays upward until it reaches
@@ -265,7 +265,7 @@
   // **Precise**, not throttled — only fires when at least one **new
   // clickable** node enters the DOM (selector match on addedNodes /
   // their subtrees). Heart-beats / animation pulses / chat indicator
-  // re-renders are ignored. Mouseless side enforces a 500ms cooldown
+  // re-renders are ignored. Keyway side enforces a 500ms cooldown
   // for UX (overlay refresh rate), so a burst of additions during a
   // page load collapses into one refresh on the receiver.
 
@@ -290,7 +290,7 @@
       } catch (e) { /* SW asleep or extension reloading; cooldown side covers gaps */ }
     } else {
       try {
-        window.parent.postMessage({ type: "mouseless_page_changed_inner" }, "*");
+        window.parent.postMessage({ type: "keyway_page_changed_inner" }, "*");
       } catch (e) { /* sandboxed / cross-frame post fails — drop */ }
     }
   }
@@ -300,8 +300,8 @@
   // worst case: its suggestion rail / player controls churn clickable
   // nodes many times a second — would otherwise flood the native host
   // with page_changed AND keep the content-script main thread busy enough
-  // that `list_hints` can't reply within Mouseless's 400ms budget (→
-  // "0 hints"). Mirrors the 500ms cooldown on the Mouseless side
+  // that `list_hints` can't reply within Keyway's 400ms budget (→
+  // "0 hints"). Mirrors the 500ms cooldown on the Keyway side
   // (VimSession.handlePageChanged), but matters more here because the work
   // we're skipping is on the page's own main thread.
   const NOTIFY_THROTTLE_MS = 500;
@@ -336,7 +336,7 @@
       // the send, is what starves `list_hints`); just ensure one trailing
       // fire lands. Slightly less precise (the trailing fire is
       // unconditional, so a burst that happened to add no clickable still
-      // notifies), but it costs at most one extra rescan, which Mouseless
+      // notifies), but it costs at most one extra rescan, which Keyway
       // coalesces — and it only happens while a genuine change keeps the
       // burst alive. `lastFireAt` advances ONLY on a real fire, so a page
       // that mutates without ever adding a clickable never enters this
@@ -368,7 +368,7 @@
   // toggled by `display` / `visibility` / a class / `hidden` /
   // `aria-hidden`) produces NO childList mutation — the clickables were
   // always in the DOM, only their visibility changed — so the childList
-  // observer above never fires and Mouseless never auto-refreshes (the
+  // observer above never fires and Keyway never auto-refreshes (the
   // user has to re-press Caps Lock). Watch attribute changes too.
   //
   // But `style` (and class) mutate every animation frame, so we must NOT
@@ -415,16 +415,16 @@
   // both registered; they handle different message types.)
   window.addEventListener("message", (e) => {
     if (!e.data || typeof e.data !== "object") return;
-    if (e.data.type !== "mouseless_page_changed_inner") return;
+    if (e.data.type !== "keyway_page_changed_inner") return;
     notifyPageChangedThrottled();
   });
 
   // ---------- (5) Vimium-style scroll: d/u (continuous), gg / G ----------
   //
-  // When Mouseless is NOT in a mode, its event tap passes keys straight
-  // through to the page, so THIS handler sees d/u/gg/G and asks Mouseless
+  // When Keyway is NOT in a mode, its event tap passes keys straight
+  // through to the page, so THIS handler sees d/u/gg/G and asks Keyway
   // to scroll (it posts a real wheel event at the cursor — see the
-  // delegation note below). The instant the user enters any Mouseless mode,
+  // delegation note below). The instant the user enters any Keyway mode,
   // the native event tap (head-insert, OS level) swallows these keys BEFORE
   // the page sees them, so this handler simply stops firing — "modes disable
   // page scroll" comes for free, no coordination.
@@ -453,7 +453,7 @@
 
   // --- d/u / gg / G scroll: detect in-page, scroll on the NATIVE side ---
   // We DETECT the keys here (synchronous editable check, capture-phase
-  // preventDefault) but DELEGATE the actual scroll to Mouseless, which posts
+  // preventDefault) but DELEGATE the actual scroll to Keyway, which posts
   // a real scroll-wheel event at the cursor. Why not scroll the DOM
   // ourselves: a real wheel goes through the browser's native scroll engine
   // with correct scroll containment (e.g. scrolling YouTube's guide rail
@@ -462,8 +462,8 @@
   // whatever is under the OS cursor, so we don't even send coordinates.
   //
   // Communication is ONLY at gesture boundaries (start / stop / jump), not
-  // per frame — the 60fps wheel loop runs locally in Mouseless. Once a
-  // Mouseless mode is active the native tap swallows d/u before the page
+  // per frame — the 60fps wheel loop runs locally in Keyway. Once a
+  // Keyway mode is active the native tap swallows d/u before the page
   // sees them, so this never fires (scroll auto-disabled in modes).
 
   function mlSendScroll(msg) {
@@ -519,7 +519,7 @@
   }, true);
 
   // Lost focus / tab hidden mid-hold → the keyup may never arrive; stop so
-  // native doesn't scroll on. (Mouseless also stops page-scroll whenever a
+  // native doesn't scroll on. (Keyway also stops page-scroll whenever a
   // mode is entered or the extension disconnects, as further safety.)
   window.addEventListener("blur", (e) => {
     if (e.target === window && mlHeldDir) { mlHeldDir = null; mlSendScroll({ action: "stop" }); }
@@ -536,7 +536,7 @@
       if (r.width === 0 || r.height === 0) { resolve([]); return; }
       if (!iframe.contentWindow) { resolve([]); return; }
 
-      // Cull off-viewport iframes — Mouseless can only click what
+      // Cull off-viewport iframes — Keyway can only click what
       // the user can see anyway, and waiting 250ms for an iframe
       // that's scrolled off-screen to respond is wasted budget.
       if (r.bottom < 0 || r.right < 0 || r.top > innerHeight || r.left > innerWidth) {
@@ -553,13 +553,13 @@
       let settled = false;
       const handler = (e) => {
         const d = e.data;
-        if (!d || d.type !== "mouseless_hints_response" || d.id !== id) return;
+        if (!d || d.type !== "keyway_hints_response" || d.id !== id) return;
         cleanup();
         resolve(Array.isArray(d.hints) ? d.hints : []);
       };
       const timeoutId = setTimeout(() => {
         cleanup();
-        resolve([]);   // iframe didn't respond — non-Mouseless content (chrome://, sandboxed, error page, etc.)
+        resolve([]);   // iframe didn't respond — non-Keyway content (chrome://, sandboxed, error page, etc.)
       }, HINT_REQ_TIMEOUT_MS);
       const cleanup = () => {
         if (settled) return;
@@ -571,7 +571,7 @@
 
       try {
         iframe.contentWindow.postMessage({
-          type: "mouseless_hints_request",
+          type: "keyway_hints_request",
           id,
           origin: childOrigin,
         }, "*");
@@ -602,7 +602,7 @@
       let settled = false;
       const handler = (e) => {
         const d = e.data;
-        if (!d || d.type !== "mouseless_text_response" || d.id !== id) return;
+        if (!d || d.type !== "keyway_text_response" || d.id !== id) return;
         cleanup();
         resolve(Array.isArray(d.matches) ? d.matches : []);
       };
@@ -616,7 +616,7 @@
       window.addEventListener("message", handler);
       try {
         iframe.contentWindow.postMessage({
-          type: "mouseless_text_request",
+          type: "keyway_text_request",
           id,
           query,
           origin: childOrigin,

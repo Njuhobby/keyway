@@ -49,7 +49,7 @@ final class HotkeyTap {
             callback: callback,
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         ) else {
-            Log.error("[mouseless] CGEvent.tapCreate returned nil — accessibility likely not granted.")
+            Log.error("[keyway] CGEvent.tapCreate returned nil — accessibility likely not granted.")
             return false
         }
 
