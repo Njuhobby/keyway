@@ -109,6 +109,8 @@ Ultralytics YOLO), whose weights are AGPL-licensed; the AGPL applies to the
 combined work, so the whole project is AGPL-3.0. If you run a modified
 version as a network service, the AGPL requires you to offer its source.
 
+Third-party attributions are in [NOTICE.md](NOTICE.md).
+
 ## Acknowledgements
 
 - [Vimium](https://github.com/philc/vimium) — the browser extension's
