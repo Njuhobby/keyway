@@ -23,16 +23,24 @@ final class HintOverlay {
         for w in windows {
             (w.contentView as? HintOverlayView)?.update(targets: targets, typed: typed,
                                                         moveArmed: moveArmed)
-            // Re-assert all-spaces membership BEFORE ordering front.
-            // After an `orderOut` (we hide the overlay on every app/Space
-            // switch — see VimSession.reapplyOnCurrentFrontmost) macOS
-            // drops the window's all-spaces registration; a plain
-            // orderFront then reattaches it to the Space it was last
-            // visible on (the OLD one), so it never follows you to the
-            // newly-activated Space. Re-setting collectionBehavior here
-            // re-registers it on the CURRENT Space each show.
-            w.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
             w.orderFrontRegardless()
+            // Usually the window (canJoinAllSpaces, set at creation) is
+            // already on the active Space, so the order-front above is all
+            // it takes. But after an `orderOut` (we hide on every app/Space
+            // switch — see VimSession.reapplyOnCurrentFrontmost) macOS can
+            // leave it stuck on the Space it was last shown on, so it
+            // doesn't follow you to a newly-activated Space (symptom caught
+            // by the debug trap: vis=true, placed=N/N, but activeSpace=false;
+            // happens when consecutive activations are on different Spaces).
+            // ONLY in that case, force re-registration by toggling
+            // canJoinAllSpaces off/on and re-ordering. Gating on the actual
+            // stuck state keeps the common path fast — doing the toggle
+            // unconditionally added a visible delay to every show().
+            if !w.isOnActiveSpace {
+                w.collectionBehavior = [.stationary, .ignoresCycle]
+                w.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
+                w.orderFrontRegardless()
+            }
         }
     }
 
