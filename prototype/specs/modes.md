@@ -1,675 +1,675 @@
 # Modes & Key Bindings
 
-Mode 状态机、命令面板、所有键位的完整定义。
+Complete definition of the mode state machine, the command palette, and every key binding.
 
-相关文件：`VimSession.swift`, `KeyCode.swift`。
+Related files: `VimSession.swift`, `KeyCode.swift`.
 
 ---
 
-## 1. 概念模型
+## 1. Conceptual model
 
 ```swift
 enum Mode {
-    case tap(HintMode)            // hint 点击 + hjkl 移光标 + bare c 点击 + (子状态：drag / search)
-    case scroll(ScrollController) // 键盘滚动（多区域 picker）+ hjkl 移 + bare c 点 + (子状态：drag / search)
-    case window(WindowController)     // 整窗口 resize
-    case windowMove(WindowMoveController)  // 整窗口平移
-    // TAP 子状态：TapSub.normal / .dragging / .searchTyping / .searchSearching / .searchPicking
-    // SCROLL 子状态：ScrollSub.normal / .dragging / .searchTyping / .searchSearching / .searchPicking
+    case tap(HintMode)            // hint click + hjkl cursor move + bare c click + (sub-states: drag / search)
+    case scroll(ScrollController) // keyboard scroll (multi-area picker) + hjkl move + bare c click + (sub-states: drag / search)
+    case window(WindowController)     // whole-window resize
+    case windowMove(WindowMoveController)  // whole-window pan
+    // TAP sub-states: TapSub.normal / .dragging / .searchTyping / .searchSearching / .searchPicking
+    // SCROLL sub-states: ScrollSub.normal / .dragging / .searchTyping / .searchSearching / .searchPicking
 }
 
-var paletteBuffer: String? = nil   // nil = 面板关闭
-var sticky: Bool = false           // TAP mode 内有效
+var paletteBuffer: String? = nil   // nil = palette closed
+var sticky: Bool = false           // valid inside TAP mode
 ```
 
-- **Mode** 描述 "用户当前在干什么"。当前两个：`.tap`（hint 点击，也含 hjkl 移光标 + bare `c` 点击）、`.scroll`（键盘滚动）。移光标键 **hjkl 在两个模式统一**（消除模式间认知切换）。点击键 **bare `c` 在 TAP/SCROLL 统一**——避免 Enter 在 app 里有自己的语义（菜单确认、表单提交）被吃掉。
-- **paletteBuffer** 是命令面板的输入缓冲。打开面板**不会**改变底层 mode；关闭面板回到原 mode 继续。
-- **sticky** 只在 TAP mode 里使用，表示点击后是否保持 mode（连续点多个目标）。
+- **Mode** describes "what the user is currently doing". The current two: `.tap` (hint click, also includes hjkl cursor move + bare `c` click) and `.scroll` (keyboard scroll). The cursor-move keys **hjkl are unified across the two modes** (eliminating cognitive switching between modes). The click key **bare `c` is unified across TAP/SCROLL**—avoiding Enter, which often has its own semantics inside an app (menu confirm, form submit) and would get eaten.
+- **paletteBuffer** is the command palette's input buffer. Opening the palette does **not** change the underlying mode; closing the palette returns to the original mode and continues.
+- **sticky** is used only inside TAP mode and indicates whether the mode is kept after a click (to click multiple targets in a row).
 
-触发键 **Caps Lock**（hidutil 重映射成 F19）统一走 **arm 机制**：按下不立即动作，等松手或等 chord（见 §2.1）。这让一个键承担多职：单击进 TAP / 切 sticky / SCROLL→TAP，按住+jk 进 SCROLL。
+The trigger key **Caps Lock** (remapped to F19 via hidutil) always goes through the **arm mechanism**: pressing it does not act immediately, it waits for release or for a chord (see §2.1). This lets one key carry several jobs: single click enters TAP / toggles sticky / SCROLL→TAP, hold+jk enters SCROLL.
 
 ---
 
-## 2. 状态转移图
+## 2. State transition diagram
 
 ```
-                      ┌──────── Caps Lock 松手(无 chord) ────────┐
+                      ┌──────── Caps Lock release (no chord) ────────┐
                       │                                          ▼
-[OFF] ──Caps Lock 松手(无 chord)──> [TAP] ──Caps Lock 松手──> [TAP sticky]
+[OFF] ──Caps Lock release (no chord)──> [TAP] ──Caps Lock release──> [TAP sticky]
    │                                  │  ▲                        │
-   │                                  │  └── Caps Lock 松手 ───────┘ (toggle)
+   │                                  │  └── Caps Lock release ────┘ (toggle)
    │                                  │
-   └─ Caps Lock 按住 + d ───┐        ├─ hint 字母      → 点击（commit）
-                            │        ├─ h/j/k/l        → 移光标（vim hjkl，Shift 加速）
-   [TAP] Caps Lock按住+d ───┤        ├─ bare `c`       → 光标位置左键单击（Enter 放行给 app）
-                            ▼        ├─ Shift+; (:)    → 命令面板
-                        [SCROLL] ◄───┘ Caps Lock按住+d
+   └─ Caps Lock hold + d ───┐        ├─ hint letter    → click (commit)
+                            │        ├─ h/j/k/l        → move cursor (vim hjkl, Shift to accelerate)
+   [TAP] Caps Lock hold+d ──┤        ├─ bare `c`       → left single-click at cursor position (Enter passed through to app)
+                            ▼        ├─ Shift+; (:)    → command palette
+                        [SCROLL] ◄───┘ Caps Lock hold+d
                             │
-                            ├─ d / u        → 下/上滚（按住连续，Shift 加速）
-                            ├─ h/j/k/l      → 移光标（同 TAP，Shift 快/Option 慢）
-                             ├─ 数字键        → 切换滚动区域
-                             ├─ Caps Lock 松手 → 切回 TAP
-                             └─ Esc          → OFF
+                            ├─ d / u        → scroll down/up (hold for continuous, Shift to accelerate)
+                            ├─ h/j/k/l      → move cursor (same as TAP, Shift fast / Option slow)
+                            ├─ number keys  → switch scroll area
+                            ├─ Caps Lock release → switch back to TAP
+                            └─ Esc          → OFF
 
-任意 mode：Esc → deactivate 回 OFF
+Any mode: Esc → deactivate back to OFF
 ```
 
-### Caps Lock 的统一语义（arm）
+### The unified semantics of Caps Lock (arm)
 
-Caps Lock(F19) 在**任何 mode** 都先 **arm**（按下不动作），松手时分情况：
+Caps Lock(F19) in **any mode** first **arms** (does nothing on press); on release it branches:
 
-- **按住期间按了 j/k**（chord）→ 进 SCROLL（从任何 mode）
-- **没按 chord，直接松手** → 执行当前 mode 的默认：OFF→进 TAP，TAP→切 sticky，SCROLL→切回 TAP，palette 开→关 palette
+- **j/k was pressed while held** (chord) → enter SCROLL (from any mode)
+- **no chord pressed, released directly** → execute the current mode's default: OFF→enter TAP, TAP→toggle sticky, SCROLL→switch back to TAP, palette open→close palette
 
-所以**连续按两下 Caps Lock = 进 TAP + 切 sticky = 直接到 TAP sticky**。代价：所有 Caps Lock 单击动作在**松手**时才生效（~50ms，感知不到）。详见 §2.1。
+So **pressing Caps Lock twice in a row = enter TAP + toggle sticky = straight to TAP sticky**. The cost: every Caps Lock single-click action takes effect only on **release** (~50ms, imperceptible). See §2.1.
 
-**Esc 永远 deactivate**——回到 OFF（hint 隐藏、sticky 清零、palette 关、scroll 退出），但 **进程不退**（Mouseless 仍在 menu bar，Caps Lock 仍是 F19）。要真退出进程走菜单栏 Quit（见 §3.1）。
+**Esc always deactivates**—returning to OFF (hide hints, clear sticky, close palette, exit scroll), but the **process does not exit** (Mouseless is still in the menu bar, Caps Lock is still F19). To actually quit the process, use menu bar Quit (see §3.1).
 
-只想关面板回 TAP 而不 deactivate：空 buffer 上按 Backspace，或按 Caps Lock。
+To only close the palette and return to TAP without deactivating: press Backspace on an empty buffer, or press Caps Lock.
 
-### 2.1 arm 机制（chord vs tap 消歧）
+### 2.1 arm mechanism (chord vs tap disambiguation)
 
-一个键要兼"单击"和"按住+组合"，按下瞬间无法区分（chord 的第二键还没来），所以按下时**先不动作，记一个 armed 标记**，等下一步：
+For one key to serve both "single click" and "hold + combination", you can't tell them apart at the moment of press (the second key of the chord hasn't arrived yet), so on press it **does nothing and records an armed flag**, then waits for the next step:
 
 ```
-Caps Lock 按下 → f19Armed = true（待命，先不动）
-   ├─ 期间按 j/k    → chord：enterScroll()，标记 chordUsed
-   └─ Caps Lock 松手 → 若没 chordUsed → handleTriggerTap()（按 mode 分派默认动作）
+Caps Lock pressed → f19Armed = true (standby, do nothing yet)
+   ├─ j/k pressed meanwhile → chord: enterScroll(), mark chordUsed
+   └─ Caps Lock released → if no chordUsed → handleTriggerTap() (dispatch default action by mode)
 ```
 
-实现见 `HotkeyTap.swift`（arm 状态机）+ `VimSession.handleTriggerTap()`。arm 覆盖所有 mode，不只 OFF——这是"TAP 内也能 Caps Lock+d 进 SCROLL"和"连续 Caps Lock 进 sticky"两个行为的根。
+See `HotkeyTap.swift` (arm state machine) + `VimSession.handleTriggerTap()` for the implementation. arm covers all modes, not just OFF—this is the root of both behaviors "Caps Lock+d to enter SCROLL even inside TAP" and "consecutive Caps Lock to enter sticky".
 
 ---
 
-## 3. 进入 / 退出
+## 3. Enter / exit
 
-触发键是 **Caps Lock**（物理键，hidutil 重映射成 F19 后 CGEventTap 接到的是 F19 keyDown，见 `event-pipeline.md` §3）。
+The trigger key is **Caps Lock** (a physical key; after being remapped to F19 via hidutil, what CGEventTap receives is an F19 keyDown, see `event-pipeline.md` §3).
 
-### 3.1 三个层级，别混淆
+### 3.1 Three levels, don't confuse them
 
-Mouseless 的状态有**三层**，"退出"在哪一层语义不一样：
+Mouseless state has **three levels**, and what "exit" means differs depending on which level:
 
-| 层级 | menu bar 图标 | hidutil remap | 怎么进入 | 怎么离开 |
+| Level | menu bar icon | hidutil remap | How to enter | How to leave |
 | --- | --- | --- | --- | --- |
-| **进程未运行** | 无 | 已还原 | 还未启动 / 用户菜单栏 Quit | 启动 Mouseless |
-| **进程运行 · OFF** | `M●` | 生效 | 启动 / Esc 退出 mode | Caps Lock 进 TAP / Caps Lock+d 进 SCROLL / 菜单栏 Quit |
-| **进程运行 · TAP/SCROLL** | `M●` + overlay | 生效 | 见 §2 | Esc / 菜单栏 Quit |
+| **Process not running** | none | reverted | not yet launched / user menu bar Quit | launch Mouseless |
+| **Process running · OFF** | `M●` | active | launch / Esc out of a mode | Caps Lock to enter TAP / Caps Lock+d to enter SCROLL / menu bar Quit |
+| **Process running · TAP/SCROLL** | `M●` + overlay | active | see §2 | Esc / menu bar Quit |
 
-**Esc 只在层级内"deactivate"——回 OFF，不退进程**。Caps Lock 还是 F19，你再按一下立刻又能进 TAP。要真退出进程（让 Caps Lock 还原成普通 toggle），走菜单栏 Quit 或 Cmd+Q——那条路径触发 `applicationWillTerminate` → `TriggerRemap.revertAtQuit()`。
+**Esc only "deactivates" within the level—back to OFF, it does not exit the process.** Caps Lock is still F19, press it once more and you're immediately back in TAP. To actually quit the process (so Caps Lock reverts to the normal toggle), use menu bar Quit or Cmd+Q—that path triggers `applicationWillTerminate` → `TriggerRemap.revertAtQuit()`.
 
-### 3.2 Caps Lock 在各状态的行为（统一 arm）
+### 3.2 Caps Lock behavior in each state (unified arm)
 
-| 操作 | OFF | TAP | TAP sticky | SCROLL | WINDOW | MOVE | palette 开 |
+| Operation | OFF | TAP | TAP sticky | SCROLL | WINDOW | MOVE | palette open |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Caps Lock 单击（松手无 chord） | 进 TAP | 切 sticky / 退子状态* | 切回非 sticky / 退子状态* | 切回 TAP | 切回 TAP | 切回 TAP | 关 palette |
-| Caps Lock + d | 进 SCROLL† | 进 SCROLL | 进 SCROLL | （重进 SCROLL）| 进 SCROLL | 进 SCROLL | — |
-| Caps Lock + w | 进 WINDOW | 进 WINDOW | 进 WINDOW | 进 WINDOW | （已在 WINDOW，no-op）| 进 WINDOW | — |
-| Caps Lock + m | 进 MOVE | 进 MOVE | 进 MOVE | 进 MOVE | 进 MOVE | （已在 MOVE，no-op）| — |
-| `Esc` | — | deactivate / 退子状态* | deactivate / 退子状态* | deactivate | deactivate | deactivate | deactivate |
-| 菜单栏 Quit / Cmd+Q | quit 进程 | quit 进程 | quit 进程 | quit 进程 | quit 进程 | quit 进程 | quit 进程 |
+| Caps Lock single click (release with no chord) | enter TAP | toggle sticky / exit sub-state* | switch back to non-sticky / exit sub-state* | switch back to TAP | switch back to TAP | switch back to TAP | close palette |
+| Caps Lock + d | enter SCROLL† | enter SCROLL | enter SCROLL | (re-enter SCROLL) | enter SCROLL | enter SCROLL | — |
+| Caps Lock + w | enter WINDOW | enter WINDOW | enter WINDOW | enter WINDOW | (already in WINDOW, no-op) | enter WINDOW | — |
+| Caps Lock + m | enter MOVE | enter MOVE | enter MOVE | enter MOVE | enter MOVE | (already in MOVE, no-op) | — |
+| `Esc` | — | deactivate / exit sub-state* | deactivate / exit sub-state* | deactivate | deactivate | deactivate | deactivate |
+| menu bar Quit / Cmd+Q | quit process | quit process | quit process | quit process | quit process | quit process | quit process |
 
-\* DRAG 与 `/`-搜索是 TAP 的**子状态**而非独立 mode（见 §6 / §6.5）。在 TAP 子状态里按 Caps Lock 单击会先**清理子状态**（drag → drop at cursor；search → 关 search overlay 恢复 hints）再回 TAP normal；Esc 在 search 子状态里是"取消搜索回 TAP normal"，在 dragging 子状态里是"drop at cursor 后 deactivate 回 OFF"，在 TAP normal 里才是直接 deactivate。
+\* DRAG and `/`-search are **sub-states** of TAP rather than independent modes (see §6 / §6.5). Pressing Caps Lock single-click inside a TAP sub-state first **cleans up the sub-state** (drag → drop at cursor; search → close the search overlay and restore hints) and then returns to TAP normal; Esc in the search sub-state means "cancel the search, back to TAP normal", in the dragging sub-state it means "drop at cursor then deactivate back to OFF", and only in TAP normal does it deactivate directly.
 
-† **浏览器例外**：当前台是浏览器、且当前 tab 是注入了 content script 的真网页（http/https 等）时，Caps Lock + d **不进 SCROLL，直接吞掉无效果**——因为这种页面 d/u 已经能**免模式滚动**（见 §5.1）。判定靠扩展推来的 `scroll_gate` live 标志(`VimSession.browserHandlesScroll()`)。chrome:// / 网上应用店 / PDF 等无 content script 的页面仍按正常进 SCROLL（兜底）。
+† **Browser exception**: when the foreground is a browser and the current tab is a real web page with the content script injected (http/https, etc.), Caps Lock + d **does not enter SCROLL, it is swallowed with no effect**—because on such a page d/u can already **scroll mode-lessly** (see §5.1). The decision is based on the `scroll_gate` live flag pushed by the extension (`VimSession.browserHandlesScroll()`). Pages with no content script such as chrome:// / Web Store / PDF still enter SCROLL normally (fallback).
 
-Caps Lock + Shift/Cmd/Ctrl/Option（修饰键）→ 不 arm，放行给系统/用户。
+Caps Lock + Shift/Cmd/Ctrl/Option (modifier keys) → not armed, passed through to the system/user.
 
-**Caps Lock 永远响应**：WINDOW / MOVE 不"吞" Caps Lock。`teardownCurrentMode()` 在切之前清干净——WINDOW/MOVE 停 timer + 关 overlay。TAP 内部按 Caps Lock 由子状态自己处理（dragging 释放 mouseDown、search 关 search overlay），整体逻辑跟 mode 切换一致。
+**Caps Lock always responds**: WINDOW / MOVE do not "swallow" Caps Lock. `teardownCurrentMode()` cleans up before switching—WINDOW/MOVE stop the timer + close the overlay. Inside TAP, pressing Caps Lock is handled by the sub-state itself (dragging releases mouseDown, search closes the search overlay), and the overall logic is consistent with mode switching.
 
-`VimSession.enter()`：**同步**设 `mode = .tap(h)`（消除连按 race，见 §2.1），再异步 `h.activate()` 扫描 + 显示 overlay。三个来源都空时显示 "no hints here" 并退出。
+`VimSession.enter()`: **synchronously** sets `mode = .tap(h)` (eliminates the consecutive-press race, see §2.1), then asynchronously `h.activate()` scans + shows the overlay. When all three sources are empty it shows "no hints here" and exits.
 
 ---
 
-## 4. TAP mode 键位
+## 4. TAP mode key bindings
 
-| 键 | 行为 |
+| Key | Behavior |
 | --- | --- |
-| `a s d f g e r u i w t n m` | 输入 hint 标签字母（13 个；**注意不含 h/j/k/l/v/c/o/p**） |
-| `0–9` | 输入 hint 标签数字（Dock 专用） |
-| `Shift + 末位字符` | **右键** |
-| （双击某个 hinted 元素） | `'`+label 移光标到它 → `cc` 双击（双击统一是 `cc`，标签不再有专门双击手势，见 §4.4） |
-| `'` (撇号) 后再敲 label | **只移动不点击**——光标 warp 到目标,**不点击**(把 hints 当光标传送锚点)。详见 §4.3.5 |
-| `h / j / k / l` (bare) | **移光标** 左/下/上/右（vim hjkl，按住连续，normal 速度） |
-| `Shift + hjkl` | 加速移光标 |
-| `Option + hjkl` | 精细移光标（慢速，精确落到小 icon） |
-| `c` (bare) | 当前光标位置 **左键单击**（延后 ~150ms 消歧；配 hjkl：移到位 → `c` 点击） |
-| `cc`（快速双击 `c`，150ms 内） | 当前光标位置 **双击** |
-| `Shift + c` | 当前光标位置 **右键**（立即） |
-| `Enter` | **放行**给焦点 app（菜单确认、表单提交等都不被 Mouseless 吃掉） |
-| `v` (bare) | **进入 DRAG 子状态**——立刻在光标位置 `mouseDown`，hjkl 拖、Enter drop、Backspace 取消（见 §6） |
-| `/` (bare) | **进入 `/`-搜索子状态**——OCR 焦点窗口、字符级匹配，复用 hint label 池标记结果（见 §6.5） |
-| `Backspace` | TAP normal：撤销上一个输入的 hint 字符（typed 空时无操作）；子状态里有自己的语义 |
-| `Shift + ;` (= `:`) | 打开命令面板 |
-| `↑↓←→` / `Cmd / Ctrl + 任意键` | **放行**，不消费（保系统快捷键 + app 原生导航） |
+| `a s d f g e r u i w t n m` | type a hint label letter (13 of them; **note: excludes h/j/k/l/v/c/o/p**) |
+| `0–9` | type a hint label digit (Dock-only) |
+| `Shift + last character` | **right-click** |
+| (double-click some hinted element) | `'`+label moves cursor to it → `cc` double-click (double-click is uniformly `cc`, labels no longer have a dedicated double-click gesture, see §4.4) |
+| `'` (apostrophe) then type a label | **move only, no click**—the cursor warps to the target, **does not click** (treats hints as cursor teleport anchors). See §4.3.5 |
+| `h / j / k / l` (bare) | **move cursor** left/down/up/right (vim hjkl, hold for continuous, normal speed) |
+| `Shift + hjkl` | accelerated cursor move |
+| `Option + hjkl` | fine cursor move (slow, to precisely land on a small icon) |
+| `c` (bare) | **left single-click** at the current cursor position (delayed ~150ms for disambiguation; paired with hjkl: move into place → `c` to click) |
+| `cc` (quick double-tap of `c`, within 150ms) | **double-click** at the current cursor position |
+| `Shift + c` | **right-click** at the current cursor position (immediate) |
+| `Enter` | **passed through** to the focused app (menu confirm, form submit, etc. are not eaten by Mouseless) |
+| `v` (bare) | **enter the DRAG sub-state**—immediately `mouseDown` at the cursor position, hjkl to drag, Enter to drop, Backspace to cancel (see §6) |
+| `/` (bare) | **enter the `/`-search sub-state**—OCR the focused window, character-level match, reuse the hint label pool to mark results (see §6.5) |
+| `Backspace` | TAP normal: undo the last typed hint character (no-op when typed is empty); sub-states have their own semantics |
+| `Shift + ;` (= `:`) | open the command palette |
+| `↑↓←→` / `Cmd / Ctrl + any key` | **passed through**, not consumed (preserves system shortcuts + the app's native navigation) |
 
-为什么 hint 池没有 h/j/k/l/v/c/o/p：h/j/k/l 是 hjkl 移光标键、v 是 bare-key 进 DRAG 子状态、c 是 bare-key 点击键，裸按它们都有专门含义、不能再当 hint 字母（否则歧义）；`o`/`p` 因右小拇指外伸手感差被剔除。除这八个外其它顺手字母都可用，`HintMode.alphabet` 取 **13 个**：`a s d f g e r u i w t n m`。13² = 169 = `maxTargets`(169)，所以**任何一次扫描都不会出现 3 字母 label**（2 字母封顶）。顺序按手感前置（左手 home row 在前，单字母 label 用 `prefix` 取前缀、最短 label 最快 commit）。详见 §4.3 与 `hint-rendering.md`。
+Why the hint pool has no h/j/k/l/v/c/o/p: h/j/k/l are the hjkl cursor-move keys, v is the bare key to enter the DRAG sub-state, c is the bare key for clicking, and pressing any of them bare has a dedicated meaning so they can't double as hint letters (otherwise ambiguity); `o`/`p` are dropped because the right pinky stretch feels bad. Apart from these eight, every other comfortable letter is usable, and `HintMode.alphabet` takes **13**: `a s d f g e r u i w t n m`. 13² = 169 = `maxTargets`(169), so **no single scan will ever produce a 3-letter label** (2 letters is the cap). The order is ergonomics-first (left-hand home row first; single-letter labels use `prefix` to take a prefix, and the shortest labels commit fastest). See §4.3 and `hint-rendering.md`.
 
-为什么不用 Ctrl 做移动：power user（如 HHKB）常在系统层把 Ctrl+hjkl 映射成方向键，跟我们冲突。裸 hjkl 完全避开 Ctrl。
+Why not use Ctrl for movement: power users (e.g. HHKB) often map Ctrl+hjkl to arrow keys at the system layer, which conflicts with us. Bare hjkl avoids Ctrl entirely.
 
-### 4.1 标签输入
+### 4.1 Label input
 
-每次按键：
+On each keypress:
 1. `next = typed + char`
-2. 过滤 `targets` 中 `label.hasPrefix(next)` 的：
-   - 0 个匹配 → `.ignored`，**吞掉、不退出**（误按；typed 保持上一个有效值，Esc 才退出）
-   - 1 个且完整匹配 → 普通 = `.committed`（commit 点击后视 sticky 决定下一步）；move-armed = `.moved`（warp 光标、不点击、留在 TAP，见 §4.3.5）
-   - 多个 → `.pending`，刷新 overlay 展示剩余候选
+2. Filter `targets` where `label.hasPrefix(next)`:
+   - 0 matches → `.ignored`, **swallow, do not exit** (mis-press; typed keeps the previous valid value, only Esc exits)
+   - 1 and complete match → normal = `.committed` (after the commit click, decide the next step based on sticky); move-armed = `.moved` (warp cursor, no click, stay in TAP, see §4.3.5)
+   - multiple → `.pending`, refresh the overlay to show the remaining candidates
 
-提交点击的实现详见 `hint-rendering.md` 的 commit 部分。
+See the commit section of `hint-rendering.md` for the implementation of committing a click.
 
-### 4.2 Sticky 与切 app / 同 app 内容变化的跟随
+### 4.2 Sticky and following app switches / in-app content changes
 
-- 进入 TAP 时 `sticky = false`。
-- Caps Lock 单击（松手无 chord）切换 sticky —— 走 §2.1 的 arm 机制 + `handleTriggerTap()`，不在 `handleTap` 里。
-- TAP 内 hint `.committed` 时如果 sticky：`deactivate()` 当前 HintMode → 构造新的 `HintMode()` → `activate()`，整套 hint 重新扫描（焦点 app 可能已经因为点击而变了）。Non-sticky `.committed` 直接 `exit()` 回 OFF。
+- On entering TAP, `sticky = false`.
+- Caps Lock single click (release with no chord) toggles sticky—it goes through the arm mechanism of §2.1 + `handleTriggerTap()`, not inside `handleTap`.
+- On a TAP hint `.committed` when sticky: `deactivate()` the current HintMode → construct a new `HintMode()` → `activate()`, the whole hint set rescans (the focused app may have changed because of the click). A non-sticky `.committed` directly `exit()`s back to OFF.
 
-**问题：画面变化（点击导致 或 切 app）让 overlay / mode 状态失效。** overlay 是按某个 app 的布局画的（`.statusBar` 级、跨所有 space、`orderFrontRegardless`，**不跟随焦点**）；mode controller（WindowController / ScrollController）持有的是原 app 的 AX 引用。两件事会让它失效：
+**Problem: a screen change (caused by the click or by switching apps) invalidates the overlay / mode state.** The overlay is drawn for a particular app's layout (`.statusBar` level, across all spaces, `orderFrontRegardless`, **does not follow focus**); the mode controller (WindowController / ScrollController) holds AX references to the original app. Two things can invalidate it:
 
-1. **切 app**（Cmd+Tab，或点击打开别的 app）—— overlay 还停在旧 app 的坐标上盖着新 app；controller 的 AX 引用还指向旧 app 的窗口。**所有 active mode 都会遇到这个问题**，不止 sticky TAP。
-2. **同 app 内容变化**（列表选中 → 详情面板重载、展开 disclosure、原地导航、弹 popover、开新窗口）—— 合成 click 是异步的，`rehintSticky()` 立即跑时 walk 的是**点击前**的树，重扫出来还是旧画面（用户实测踩到）。**仅 sticky TAP 这条路径需要这个机制**（其它 mode 没有"commit 后继续操作"的概念）。
+1. **App switch** (Cmd+Tab, or clicking to open another app)—the overlay still sits on the old app's coordinates covering the new app; the controller's AX references still point to the old app's window. **Every active mode hits this problem**, not just sticky TAP.
+2. **In-app content change** (list selection → detail panel reload, expanding a disclosure, in-place navigation, popover, opening a new window)—the synthesized click is asynchronous, so when `rehintSticky()` runs immediately it walks the **pre-click** tree, and the rescan still produces the old screen (confirmed by users in testing). **Only this sticky-TAP path needs this mechanism** (other modes have no concept of "keep operating after commit").
 
-靠**两套机制**覆盖。**关键区别是焦点窗口变没变**：
+This is covered by **two mechanisms**. **The key distinction is whether the focused window changed**:
 
-**机制 1 — 焦点窗口变了（切 app **或者** 同 app 内换窗）：旧 overlay 立即隐藏 + 100ms 后在新 frontmost 上重新 apply 当前模式 + 截图只含新 app。** 整个 active session（TAP / SCROLL / WINDOW / MOVE 都算）挂信号，前三条汇到 `reapplyOnCurrentFrontmost`：
+**Mechanism 1 — the focused window changed (app switch **or** switching windows within the same app): the old overlay is hidden immediately + the current mode is re-applied on the new frontmost 100ms later + the screenshot contains only the new app.** The entire active session (TAP / SCROLL / WINDOW / MOVE all count) hooks signals, and the first three fan into `reapplyOnCurrentFrontmost`:
 
-| 信号 | 触发场景 | 延迟 / 处理 |
+| Signal | Trigger scenario | Delay / handling |
 |---|---|---|
-| `NSWorkspace.didActivateApplication` | Cmd+Tab 切 app / 单击别的 app | ~0ms → reapply |
-| `NSWorkspace.activeSpaceDidChange` | 跨 Space 滑动（Ctrl+方向键 / 三指滑），或 cross-Space 切 app 完成动画 | ~0ms → reapply |
-| 150ms `focusedWindowPollTimer` | **同 app 内** focused window 变了：Cmd+W 关窗 / Cmd+M 最小化 / Cmd+\` 切窗 / Cmd+N 开新窗 | 最坏 150ms → reapply |
-| `NSWorkspace.didTerminateApplication` | 任意 app 退出（**右键 Dock 图标 → Quit 一个后台 app** 的场景：frontmost 没变，前三条都不 fire，但 Dock 图标没了 → overlay 的 Dock hint 过时）| 见下方"Dock-change-only 刷新" |
+| `NSWorkspace.didActivateApplication` | Cmd+Tab app switch / single-clicking another app | ~0ms → reapply |
+| `NSWorkspace.activeSpaceDidChange` | swiping across Spaces (Ctrl+arrow / three-finger swipe), or the cross-Space app-switch animation finishing | ~0ms → reapply |
+| 150ms `focusedWindowPollTimer` | **within the same app** the focused window changed: Cmd+W close window / Cmd+M minimize / Cmd+\` switch window / Cmd+N open a new window | at worst 150ms → reapply |
+| `NSWorkspace.didTerminateApplication` | any app quits (the **right-click Dock icon → Quit a background app** scenario: frontmost didn't change, the first three don't fire, but the Dock icon is gone → the overlay's Dock hint is stale) | see "Dock-change-only refresh" below |
 
-前三条 + 一个 handler 的扇入设计。handler 不关心是谁叫的，它就一件事：**读当前 frontmost app / window，在那个状态上重画**。同一逻辑事件可能多条线一起 fire（例：cross-Space Cmd+Tab 时 didActivateApplication 立刻发，300ms 后 activeSpaceDidChange 又发，poll 在中间也可能看到 window 变化）——`reapplyOnCurrentFrontmost` 每次进来都 `cancel` 上次 pending 的 reapply DispatchWorkItem 再重新 schedule，**setup 跑 N 次但实际 re-enter 只跑 1 次**（最后那次胜出）。同时进来时刷一下 poll 缓存的 `lastSeenFocusedWindow`，让晚到的信号看不到变化、不再触发。
+A fan-in design of the first three + a single handler. The handler doesn't care who called it; it does one thing: **read the current frontmost app / window and redraw on that state**. The same logical event may fire across multiple lines at once (e.g.: on cross-Space Cmd+Tab, didActivateApplication fires immediately, activeSpaceDidChange fires again 300ms later, and the poll may also see the window change in between)—each time `reapplyOnCurrentFrontmost` re-enters it `cancel`s the previously pending reapply DispatchWorkItem and re-schedules, so **setup runs N times but the actual re-enter runs only once** (the last one wins). It also refreshes the poll's cached `lastSeenFocusedWindow` on entry, so late-arriving signals see no change and stop triggering.
 
-> **为什么 poll 而不用 AX observer**。`kAXFocusedWindowChangedNotification` 是更"对口"的事件——AXObserver 注册到 frontmost app 的 PID 上、~0ms 延迟。试过，砍了。理由：AX notification 的 emission 是 **app 自己的责任**，非原生框架（WeChat、Electron、Qt 类）普遍不发——观察者在那些 app 上跟空气一样。poll 是"我自己去读"，跟 app 是否合规无关，**普适**。代价是 ~7 IPC/sec（150ms 一次 `AXUIElementCopyAttributeValue`，比 60fps 的 WindowController tick 便宜 8 倍）+ 最坏 150ms 延迟，可接受。AX observer 的 ~80 行 `@convention(c)` callback + Unmanaged refcon + AXObserver/runloop source 管理也一并省掉。
+> **Why poll instead of an AX observer**. `kAXFocusedWindowChangedNotification` is the more "on-point" event—an AXObserver registered on the frontmost app's PID, ~0ms latency. Tried it, cut it. The reason: emission of an AX notification is **the app's own responsibility**, and non-native frameworks (WeChat, Electron, Qt-style) widely don't emit them—the observer is like air on those apps. Polling is "I go read it myself", independent of whether the app is compliant, and is **universal**. The cost is ~7 IPC/sec (a `AXUIElementCopyAttributeValue` every 150ms, 8× cheaper than the 60fps WindowController tick) + at worst 150ms latency, acceptable. The AX observer's ~80 lines of `@convention(c)` callback + Unmanaged refcon + AXObserver/runloop source management are also avoided.
 
-> **Dock-change-only 刷新（didTerminate 走单独的轻路径，不进 reapply）**。app 退出每天发生无数次——dockless 后台 agent（更新器、helper）退出跟屏幕上画的东西毫无关系，**不该重扫也不该闪**。所以 `handleAppTerminated` 不调 reapply，而是：① gate 只在 TAP（只有 TAP 有 Dock hint 会过时）；② debounce 排一个 `pendingDockCheck` @ +500ms（Dock 移除图标是 ~几百 ms 的动画，立刻比会假阴性；连续退出也合并成一次）；③ `checkDockChangedAndRefresh` 比 **当前显示的 Dock hint rects**（`HintMode.currentDockRects`，即 numeric-label 的 targets）vs **现在 walk 一遍 Dock 的 rects**（`HintMode.collectDockRects()`，~5ms）——本质是"显示的 Dock vs 实际的 Dock 还一致吗"。签名（rect 取整排序）不同才 `refreshInPlace`（原地换 targets，**零闪**），相同直接忽略。退 dockless agent → Dock 集合不变 → 忽略；退有 Dock 图标的 app（含"运行中临时有图标"的）→ 图标移除 reflow → 集合变 → 刷一次。**Dock 自己变没变就是答案**，不用判断 app 算前台/后台/dockless，也不依赖 `AXDockItem → app` 映射（那个 AX 属性各版本不一定稳）。gate 还含 `tapSub == .normal` + `typed` 空（不在用户敲 label 中途 reshuffle）。`pendingDockCheck` 在 `exit()` 取消。代价：无关退出也白 walk 一次 Dock（~5ms，无感），换"判断绝对可靠"。
+> **Dock-change-only refresh (didTerminate takes a separate lightweight path, doesn't go through reapply)**. Apps quit countless times a day—a dockless background agent (updater, helper) quitting has nothing to do with what's drawn on screen, **and should neither rescan nor flicker**. So `handleAppTerminated` does not call reapply, and instead: ① gate only in TAP (only TAP has Dock hints that can go stale); ② debounce, scheduling a `pendingDockCheck` @ +500ms (the Dock removing an icon is a ~few-hundred-ms animation, comparing immediately would false-negative; consecutive quits also coalesce into one); ③ `checkDockChangedAndRefresh` compares the **currently displayed Dock hint rects** (`HintMode.currentDockRects`, i.e. the numeric-label targets) vs **a fresh walk of the Dock's rects now** (`HintMode.collectDockRects()`, ~5ms)—essentially "does the displayed Dock still agree with the actual Dock". Only if the signature (rect rounded and sorted) differs does it `refreshInPlace` (swap targets in place, **zero flicker**); if identical, ignore. Quitting a dockless agent → Dock set unchanged → ignore; quitting an app with a Dock icon (including "temporarily has an icon while running" ones) → icon removed, reflow → set changed → refresh once. **Whether the Dock itself changed is the answer**, no need to judge whether the app is foreground/background/dockless, and no reliance on the `AXDockItem → app` mapping (that AX attribute isn't necessarily stable across versions). The gate also includes `tapSub == .normal` + `typed` empty (don't reshuffle while the user is mid-typing a label). `pendingDockCheck` is canceled in `exit()`. Cost: an irrelevant quit also wastes one Dock walk (~5ms, imperceptible), in exchange for "absolutely reliable judgment".
 
-observer 的生命周期跟"用户在 active 状态"绑定：每个 `enterX()` 都注册（idempotent），`exit()` 注销；mode 之间互切（如 TAP ↔ SCROLL）**不**注销——`teardownCurrentMode` 不动 observer。任一信号触发 → 立即藏旧 overlay + 取消 pending operations，然后按 `currentModeKind` 重 enter。**TAP 走内容 settle watch（measured，取代固定延迟——见下）；SCROLL / WINDOW / MOVE 仍走固定延迟**（100ms 同 Space / 500ms 跨 Space）：
+The observer's lifecycle is bound to "user is in an active state": every `enterX()` registers (idempotent), `exit()` unregisters; switching between modes (e.g. TAP ↔ SCROLL) does **not** unregister—`teardownCurrentMode` leaves the observer alone. Any signal trigger → immediately hide the old overlay + cancel pending operations, then re-enter according to `currentModeKind`. **TAP goes through the content settle watch (measured, replacing the fixed delay—see below); SCROLL / WINDOW / MOVE still use the fixed delay** (100ms same Space / 500ms cross Space):
 
-- `.tap` → **settle watch 稳定后** `rehintSticky(isolateApp: true, fromAppSwitch: true)`：每帧 `makeWindowFingerprinter(quiet:)` 重解析新 app 的焦点窗口指纹（`runSettleLoop`，复用 §4.3.2 那套），连续 2 帧稳才扫；窗口还没到/没有 → `.noWindow` 持续 → 也调 `rehintSticky`，它内部照常出 no-window HUD。**sticky 和 non-sticky 都重扫**。
-- `.scroll` → 固定延迟后 `enterScroll()`（重检测新 app 的 scroll areas、warp、画 overlay）
-- `.window` / `.windowMove` → 固定延迟后 `enterWindowMode()` / `enterWindowMove()`（重过 gate；不过则 HUD + 退 OFF）
+- `.tap` → **after the settle watch stabilizes** `rehintSticky(isolateApp: true, fromAppSwitch: true)`: each frame `makeWindowFingerprinter(quiet:)` re-parses the new app's focused-window fingerprint (`runSettleLoop`, reusing the §4.3.2 machinery), scanning only after 2 consecutive stable frames; window not yet present/absent → `.noWindow` persists → also calls `rehintSticky`, which internally shows the no-window HUD as usual. **Both sticky and non-sticky rescan.**
+- `.scroll` → after the fixed delay `enterScroll()` (re-detect the new app's scroll areas, warp, draw the overlay)
+- `.window` / `.windowMove` → after the fixed delay `enterWindowMode()` / `enterWindowMove()` (re-pass the gate; if not, HUD + exit to OFF)
 
-> 早期版本只有 sticky TAP 有这个跟随、其它 mode 切 app 都是 overlay 残留 + 操作仍指向原 app（broken）。统一改成"任何 active mode + 切 app = 在新 app 重 apply"后，UX 跟用户直觉对齐：切 app = "我现在想在这个 app 上继续做刚才的事"。
+> Early versions had this follow only for sticky TAP, and every other mode's app switch left an overlay residue + operations still aimed at the original app (broken). After unifying it to "any active mode + app switch = re-apply on the new app", the UX aligns with user intuition: switching apps = "I now want to continue what I was just doing, on this app".
 
-> **为什么要等（历史 + 现状）**：早期版本是收到通知**立即**重扫，因为想当然以为"通知发了 = 新 app 已经 frontmost = 没什么可等的"。实测有一定概率拿到空结果——`didActivateApplication` 在 OS *标记* app 激活时就发，但 AX 树还没填好 / ScreenCaptureKit 还在抓半截画的帧的窗口期里，扫描会返回 0 个 target，进而触发 `rehintSticky` 的 `else { exit() }` 把整个 session 静默杀掉，用户看到的是"切完 app 后 Mouseless 像没了一样"。于是加了固定延迟等 AX 树+像素就位。**现在 TAP 这条已不靠固定延迟猜了——改用 settle watch 直接测"内容就绪没"**（每帧重解析新窗口指纹、连续 2 帧稳才扫），下面这套 100/500ms 固定延迟现在**只用于 SCROLL / WINDOW / MOVE**（这三个不扫像素密集的 hint、对时机没那么敏感，暂未迁）。`isolateApp: true` 仍然保留（实际扫描时截图排除 Dock 进程、过滤 Cmd+Tab 切换器 HUD；settle watch 的指纹本身不 isolate，反而让 HUD 淡出当"变化"被等掉）。
+> **Why wait (history + current state)**: early versions rescanned **immediately** on receiving the notification, naively assuming "notification fired = the new app is already frontmost = nothing to wait for". In practice there's some probability of getting an empty result—`didActivateApplication` fires when the OS *marks* the app active, but during the window when the AX tree isn't filled yet / ScreenCaptureKit is still capturing a half-painted frame, the scan returns 0 targets, which then triggers `rehintSticky`'s `else { exit() }` to silently kill the whole session, and what the user sees is "after switching apps, Mouseless seems gone". So a fixed delay was added to wait for the AX tree + pixels to be ready. **Now the TAP path no longer guesses with a fixed delay—it uses a settle watch to directly measure "is the content ready"** (re-parse the new window's fingerprint each frame, scan only after 2 consecutive stable frames), and the 100/500ms fixed delays below now apply **only to SCROLL / WINDOW / MOVE** (these three don't scan pixel-dense hints and aren't as timing-sensitive, not yet migrated). `isolateApp: true` is still kept (during the actual scan the screenshot excludes the Dock process and filters out the Cmd+Tab switcher HUD; the settle watch's fingerprint itself doesn't isolate, which instead lets the HUD fade-out count as a "change" that gets waited out).
 
-> **跨 Space 切 app 时的额外延迟（SCROLL/WINDOW/MOVE 仍用，TAP 已不需要）**：用户 Cmd+Tab 到**另一个 Space** 的 app 时，macOS 跑一段 250-400ms 的滑动动画——固定 100ms 延迟下扫描刚好落在动画中间，截到一片黑的过渡画面（实测踩过）。macOS **没有 public API** 告诉我们"当前正在切换 Space"或"即将切换 Space"——只有 `activeSpaceDidChangeNotification`，在动画**完成后**才 fire（"Did" 是 past tense）。所以采用启发式：`didActivateApplication` 触发时用 `CGWindowListCopyWindowInfo(.optionOnScreenOnly, ...)` 查激活的 app 有没有 window 在当前 Space 上可见——如果**没有**（跨 Space 切换 / 全部 minimized / 全部 hidden 三种情况都表现为这个），延迟从 100ms 拉到 **500ms**；同时订阅 `activeSpaceDidChangeNotification`，如果 500ms 之内 fire 了（说明是跨 Space 切换、动画刚结束），取消 pending 500ms 重新调 100ms（这时 window 已在当前 Space 可见）。500ms 内没有 Space change 就说明 app 真的没可见 window，原 500ms 触发 + HUD `SCROLL/WINDOW/MOVE: no frontmost window`。
+> **Extra delay when switching apps across Spaces (SCROLL/WINDOW/MOVE still use it, TAP no longer needs it)**: when the user Cmd+Tabs to an app on **another Space**, macOS runs a 250-400ms slide animation—under a fixed 100ms delay the scan lands right in the middle of the animation and captures a black transition frame (hit in practice). macOS has **no public API** to tell us "currently switching Space" or "about to switch Space"—there's only `activeSpaceDidChangeNotification`, which fires only **after** the animation completes ("Did" is past tense). So a heuristic is used: when `didActivateApplication` fires, `CGWindowListCopyWindowInfo(.optionOnScreenOnly, ...)` checks whether the activated app has a window visible on the current Space—if **not** (cross-Space switch / all minimized / all hidden all manifest as this), stretch the delay from 100ms to **500ms**; meanwhile subscribe to `activeSpaceDidChangeNotification`, and if it fires within 500ms (meaning it was a cross-Space switch and the animation just finished), cancel the pending 500ms and re-schedule 100ms (the window is now visible on the current Space). If no Space change within 500ms, the app genuinely has no visible window, the original 500ms fires + HUD `SCROLL/WINDOW/MOVE: no frontmost window`.
 >
-> **TAP 不再需要这套启发式**：settle watch 直接盯像素——滑动动画期间那块区域一路在变（实测切到另一 Space 的 Slack：`diff=89.8` → 动画/渲染结束后掉到 `0.0/0.4` → settle，hint 正确），所以**动画被天然等掉，不用猜 100/500、也不依赖 `activeSpaceDidChange` 的时序**。"没可见窗口"也折进同一循环：持续 `.noWindow`（`null==null` 本身是稳定态）→ `onNoWindow`，不需要单独的 `CGWindowListCopyWindowInfo` 预判。跨 Space 切换常常多个通知一起 fire（didActivate + spaceChange + poll），每个都 cancel+重启 watch——**最后一个 watch 落在动画之后、settle 干净**，实测无假性 settle。
+> **TAP no longer needs this heuristic**: the settle watch watches pixels directly—during the slide animation that region keeps changing (in practice switching to Slack on another Space: `diff=89.8` → drops to `0.0/0.4` after the animation/render finishes → settle, hint correct), so **the animation is naturally waited out, no need to guess 100/500, no reliance on the timing of `activeSpaceDidChange`**. "No visible window" also folds into the same loop: a persistent `.noWindow` (`null==null` is itself a stable state) → `onNoWindow`, with no separate `CGWindowListCopyWindowInfo` pre-check. A cross-Space switch often fires several notifications together (didActivate + spaceChange + poll), each cancel+restarts the watch—**the last watch lands after the animation and settles cleanly**, no false settle in practice.
 
-> **`activeSpaceDidChange` 也直接订阅了**，用作两类信号：(1) 上面说的 cross-Space 加速；(2) 用户主动切 Space（Ctrl+方向键 / 三指滑），没有 app activation 但焦点 app 切了，也要在新 Space 重 apply。两类都走 `handleSpaceChanged` → `reapplyOnCurrentFrontmost`，pending 取消+重新调度的机制天然 dedup。
+> **`activeSpaceDidChange` is also subscribed directly**, used as two kinds of signal: (1) the cross-Space acceleration described above; (2) the user actively switching Space (Ctrl+arrow / three-finger swipe), with no app activation but the focused app changed, also needs to re-apply on the new Space. Both go through `handleSpaceChanged` → `reapplyOnCurrentFrontmost`, and the pending cancel+re-schedule mechanism naturally dedups.
 
-> **`isolateApp` —— 截图时把 Dock 进程整个排除。** 普通截图是"整屏合成画面再 crop"，所以 **Cmd+Tab 切换器 HUD**（它是 **Dock** 的窗口）会被截进来，OP 把上面一排 app 图标全识别成 hint（用户实测：切过去画出来的是切换器图标，不是新 app 的 UI）。切换器要几百 ms 才淡出，而通知是切换**一发生**就来——靠"等延迟"既不精确又分不清 Cmd+Tab（有 HUD）和单击（无 HUD）。改成 `SCContentFilter(display:excludingApplications:[dockApp])` **排除 Dock 这个进程**：HUD 是 Dock 拥有的，被排除掉了；Dock 自己也一起排除（无所谓，OP 路径本来就不 hint Dock，那块靠 AX walk）。和它在不在、何时消失无关——时序问题直接消失。代价：要 fresh 查一次 `SCShareableContent`（apps 列表没缓存）+ 重新合成，约多几十 ms，只在切 app 这条不频繁的路上付。AX 白名单 app 不受影响——它走 AX walk 读目标 app 的 AX 树，HUD 是 Dock 窗口、不在树里。
+> **`isolateApp` —— exclude the entire Dock process when capturing the screenshot.** A normal screenshot is "composite the whole screen then crop", so the **Cmd+Tab switcher HUD** (which is a **Dock** window) gets captured in, and OP recognizes the whole row of app icons up there as hints (confirmed by users: after switching over, the drawn hints are the switcher icons, not the new app's UI). The switcher takes a few hundred ms to fade out, while the notification arrives **the moment** the switch happens—relying on "wait out a delay" is neither precise nor able to tell Cmd+Tab (HUD present) from a single click (no HUD) apart. Changed to `SCContentFilter(display:excludingApplications:[dockApp])` to **exclude the Dock process**: the HUD is owned by the Dock and gets excluded; the Dock itself is excluded too (doesn't matter, the OP path never hints the Dock anyway, that's handled by AX walk). Independent of whether it's present or when it disappears—the timing problem just vanishes. Cost: a fresh `SCShareableContent` query (the apps list isn't cached) + re-composition, roughly a few tens of ms extra, paid only on this infrequent app-switch path. AX-whitelist apps are unaffected—they go through AX walk to read the target app's AX tree, and the HUD is a Dock window, not in that tree.
 >
-> **为什么不用 `including:[focusedApp]`（更紧的隔离）？** 试过，但 `including:` 这条 filter 的 **canvas 锚定语义** Apple 没写清楚——它生成那张图的 (0,0) 锚在 display 全局坐标的哪个点不明确，实测 crop 出右半边一大片黑（说明锚定不是我假设的样子）。要把它做对得拿 log 实测多种模型反推真实语义。`excludingApplications:[dock]` 是 **display-based filter**（canvas 就是 display，原点等于 `display.frame.origin`，文档明确），crop 数学直接对。代价是不排除别的 app 浮窗 / 通知横幅——如果以后实测出问题再去摸 `including:` 的锚定行为不迟，当前 bug（Cmd+Tab HUD）只来自 Dock，exclude-Dock 是最小够用的精确解。
+> **Why not `including:[focusedApp]` (tighter isolation)?** Tried it, but Apple didn't clearly document the **canvas anchoring semantics** of the `including:` filter—where the (0,0) of the image it generates anchors in the display's global coordinates is unclear, and in practice the crop came out with a big black strip on the right half (meaning the anchoring isn't what I assumed). Getting it right would require logging across multiple models to reverse-engineer the real semantics. `excludingApplications:[dock]` is a **display-based filter** (the canvas is the display, the origin equals `display.frame.origin`, documented clearly), so the crop math is directly correct. The cost is that it doesn't exclude other apps' floating windows / notification banners—if that turns out to be a problem in practice, it's not too late to then poke at the `including:` anchoring behavior; the current bug (Cmd+Tab HUD) comes only from the Dock, and exclude-Dock is the minimal sufficient precise solution.
 
-**机制 2 — 同 app 内容变化（焦点窗口没变）：commit 后由"内容 settle watch"驱动单次重扫（非浏览器非 Dock）。** commit 时 `deactivate()` 已把 overlay 隐藏。**非浏览器非 Dock** 的 commit 不再用固定 100ms，改启动 `startContentSettleWatch()`：每 ~100ms 截一张 **64×36 灰度小图**（`WindowFingerprinter`——读已合成的帧缓冲、不跑 OP/YOLO），比相邻两帧的**每像素平均绝对差**；**连续 2 帧 < 阈值（settle）** 就扫一次、画 hint、停。
+**Mechanism 2 — in-app content change (focused window unchanged): a single rescan after commit driven by the "content settle watch" (non-browser, non-Dock).** On commit, `deactivate()` has already hidden the overlay. A **non-browser, non-Dock** commit no longer uses a fixed 100ms, and instead starts `startContentSettleWatch()`: every ~100ms it captures a **64×36 grayscale thumbnail** (`WindowFingerprinter`—reads the already-composited frame buffer, doesn't run OP/YOLO), comparing the **per-pixel mean absolute difference** between two adjacent frames; **2 consecutive frames < threshold (settle)** triggers one scan, draws the hints, and stops.
 
-为什么不再用固定延迟：固定延迟是**盲猜**内容何时刷新完。太早（老的 100ms）扫到 stale——Slack 切 channel，右侧面板几百 ms 后才重画，100ms 扫的是旧内容、新内容永远没 hint，得重按 Caps Lock；等太久又拖慢"内容没变"的常见点击。小图比固定延迟**精确**：静止点击第一帧起就稳 → ~2 帧（~200ms）恢复；会刷新内容的点击一直 > 阈值、不算稳 → 一直等到 settle 才扫**一次**（不再"先扫 stale 再补"的双扫，全程只一次 OP）。overlay 整段隐藏，小图里没有我们自己的 chip；64×36 把 caret 闪烁/亚像素抖动平均掉，内容大改才过阈值。
+Why no longer a fixed delay: a fixed delay is a **blind guess** of when the content finishes refreshing. Too early (the old 100ms) scans stale—Slack switching channels, the right panel repaints a few hundred ms later, the 100ms scan gets the old content, the new content never gets a hint, and you have to press Caps Lock again; waiting too long slows down the common "content didn't change" click. The thumbnail is **more precise** than a fixed delay: a static click is stable from the first frame → ~2 frames (~200ms) to recover; a click that refreshes content stays > threshold and doesn't count as stable → it waits until settle and scans **once** (no more "scan stale first then patch up" double-scan, only one OP the whole way). The overlay is hidden the entire time, so the thumbnail has none of our own chips; 64×36 averages out caret blink / sub-pixel jitter, and only a big content change crosses the threshold.
 
-- **上限 ~1.2s**：永不稳（spinner / video）到点强制扫一次，保证 hint 总能恢复。
-- **兜底回退**：拿不到指纹（无屏幕录制权限——AX 白名单 app 可能从没授权过；或 AX/display 查询失败）→ 回退固定 100ms（`scheduleStickyRehint`）。
-- **仍用固定 100ms 的**：浏览器内非导航 commit（晚到内容由扩展 `page_changed` 兜）、Dock commit（由 app-switch follow 兜）、以及上面的 watch 兜底。
-- **代价（刻意取舍）**：点击后**头 2 帧仍没变、之后才"延迟启动"渲染**的内容，会在 stale 帧上 settle、被漏掉，需重新触发——选了"单次扫描"这一侧，换取不双扫、不闪 stale。要同时做到"快速恢复"和"逮住延迟内容"必须容忍一次浪费扫描，没走那条。
-- 切 app / 退出 / 进 drag/search 都 `cancelContentSettleWatch()`；更具体的信号（app-switch、focused-window-change）优先级高于 watch，会取消它。
+- **Cap ~1.2s**: a never-settling case (spinner / video) force-scans once at the cap, guaranteeing the hints always recover.
+- **Fallback**: can't get a fingerprint (no screen recording permission—an AX-whitelist app may never have been granted it; or AX/display query failure) → fall back to a fixed 100ms (`scheduleStickyRehint`).
+- **Still using a fixed 100ms**: a non-navigation commit inside a browser (late-arriving content is covered by the extension's `page_changed`), a Dock commit (covered by the app-switch follow), and the watch fallback above.
+- **Cost (a deliberate tradeoff)**: content that **still hasn't changed in the first 2 frames after the click and then "lazily starts" rendering** will settle on stale frames and be missed, requiring a re-trigger—we chose the "single scan" side, in exchange for no double-scan and no stale flicker. To achieve both "fast recovery" and "catch lazily-loaded content" you must tolerate one wasted scan, which we didn't take.
+- App switch / exit / entering drag/search all `cancelContentSettleWatch()`; more specific signals (app-switch, focused-window-change) have higher priority than the watch and will cancel it.
 
-> **app-switch 那条路（机制 1 / `reapplyOnCurrentFrontmost`）的 TAP 分支已搬到这套 watch 上**（`runSettleLoop` 是从这里抽出的通用原语）——每帧重解析新 app 焦点窗口、settle 才扫，取代了 100/500ms 盲延迟。实测跨 Space 切 Slack：`diff=89.8`（动画/换屏）→ `0.0/0.4` → settle，hint 正确，无假性 settle。SCROLL / WINDOW / MOVE 仍用固定延迟（对时机不敏感，暂未迁）。详见机制 1。
+> **The TAP branch of the app-switch path (Mechanism 1 / `reapplyOnCurrentFrontmost`) has been moved onto this watch** (`runSettleLoop` is the generic primitive extracted from here)—each frame re-parses the new app's focused window, scanning only after settle, replacing the 100/500ms blind delay. In practice, cross-Space switching to Slack: `diff=89.8` (animation/screen change) → `0.0/0.4` → settle, hint correct, no false settle. SCROLL / WINDOW / MOVE still use the fixed delay (not timing-sensitive, not yet migrated). See Mechanism 1.
 
-> **历史踩坑。** 早期想用 AX notification watcher 兜同 app 异步变化，撞两个问题：① 即使 AX app，立即重扫也会和 click 抢跑；② "走 OP 路由" ≠ "不发 AX 通知"——WeChat 原生 AppKit 会发 `kAXValueChanged`，只是聊天内容自绘、AX walk 不到才走 OP。给它挂 watcher → 通知重扫 + 延后重扫**双重 re-hint**（WeChat 实测）。当初也否过"截图轮询"，理由是"一次截图 ~50ms ≈ 一次 OP 推理，轮询比多重扫 2~3 次还贵"——**这个判断对"重扫"成立、对"小图"不成立**：现在的 watch 轮询的是**低分辨率帧缓冲读 + 缩到 64×36 灰度**（远小于 OP 那张全分辨率截图，更不跑 YOLO），而贵的 OP 全程只在 settle 那一刻跑**一次**。所以"廉价小图探 settle、OP 只扫一次"绕开了当年那个成本结论。
+> **Historical gotcha.** Early on we wanted an AX notification watcher to cover same-app async changes, and hit two problems: ① even for an AX app, an immediate rescan races with the click; ② "goes through OP routing" ≠ "doesn't emit AX notifications"—WeChat's native AppKit does emit `kAXValueChanged`, it's just that the chat content is self-drawn and AX walk can't reach it so it goes through OP. Hooking a watcher to it → notification rescan + delayed rescan = **double re-hint** (confirmed with WeChat). We also rejected "screenshot polling" back then, on the grounds that "one screenshot ~50ms ≈ one OP inference, polling is more expensive than 2~3 extra rescans"—**that judgment holds for "rescan" but not for "thumbnail"**: today's watch polls a **low-resolution frame buffer read + downscale to 64×36 grayscale** (far smaller than OP's full-resolution screenshot, and doesn't run YOLO), while the expensive OP runs **once** only at the moment of settle. So "cheap thumbnail to probe settle, OP scans only once" sidesteps that old cost conclusion.
 
-### 4.3 光标自动跳转规则（cursor auto-park）
+### 4.3 Cursor auto-jump rules (cursor auto-park)
 
-**触发**：进 TAP / sticky 跟随触发的 reapply / app-switch follow / focused-window-change 都会进 `parkCursorOnFrontmostWindowIfOutside`。
+**Trigger**: entering TAP / the reapply triggered by sticky follow / app-switch follow / focused-window-change all enter `parkCursorOnFrontmostWindowIfOutside`.
 
-**三段决策**：
+**Three-step decision**:
 
 ```
-Step 1: 读 frontmost app 的 focused window rect
-        - 没 frontmost app / 没可见窗口 → 整个 park 跳过, HUD "no frontmost window"
+Step 1: read the frontmost app's focused window rect
+        - no frontmost app / no visible window → skip the whole park, HUD "no frontmost window"
 
-Step 2: cursor 已经在那个 window 内部?
-        - 在: 啥都不动（尊重用户主动放过的位置）
-        - 不在: 进 Step 3 决定落点
+Step 2: is the cursor already inside that window?
+        - yes: do nothing (respect the position the user deliberately let it stay at)
+        - no: proceed to Step 3 to decide the landing point
 
-Step 3: 选 input rect, 失败回 title bar
-        ┌─ frontmost 是浏览器 (Chrome/Safari/Brave/Arc/Edge)?
-        │   是 → BrowserProvider.findFirstInputRect (DOM)
-        │        - 扩展 detector.js 查:
-        │          1. document.activeElement (用户上次点过的)
-        │          2. 第一个可见 input/textarea/contenteditable
-        │        - 浏览器没装扩展 / 没连 / chrome:// 类页 → null
-        │   否 → AXFocusedUIElement (native AX)
-        │        - role 白名单: AXTextField/AXTextArea/AXSearchField/AXComboBox
-        │        - 或 AXValue 可写（兜 Electron 类返回非标 role 但确实可编辑的元素）
-        │        - 还要 rect 跟 window 相交 + 至少 4×4
+Step 3: pick an input rect, fall back to the title bar on failure
+        ┌─ is frontmost a browser (Chrome/Safari/Brave/Arc/Edge)?
+        │   yes → BrowserProvider.findFirstInputRect (DOM)
+        │        - the extension detector.js looks for:
+        │          1. document.activeElement (the one the user last clicked)
+        │          2. the first visible input/textarea/contenteditable
+        │        - browser has no extension / not connected / chrome:// pages → null
+        │   no → AXFocusedUIElement (native AX)
+        │        - role whitelist: AXTextField/AXTextArea/AXSearchField/AXComboBox
+        │        - or AXValue is writable (covers Electron-style elements that return a non-standard role but are genuinely editable)
+        │        - also requires the rect to intersect the window + be at least 4×4
         │
-        └─ 拿到 rect → warp 到 rect 中心 (MouseSynth.warp, .mouseMoved 合成事件)
-           拿到 null → 兜底:
-             - 浏览器 → 窗口**内容中心** (rect.midX, rect.midY)
-             - 其它 app → title bar 中点 (rect.midX, rect.minY + 6pt)
+        └─ got a rect → warp to the rect center (MouseSynth.warp, .mouseMoved synthesized event)
+           got null → fallback:
+             - browser → window **content center** (rect.midX, rect.midY)
+             - other apps → title bar midpoint (rect.midX, rect.minY + 6pt)
 ```
 
-> **浏览器兜底为什么落内容中心而非 title bar**:浏览器页面的 d/u/gg/G 免模式滚动是**在光标处发真滚轮**(见 §5.1),落标题栏会把光标停在不可滚的条上、切过去没法马上滚;落内容中心正好压在页面上,随手就能滚(也是个不错的 hint 起手位)。其它 app 仍落标题栏(就近双击最大化 / 拖动 / 窗口按钮)。
+> **Why the browser fallback lands at the content center rather than the title bar**: the browser page's d/u/gg/G mode-less scrolling **sends a real scroll wheel at the cursor** (see §5.1), so landing on the title bar parks the cursor on a non-scrollable bar and you can't scroll right after switching over; landing at the content center sits right on the page so you can scroll immediately (it's also a decent starting position for a hint). Other apps still land on the title bar (handy for double-click maximize / drag / window buttons nearby).
 
-**各 app 类型实际表现**：
+**Actual behavior per app type**:
 
-| App 类型 | 上次焦点 | 落点 |
+| App type | Last focus | Landing point |
 |---|---|---|
-| 浏览器（装扩展） | 焦点在某 input | `document.activeElement` 中心 |
-| 浏览器 | 没点过任何 input | 页面第一个可见 input 中心 |
-| 浏览器 | 页面无 input / chrome:// | 窗口**内容中心**（便于切过去直接 d/u 滚） |
-| AX 友好 native（Mail / Notes / WeChat / TextEdit）| 焦点在 text input | 那个 input 中心 |
-| AX 友好 native | 焦点在 button / link / list item | title bar（role 不在白名单，安全） |
-| Electron / AX 弱（Slack / Discord / VS Code）| — | title bar 中点（`AXFocusedUIElement` 返回 `kAXErrorNoValue`） |
-| Finder Desktop（无窗口）| — | park 整个跳过 |
+| Browser (extension installed) | focus on some input | `document.activeElement` center |
+| Browser | never clicked any input | first visible input center on the page |
+| Browser | page has no input / chrome:// | window **content center** (so you can d/u scroll right after switching over) |
+| AX-friendly native (Mail / Notes / WeChat / TextEdit) | focus on a text input | that input's center |
+| AX-friendly native | focus on a button / link / list item | title bar (role not in whitelist, safe) |
+| Electron / weak AX (Slack / Discord / VS Code) | — | title bar midpoint (`AXFocusedUIElement` returns `kAXErrorNoValue`) |
+| Finder Desktop (no window) | — | skip the whole park |
 
-**设计原则**：
+**Design principles**:
 
-1. **不动 cursor 已经在的 window** —— Step 2 短路保留用户主动位置（如鼠标已经在 sticky TAP 期间用 hjkl 移到了某处）
-2. **只跳 text 类输入** —— 不跳 button / link / menu item，避免 Cmd+Tab 后误触意外动作
-3. **AX 不暴露的不强求** —— Electron 类直接接受 title bar fallback，不做 AX 子树深度 walk（之前尝试过 walker fallback + role 普查诊断，复杂度收益不成正比，回退）。将来 per-app patch 路线启动后可单独给 Slack 写"compose 在窗口底部 80pt"硬编码规则
-4. **可观察** —— 每条分支都打 `[mouseless] focusedInput: ...` 日志（match via role / via editable-value / read failed / rect too small / rect outside window / skipped role=...），定位某 app 没生效时一行就能看到哪一道闸拦的
-5. **`.mouseMoved` 而非 `CGWarp`** —— 跟 §6.5 search commit 同理，让目标 view 收到事件、更新 cursor shape (I-beam) + hover state
+1. **Don't move the cursor if it's already in the window** —— the Step 2 short-circuit preserves the position the user deliberately chose (e.g. the mouse was already moved somewhere with hjkl during sticky TAP)
+2. **Only jump to text-type inputs** —— don't jump to button / link / menu item, to avoid accidentally triggering an unexpected action after Cmd+Tab
+3. **Don't force what AX doesn't expose** —— Electron-style apps simply accept the title bar fallback, no deep AX subtree walk (we tried a walker fallback + role-survey diagnostics before, the complexity wasn't worth the payoff, reverted). Once the per-app patch route is started, we could write a hardcoded rule for Slack like "compose is 80pt from the window bottom"
+4. **Observable** —— each branch logs `[mouseless] focusedInput: ...` (match via role / via editable-value / read failed / rect too small / rect outside window / skipped role=...), so when some app doesn't take effect, one line shows which gate stopped it
+5. **`.mouseMoved` rather than `CGWarp`** —— same as the §6.5 search commit reasoning, so the target view receives the event and updates the cursor shape (I-beam) + hover state
 
-**Dock hint 提交后的光标**:点 Dock 图标的 hint 是合成真鼠标点击,光标会**留在 Dock 图标上**——对接下来的操作(尤其想滚刚打开的 app)很别扭。处理分两种:
+**The cursor after committing a Dock hint**: clicking a Dock icon's hint synthesizes a real mouse click, and the cursor **stays on the Dock icon**—awkward for what follows (especially if you want to scroll the just-opened app). Handled in two ways:
 
-- **sticky TAP**:点完应用切换,sticky 的"跟随前台"(`reapplyOnCurrentFrontmost`)会自动重新 park 到新应用窗口(浏览器→内容中心),不用额外做。
-- **非 sticky**(普通,点完就 `exit()` 回 OFF):专门挂一个**一次性 `didActivateApplication` 观察者**(`scheduleDockActivationPark`)。新应用激活后,**照搬 sticky 的 settle 模型**——`frontmostAppHasOnScreenWindow()` 在屏 0.1s / 不在(冷启动)0.5s,然后 `parkCursorOnFrontmostWindowIfOutside` **park 一次**(浏览器→内容中心)。
+- **sticky TAP**: after the click switches apps, sticky's "follow frontmost" (`reapplyOnCurrentFrontmost`) automatically re-parks to the new app's window (browser→content center), nothing extra to do.
+- **non-sticky** (normal, after the click `exit()` back to OFF): a dedicated **one-shot `didActivateApplication` observer** (`scheduleDockActivationPark`). After the new app activates, **it copies sticky's settle model**—`frontmostAppHasOnScreenWindow()` on screen 0.1s / not on screen (cold start) 0.5s, then `parkCursorOnFrontmostWindowIfOutside` **parks once** (browser→content center).
 
-  门控:park 绑定"激活的那个 app 的 pid",park 那一刻前台已不是它(点完立刻切走)→ **不动光标**(留 Dock);2s 无任何激活(点的是已在前台的图标 / 启动失败)→ 丢弃观察者;进任何模式(`teardownCurrentMode`)→ 取消待处理 park。只对 **Dock 来源**(`lastCommittedTarget.role == "AXDockItem"`)生效,普通 app 内按钮点击不动光标。
+  Gating: the park is bound to "the pid of the app that activated", and if at the moment of park the foreground is no longer it (switched away right after the click) → **don't move the cursor** (leave it on the Dock); 2s with no activation at all (clicked an icon already in the foreground / launch failed) → discard the observer; entering any mode (`teardownCurrentMode`) → cancel the pending park. Only effective for **Dock sources** (`lastCommittedTarget.role == "AXDockItem"`), a normal in-app button click does not move the cursor.
 
-### 4.3.5 `'` 前缀 —— hint 当光标传送锚点（move-only pick）
+### 4.3.5 `'` prefix —— hint as a cursor teleport anchor (move-only pick)
 
-把 hint 从"点击目标"升维成"光标快速跳转点"。流程:
+Upgrades a hint from a "click target" to a "fast cursor jump point". Flow:
 
 ```
-TAP 里按 '       → 武装 move-only（label 变浅黄、HUD 显 "TAP · move"）
-  再敲 label      → 光标 warp 到目标中心，**不点击**
-  pick 完          → 自动复位（disarm），hints 留在屏幕上、留在 TAP/sticky
-再按 '（pick 前）→ 取消武装
+press ' in TAP    → arm move-only (labels turn light yellow, HUD shows "TAP · move")
+  then type a label → cursor warps to target center, **no click**
+  after pick        → auto-reset (disarm), hints stay on screen, stay in TAP/sticky
+press ' again (before pick) → cancel the arm
 ```
 
-**为什么这个触发器**（设计取舍）:
+**Why this trigger** (design tradeoff):
 
-- **不用修饰键**:Cmd/Ctrl 会跟系统快捷键冲突;Shift/Option 已被双击/右键占用
-- **不开新 mode**:对"这一下只移动"这种即时意图太重
-- **一次性前缀 `'`** 两者都不是 —— 只是个 bool flag,pick 完或退出自动清。vim mark 的"跳到"语义;`'` 不在 hint 池,不会跟 label 冲突
+- **No modifier key**: Cmd/Ctrl conflict with system shortcuts; Shift/Option are already taken by double-click/right-click
+- **No new mode**: too heavy for the immediate intent of "this one is just a move"
+- **The one-shot prefix `'`** is neither —— it's just a bool flag, auto-cleared after the pick or on exit. It's vim's mark "jump to" semantics; `'` isn't in the hint pool, so it won't conflict with a label
 
-**关键行为:move pick 不终结会话**。click pick 是终结动作(non-sticky commit 后 exit);move pick 是**导航**动作,移完应该接着干活。所以:
+**Key behavior: a move pick does not terminate the session**. A click pick is a terminating action (non-sticky exits after commit); a move pick is a **navigation** action, and after moving you should keep working. So:
 
-- 光标 warp 后,**留在 TAP**(不管 sticky 不 sticky) —— `HintResult.moved` 而非 `.committed`
-- 移完内容没变,hints 位置不变 → **不重扫**,同一批 targets 瞬间重显示(零延迟、无闪烁)
-- 复位回正常黄,用户可以接着:再 `'`+label 移到别处 / 直接敲 label 点击 / hjkl 微调 / `c` 点击 / `v` 拖拽
+- After the cursor warps, **stay in TAP** (regardless of sticky) —— `HintResult.moved` rather than `.committed`
+- After the move, the content is unchanged and the hint positions are unchanged → **no rescan**, the same batch of targets instantly re-displays (zero latency, no flicker)
+- Reset back to normal yellow, and the user can continue: another `'`+label to move elsewhere / type a label to click directly / hjkl to fine-tune / `c` to click / `v` to drag
 
-**实现**:`HintMode.moveArmed` 一次性 flag,`toggleMoveArmed()` 由 `'` 触发;`handle()` 命中唯一 label 时 armed 则走 `commit(action: .move)` → `MouseSynth.warp`(`.mouseMoved` 合成,更新 cursor shape/hover) 而非 click,然后保留 targets + 清 typed + disarm + 重渲染,返回 `.moved`。overlay 的 `moveArmed` 参数决定浅黄(`1.0, 0.95, 0.70`) vs 正常黄(`1.0, 0.84, 0.0`)。
+**Implementation**: `HintMode.moveArmed` is a one-shot flag, `toggleMoveArmed()` is triggered by `'`; when `handle()` hits a unique label and armed, it goes through `commit(action: .move)` → `MouseSynth.warp` (`.mouseMoved` synthesized, updates cursor shape/hover) rather than a click, then keeps the targets + clears typed + disarms + re-renders, returning `.moved`. The overlay's `moveArmed` parameter decides light yellow (`1.0, 0.95, 0.70`) vs normal yellow (`1.0, 0.84, 0.0`).
 
-配合 §4.3 的 hjkl 微调 + 双击跳屏,导航闭环:`'`+label 粗定位 → hjkl/双击精调 → `c`/`v` 操作。
+Combined with the §4.3 hjkl fine-tuning + double-click cross-screen jump, the navigation loop: `'`+label for coarse positioning → hjkl/double-click for fine adjustment → `c`/`v` to operate.
 
-### 4.3.6 点击修饰键:Shift=右键（双击统一走 `cc`）
+### 4.3.6 Click modifiers: Shift=right-click (double-click is uniformly `cc`)
 
-**hint label commit** 的点击类型由修饰键决定:
+The click type of a **hint label commit** is decided by the modifier:
 
-| 输入 | 动作 |
+| Input | Action |
 |---|---|
-| 裸 | 左键 |
-| Shift 按住 + label | 右键 |
-| Option | **不映射任何点击** |
+| bare | left-click |
+| Shift held + label | right-click |
+| Option | **maps to no click** |
 
-`clickAction(for:)`:`Shift ? .right : .left`，**仅 hint label commit 用**。
+`clickAction(for:)`: `Shift ? .right : .left`, **used only for hint label commit**.
 
-**双击没有 label 手势**——双击是**全局统一的 `cc`-at-cursor**(见 §4.4):要双击一个 hinted 元素,`'`+label 把光标传送到它(不点击,§4.3.5)→ `cc` 双击。
+**Double-click has no label gesture**—double-click is **the globally unified `cc`-at-cursor** (see §4.4): to double-click a hinted element, `'`+label teleports the cursor to it (no click, §4.3.5) → `cc` to double-click.
 
-> **演进**:`c`/label 的双击早先用一套"Shift 按-松-按住"状态机(`shiftDoubleArmed` / `handleShiftFlagsChanged` / `noteKeyWhileShiftHeld`,跟 WINDOW resize 双击共用 `windowReverseTapWindow`)。后来 `c` 改成更直觉的 `cc` 双击;label 的双击罕见,索性也去掉,让"双击 = `cc`"成为唯一规则。那套 Shift 状态机已**整体从代码移除**(`clickAction` 只剩 Shift→右键)。Shift 在全项目语义统一为"加速"(移光标/滚动)+ "右键"(点击);Option 空出来留作他用。
+> **Evolution**: the double-click for `c`/label originally used a "Shift press-release-hold" state machine (`shiftDoubleArmed` / `handleShiftFlagsChanged` / `noteKeyWhileShiftHeld`, sharing `windowReverseTapWindow` with the WINDOW resize double-click). Later `c` was changed to the more intuitive `cc` double-click; label double-click is rare, so it was dropped too, making "double-click = `cc`" the only rule. That Shift state machine has been **removed from the code entirely** (`clickAction` only keeps Shift→right-click). Shift's semantics across the project are unified to "accelerate" (cursor move/scroll) + "right-click" (click); Option is freed up for other uses.
 
-### 4.4 bare `c` —— 光标位置点击 + hjkl 移光标
+### 4.4 bare `c` —— click at cursor position + hjkl cursor move
 
-bare `c` 与 hjkl 配套，构成 TAP 内的"键盘鼠标"：**hjkl 移光标对准，`c` 点击**。
+bare `c` pairs with hjkl to form the "keyboard mouse" inside TAP: **hjkl moves the cursor into alignment, `c` clicks**.
 
-- **`c`(单击)** = 在**当前鼠标光标位置**合成左键单击。落点 = 光标现在在哪。`c` 已从 hint 池移除（同 `v`），不会和 hint label 冲突。点完按 sticky 分派：sticky → 重扫留 TAP；否则 → exit。
-- **`cc`(快速双击 `c`，150ms 内)= 双击**。实现见 `handleBareCClick`:裸 `c` 的单击**延后 ~150ms**(`cDoubleTapWindow`,对齐 `windowReverseTapWindow`)——窗口内来第二下 `c` → 取消单击、发**双击**(`MouseSynth.click(count:2)`,完整 down/up×2 序列);窗口到期没第二下 → 单击。**间隔 >150ms 的两次 `c` 是两个独立单击,不是双击**。代价:单击 `c` 多 ~150ms 延迟(消歧成本)。切模式 / 切 app 会取消待发的单击。
-- **`Shift+c` = 右键**(立即,不参与单/双判定)。
-  - （旧方案 `c` 和 label 的双击都走"Shift 按-松-按住"状态机,已**整体移除**;双击现在统一是 `cc`,label 不再有专门双击手势,见 §4.3.6。）
-- **`h/j/k/l`** = 移光标（vim hjkl：h 左、j 下、k 上、l 右），按住连续（60fps timer 合成 `.mouseMoved`，hover 状态会更新），Shift 加速 / Option 精细。实现见 `MouseMover.swift`。**TAP 与 SCROLL 共用同一套 hjkl**（`VimSession.moveDirection(for:)` 单一映射）。
-- **双击 `hh` / `jj` / `kk` / `ll`**（100ms 内释放后再按，用 `hjklJumpTapWindow`，比 WINDOW reverse 的 150ms 更紧）= **光标一口气跳 1/2 当前屏幕**该方向距离。**Shift+双击 = 跳整屏**（远距离一发到位）。（原为 1/4 + 1/2，实测 1/4 太鸡肋,调大一档。）第二下按住不放 → OS key-repeat 让每次 repeat 都过双击窗口（每跳一次刷新 `lastTapHjklKeyUp` 时间戳），**连续跳**直到松手。多屏环境下取**光标当前所在那块屏**的尺寸作为基准，clamp 到那块屏边界（3pt 内缩）。
-  - 用 `MouseSynth.warp`（synthesize `.mouseMoved`）而不是 raw `CGWarpMouseCursorPosition`——同 `/`-search commit 的理由，让目标 view 收到事件、更新 cursor shape / hover state
-  - drag 子状态下**禁用**（每按一下都要延续 held drag，跳跃会让 drop target 不可预测）；search 子状态本来就吃掉 hjkl，自然不影响
-  - Shift 决定 1/2 vs 整屏；Option / Cmd / Ctrl 不影响跳距（它们在别处有语义，叠加在 jump 上语义不清）
-- 合成点击/移动统一走 `MouseSynth`（HintMode 的 hint-commit 点击也用它）。
+- **`c` (single click)** = synthesize a left single-click at the **current mouse cursor position**. The landing point = wherever the cursor is now. `c` has been removed from the hint pool (same as `v`), so it won't conflict with a hint label. After the click, dispatch by sticky: sticky → rescan and stay in TAP; otherwise → exit.
+- **`cc` (quick double-tap of `c`, within 150ms) = double-click**. See `handleBareCClick`: a bare `c` single-click is **delayed ~150ms** (`cDoubleTapWindow`, aligned with `windowReverseTapWindow`)—a second `c` within the window → cancel the single-click, send a **double-click** (`MouseSynth.click(count:2)`, the full down/up×2 sequence); window expires with no second `c` → single-click. **Two `c`s more than 150ms apart are two independent single-clicks, not a double-click.** Cost: a single-click `c` has ~150ms extra latency (the disambiguation cost). Switching modes / switching apps cancels the pending single-click.
+- **`Shift+c` = right-click** (immediate, not part of single/double judgment).
+  - (The old scheme where the double-click for `c` and label both went through the "Shift press-release-hold" state machine has been **removed entirely**; double-click is now uniformly `cc`, and labels no longer have a dedicated double-click gesture, see §4.3.6.)
+- **`h/j/k/l`** = move cursor (vim hjkl: h left, j down, k up, l right), hold for continuous (60fps timer synthesizing `.mouseMoved`, hover state updates), Shift to accelerate / Option to fine. See `MouseMover.swift` for the implementation. **TAP and SCROLL share the same hjkl** (`VimSession.moveDirection(for:)` single mapping).
+- **Double-tap `hh` / `jj` / `kk` / `ll`** (release then press again within 100ms, using `hjklJumpTapWindow`, tighter than WINDOW reverse's 150ms) = **the cursor jumps 1/2 the current screen** in that direction in one shot. **Shift+double-tap = jump a whole screen** (long distance in one go). (Originally 1/4 + 1/2; in practice 1/4 was too useless, bumped up a notch.) Holding the second press down → OS key-repeat makes each repeat pass the double-tap window (each jump refreshes the `lastTapHjklKeyUp` timestamp), **jumping continuously** until release. In a multi-screen setup it takes the size of **the screen the cursor is currently on** as the baseline, clamped to that screen's bounds (3pt inset).
+  - Uses `MouseSynth.warp` (synthesize `.mouseMoved`) rather than raw `CGWarpMouseCursorPosition`—same reasoning as the `/`-search commit, so the target view receives the event and updates cursor shape / hover state
+  - **Disabled** in the drag sub-state (each press must continue the held drag, and a jump would make the drop target unpredictable); the search sub-state already swallows hjkl, so it's naturally unaffected
+  - Shift decides 1/2 vs whole screen; Option / Cmd / Ctrl don't affect the jump distance (they have semantics elsewhere, and stacking on a jump is semantically unclear)
+- Synthesized clicks/moves all go through `MouseSynth` (HintMode's hint-commit click uses it too).
 
-**为什么不是 Enter**：早期版本用 `Enter` 当点击键，但 Enter 在 app 里**经常有自己的语义**——典型场景是按 ↑↓ 在菜单里 nav、然后 Enter 确认选中那一项。配上 §11 的箭头键放行后，用户预期 Enter 也能透传给 app。把"点击"挪到 `c` 上让两边都成立：Enter 永远放行、`c` 永远 click。
+**Why not Enter**: early versions used `Enter` as the click key, but Enter **often has its own semantics** inside an app—the typical scenario is pressing ↑↓ to nav a menu and then Enter to confirm the selected item. Combined with the arrow-key pass-through of §11, users expect Enter to also pass through to the app. Moving "click" onto `c` makes both work: Enter always passes through, `c` always clicks.
 
-**历史**：`x` → `Enter` → `c`。`x` 最早是"dismiss 所有打开的菜单 + 重扫"手势（Dock 菜单 AXCancel + 焦点切换关浮层），改 `Enter` 是为了直觉（确认/点击）+ 跟 hjkl 配套形成"键盘鼠标"闭环；改 `c` 是为了把 Enter 放行给 app。`v` 也是同一节奏的产物：bare → chord → bare 子状态触发键。旧 `findOpenDockMenu` / `AXCancel` / `AXWait.appActivated` 那套已从代码移除，**关菜单能力丢失**（光标在控件上点会误触发），可接受。
+**History**: `x` → `Enter` → `c`. `x` was originally the "dismiss all open menus + rescan" gesture (Dock menu AXCancel + close overlays on focus switch); changing to `Enter` was for intuitiveness (confirm/click) + pairing with hjkl to form the "keyboard mouse" loop; changing to `c` was to pass Enter through to the app. `v` is a product of the same cadence: bare → chord → bare sub-state trigger key. The old `findOpenDockMenu` / `AXCancel` / `AXWait.appActivated` machinery has been removed from the code, and the **menu-closing capability is lost** (clicking on a control with the cursor would mis-trigger it), acceptable.
 
 ---
 
-## 5. SCROLL mode 键位
+## 5. SCROLL mode key bindings
 
-键盘滚动。完整设计见 [`scroll-mode-design.md`](scroll-mode-design.md)，这里是键位摘要。
+Keyboard scroll. See [`scroll-mode-design.md`](scroll-mode-design.md) for the full design; this is a key-binding summary.
 
-| 键 | 行为 |
+| Key | Behavior |
 | --- | --- |
-| `d` / `u` (bare) | 下/上滚 **垂直**（按住连续，60fps timer 合成 scroll wheel 事件 wheel1） |
-| `b` / `f` (bare) | 左/右滚 **水平**（按住连续，合成 wheel2）。使用场景：Finder 列视图 / 宽表格 / Notion DB 表 / Figma 无限画布 / 日历周视图等 |
-| `Shift + d/u/b/f` | 加速滚动（垂直或水平） |
-| `gg` (连按两次 g) | 跳到选中区域**顶部**（vim 风格，仅垂直） |
-| `G` (Shift+g) | 跳到选中区域**底部**（仅垂直） |
-| `h/j/k/l` (bare) | 移光标 左/下/上/右（vim hjkl，**与 TAP 统一**，按住连续） |
-| `Shift + hjkl` / `Option + hjkl` | 加速 / 精细移光标 |
-| **双击** `hh` / `jj` / `kk` / `ll` | 跳跃 **1/2** 当前屏方向距离；**Shift+双击 = 整屏**（跟 TAP §4.3 一样的双击-跳跃机制，共用 `maybeJumpOnDoubleTap` helper + `lastTapHjklKeyUp` 字典；100ms 内连按） |
-| `c` (bare) | 当前光标位置左键单击（延后 ~150ms 消歧，留在 SCROLL）；`cc` 快速双击 = 双击 |
-| `Shift + c` | 当前光标位置 **右键**（立即） |
-| `Enter` | **放行**给焦点 app（与 TAP normal §4 统一） |
-| `/` (bare) | **进入 `/`-搜索子状态**——OCR 焦点窗口、字符级匹配、复用 hint label 池标记结果；commit 后光标 warp 到匹配文本左边、回 SCROLL normal（scroll-area picker overlay 自动恢复）。跟 TAP 的 §6.5 search 共用一套机制 |
-| `数字键 1-9` | 切换选中的滚动区域 |
-| Caps Lock 单击 | 切回 TAP（见 §2.1） |
-| `Esc` | search 子状态：取消回 SCROLL normal；normal：deactivate 回 OFF |
+| `d` / `u` (bare) | scroll down/up **vertically** (hold for continuous, 60fps timer synthesizing scroll wheel event wheel1) |
+| `b` / `f` (bare) | scroll left/right **horizontally** (hold for continuous, synthesizing wheel2). Use cases: Finder column view / wide tables / Notion DB tables / Figma infinite canvas / calendar week view, etc. |
+| `Shift + d/u/b/f` | accelerated scroll (vertical or horizontal) |
+| `gg` (press g twice) | jump to the **top** of the selected area (vim-style, vertical only) |
+| `G` (Shift+g) | jump to the **bottom** of the selected area (vertical only) |
+| `h/j/k/l` (bare) | move cursor left/down/up/right (vim hjkl, **unified with TAP**, hold for continuous) |
+| `Shift + hjkl` / `Option + hjkl` | accelerate / fine cursor move |
+| **double-tap** `hh` / `jj` / `kk` / `ll` | jump **1/2** the current screen distance in that direction; **Shift+double-tap = whole screen** (the same double-tap-jump mechanism as TAP §4.3, sharing the `maybeJumpOnDoubleTap` helper + `lastTapHjklKeyUp` dictionary; press twice within 100ms) |
+| `c` (bare) | left single-click at the current cursor position (delayed ~150ms for disambiguation, stays in SCROLL); `cc` quick double-tap = double-click |
+| `Shift + c` | **right-click** at the current cursor position (immediate) |
+| `Enter` | **passed through** to the focused app (unified with TAP normal §4) |
+| `/` (bare) | **enter the `/`-search sub-state**—OCR the focused window, character-level match, reuse the hint label pool to mark results; after commit the cursor warps to the left of the matched text and returns to SCROLL normal (the scroll-area picker overlay restores automatically). Shares one mechanism with TAP's §6.5 search |
+| `number keys 1-9` | switch the selected scroll area |
+| Caps Lock single click | switch back to TAP (see §2.1) |
+| `Esc` | search sub-state: cancel back to SCROLL normal; normal: deactivate back to OFF |
 
-**移光标用 hjkl，与 TAP 完全统一**：早期 SCROLL 用 SDFE、TAP 用 IJKL，两套移动键逼用户在模式间切换肌肉记忆——是真实的认知负担。现统一成 vim hjkl（`VimSession.moveDirection(for:)` 单一映射，两模式共用），"移光标"在哪都一样，只有滚动/点击因模式而异。滚动因此从 `j/k` 改到 **`d`(下)/`u`(上)**——`j/k` 让给移光标，`d` 也正好对上进入 SCROLL 的 chord 键。`c` 与 hjkl 配套（移→点闭环），复用 `MouseMover` / `MouseSynth`（与 TAP 同一套）。
+**Cursor moves with hjkl, fully unified with TAP**: early SCROLL used SDFE and TAP used IJKL, two sets of movement keys forcing the user to switch muscle memory between modes—a real cognitive burden. Now unified to vim hjkl (`VimSession.moveDirection(for:)` single mapping, shared by both modes), so "move cursor" is the same everywhere, and only scroll/click differ by mode. Scroll therefore moved from `j/k` to **`d`(down)/`u`(up)**—`j/k` are given to cursor move, and `d` also conveniently matches the chord key that enters SCROLL. `c` pairs with hjkl (move→click loop), reusing `MouseMover` / `MouseSynth` (the same set as TAP).
 
-**水平滚动 `b`/`f`**：跟 `d`/`u` 左手 home row 同节奏（`b`=back/left、`f`=forward/right）。`ScrollController` 用一个 `Axis` enum 统一驱动 wheel1（垂直）或 wheel2（水平），单 timer 复用、切轴瞬时无停顿。约定 wheel1 / wheel2 都是"负值 = 向 forward 方向滚"（forward = 下 / 右）。`gg` / `G` 没扩展到水平（"行首/行末"在很多场景下不是常规需求，没值得加新 chord）。
+**Horizontal scroll `b`/`f`**: the same left-hand home row cadence as `d`/`u` (`b`=back/left, `f`=forward/right). `ScrollController` uses an `Axis` enum to uniformly drive wheel1 (vertical) or wheel2 (horizontal), reusing a single timer, with no pause when switching axes. The convention is that both wheel1 / wheel2 mean "negative value = scroll in the forward direction" (forward = down / right). `gg` / `G` were not extended to horizontal ("line start/end" isn't a routine need in many scenarios, not worth adding a new chord).
 
-**`/`-搜索在 SCROLL 也支持**：search 本质上是"精准光标传送"——SCROLL 既然支持 hjkl 相对移光标 + c 点击，再加上 `/` 绝对跳转就构成"滚到大致位置 → search 精确定位 → c 点击"的完整闭环，全程不出 SCROLL。机制跟 TAP 的 §6.5 完全一样，差别只在 host overlay：进 search 时藏 scroll-area picker，commit 后光标 warp 完恢复 picker（不像 TAP 那样 sticky-rehint，因为 SCROLL 没有 hint 概念）。底层 OCR / label 生成 / SearchOverlay 完全复用，宿主无关的实现见 `setSearchPhase` / `searchPhase` 辅助函数。
+**`/`-search is also supported in SCROLL**: search is essentially "precise cursor teleport"—since SCROLL already supports hjkl relative cursor move + c click, adding `/` absolute jump forms the complete loop of "scroll to roughly the right place → search to pinpoint → c to click", all without leaving SCROLL. The mechanism is exactly the same as TAP's §6.5, the only difference being the host overlay: on entering search, hide the scroll-area picker, and after commit, when the cursor warp is done, restore the picker (not a sticky-rehint like TAP, because SCROLL has no hint concept). The underlying OCR / label generation / SearchOverlay are fully reused; see the `setSearchPhase` / `searchPhase` helper functions for the host-agnostic implementation.
 
-> 统一前两个模式移动键不同（TAP=IJKL、SCROLL=SDFE）是各自键位约束下的妥协；统一到 hjkl 后认知负担消除。日后会开放让用户自定义按键配置。
+> Before unification, the two modes had different movement keys (TAP=IJKL, SCROLL=SDFE), a compromise under each one's key-binding constraints; after unifying to hjkl the cognitive burden is eliminated. In the future, user-customizable key configuration will be opened up.
 
-进入：任何 mode 按住 Caps Lock + d（chord）。进入时 `ScrollAreaDetector` AX-walk 焦点窗口找所有 `AXScrollArea` + `AXWebArea`，`ScrollOverlay` 画蓝色光晕边框 + 数字标记，默认选离光标最近的区域。**光标已经在选中区内 → 不 warp**；只在区外才 warp 到区中心（滚动事件按光标位置路由，落在区内任意处即可，已在区内还 warp 多余且 jarring）。
+To enter: in any mode hold Caps Lock + d (chord). On entry, `ScrollAreaDetector` AX-walks the focused window to find all `AXScrollArea` + `AXWebArea`, `ScrollOverlay` draws a blue glow border + numeric markers, and selects the area closest to the cursor by default. **Cursor already inside the selected area → no warp**; only when outside does it warp to the area center (scroll events route by cursor position, so landing anywhere inside the area is fine, and warping when already inside is redundant and jarring).
 
-零-AX app（a11y 关闭的 Electron，如 Claude；**Chrome 网页内容也是——renderer a11y 默认关**）检测不到滚动区 → 退到焦点窗口：光标已在窗内则不动，在窗外才 warp 到窗口中心，无区域 picker。识别不出的区域靠未来"键盘平移鼠标" / 扩展 DOM 滚动容器检测兜底。
+A zero-AX app (Electron with a11y off, e.g. Claude; **Chrome web content too—renderer a11y is off by default**) detects no scroll area → falls back to the focused window: if the cursor is already in the window don't move, only warp to the window center when outside, with no area picker. Unrecognized areas are covered by a future "keyboard pan the mouse" / extension DOM scroll-container detection fallback.
 
-### 5.1 浏览器免模式滚动（d/u/gg/G，Vimium 式）
+### 5.1 Browser mode-less scroll (d/u/gg/G, Vimium-style)
 
-**只针对前台是浏览器、且当前 tab 是真网页的情况**：不必先按 Caps Lock + d 进 SCROLL，**直接 `d`/`u`（Shift 加速）连续滚、`gg`/`G` 跳顶/底**——就像 Vimium。这也是为什么这种页面 Caps Lock + d 被禁用（§3.2 †）。
+**Only for the case where the foreground is a browser and the current tab is a real web page**: no need to press Caps Lock + d to enter SCROLL first, **just `d`/`u` (Shift to accelerate) for continuous scroll, `gg`/`G` to jump to top/bottom**—just like Vimium. This is also why Caps Lock + d is disabled on such a page (§3.2 †).
 
-实现走**扩展 content script 检测 + native 发真滚轮**两段(详见 [`browser-support-design.md`](browser-support-design.md) §4.11)，要点：
+The implementation goes through **extension content script detection + native sending a real scroll wheel** in two stages (see [`browser-support-design.md`](browser-support-design.md) §4.11), key points:
 
-- **按键检测在网页里**(content script，capture 阶段)：聚焦在可编辑元素(input/textarea/contenteditable 等)时放行让用户打字；带 Cmd/Ctrl/Alt 放行;只有裸 d/u/gg/G 才拦(`preventDefault`)。"可编辑判断"用 JS 同步读 `document.activeElement`，这是它必须放在网页侧而非 native event tap 的原因。
-- **实际滚动在 native**：content script 只在手势边界发 `page_scroll`(start/stop/jump)指令，native 用一个常驻 `ScrollController`(不 enter、不 warp、不画 overlay)在**光标处发真 CGEvent 滚轮**。好处：滚轮走浏览器内核的滚动包含逻辑，**滚光标下的容器、不会泄漏到页面**（YouTube 侧栏 vs 主内容那种联动靠 JS `scrollBy` 解决不了，真滚轮天然正确）；60fps 连续滚在 native 本地跑，IPC 只在 start/stop/jump。
-- **进模式即自动禁用**：一旦进任何 Mouseless 模式，native event tap 在网页收到键之前就吞掉 d/u → content script 不触发 → 免模式滚动自动停。零协调。
-- **兜底**：进模式(`teardownCurrentMode`)、扩展断连(`onActiveClientDisconnect`)都会停掉在飞的 page scroll，防"松手前进模式 / SW 挂掉"导致一直滚。
+- **Key detection is in the web page** (content script, capture phase): when focus is on an editable element (input/textarea/contenteditable, etc.) it passes through to let the user type; with Cmd/Ctrl/Alt it passes through; only bare d/u/gg/G are intercepted (`preventDefault`). The "editable check" reads `document.activeElement` synchronously in JS, which is why it must live on the web-page side rather than the native event tap.
+- **The actual scroll is in native**: the content script only sends `page_scroll` (start/stop/jump) commands at gesture boundaries, and native uses a resident `ScrollController` (no enter, no warp, no overlay) to **send a real CGEvent scroll wheel at the cursor**. The benefit: the scroll wheel goes through the browser kernel's scroll-containment logic, so it **scrolls the container under the cursor and doesn't leak to the page** (the YouTube sidebar vs main content interlock can't be solved by JS `scrollBy`, but a real scroll wheel is naturally correct); the 60fps continuous scroll runs locally in native, with IPC only on start/stop/jump.
+- **Auto-disabled on entering a mode**: once any Mouseless mode is entered, the native event tap swallows d/u before the web page receives the key → the content script doesn't fire → mode-less scroll auto-stops. Zero coordination.
+- **Fallback**: entering a mode (`teardownCurrentMode`) and an extension disconnect (`onActiveClientDisconnect`) both stop any in-flight page scroll, preventing "entered a mode before releasing / SW died" from scrolling forever.
 
-其它 app（非浏览器）不受影响,仍需 Caps Lock + d 进 SCROLL。
+Other apps (non-browsers) are unaffected and still need Caps Lock + d to enter SCROLL.
 
 ---
 
-## 6. DRAG 子状态（TAP **和** SCROLL 的子状态，不是独立 mode）
+## 6. DRAG sub-state (a sub-state of TAP **and** SCROLL, not an independent mode)
 
-全键盘拖拽，vim-visual 风格。**单段式**：在 TAP normal 里按 bare `v` **立刻** 在光标位置合成 `mouseDown` 进入 dragging 子状态——用户用 hjkl 移光标已经把光标 aim 到目标上了，没必要再多一段 "armed 等再按 v" 的间隔。`DragController` 只持有 `startPoint: CGPoint`（Backspace 取消时用到）。
+Full-keyboard drag, vim-visual style. **Single-stage**: pressing bare `v` in TAP normal **immediately** synthesizes `mouseDown` at the cursor position to enter the dragging sub-state—the user has already aimed the cursor onto the target with hjkl, so there's no need for an extra "armed, press v again" interval. `DragController` only holds `startPoint: CGPoint` (used when Backspace cancels).
 
-**入口与归属**：DRAG 在 **TAP 和 SCROLL 各有一个平行的子状态**（`TapSub.dragging(DragController)` / `ScrollSub.dragging(DragController)`），都从各自 normal 里 bare `v` 进入。TAP 的 drag drop/cancel 回 **TAP normal**(sticky → rehint;非 sticky → exit OFF);SCROLL 的回 **SCROLL normal**(SCROLL 没有 sticky/exit 概念,drop/cancel 后留在 SCROLL)。OFF / WINDOW / MOVE 里**没有"直接进 DRAG"的路径**。
+**Entry and ownership**: DRAG has **a parallel sub-state in each of TAP and SCROLL** (`TapSub.dragging(DragController)` / `ScrollSub.dragging(DragController)`), both entered from their respective normal via bare `v`. TAP's drag drop/cancel returns to **TAP normal** (sticky → rehint; non-sticky → exit OFF); SCROLL's returns to **SCROLL normal** (SCROLL has no sticky/exit concept, after drop/cancel it stays in SCROLL). There is **no "enter DRAG directly" path** from OFF / WINDOW / MOVE.
 
-| 键 | 行为 |
+| Key | Behavior |
 | --- | --- |
-| **进入：bare `v`**（仅 TAP normal）| 在光标位置立刻 `leftMouseDown` → tapSub = dragging；记下 `startPoint`；hint overlay 隐藏（label 干扰拖拽视线），HUD `TAP · DRAG` |
-| `h / j / k / l` (held) | 移光标，事件类型 `.leftMouseDragged`（目标 app 看到拖拽轨迹）；Shift 加速 / Option 慢，速度跟 TAP normal 一致 |
-| `Enter` | `leftMouseUp` 在当前位置 → drop；回 TAP normal（sticky → `scheduleStickyRehint()`；非 sticky → exit OFF，跟 hint commit 一致） |
-| `Backspace` | cursor warp 回 `startPoint` → 在起点 `leftMouseUp`（目标 app 看到零位移 click，不触发 drop）→ 回 TAP normal、恢复 hint overlay |
-| `Esc` | drop at cursor 后 deactivate 回 OFF（drop 副作用不可避免——按钮必须释放） |
-| `Caps Lock`（单击 / + d / + w / + m chord）| 切之前 `cleanupTapSub` 在当前位置 mouseUp 释放（drop 副作用，同 Esc），再走对应 mode 切换 |
-| 其它键 | 吞掉（按住 mouseDown 时更不能让杂键漏过去）|
+| **Enter: bare `v`** (TAP normal only) | immediately `leftMouseDown` at the cursor position → tapSub = dragging; record `startPoint`; hide the hint overlay (labels interfere with the drag sightline), HUD `TAP · DRAG` |
+| `h / j / k / l` (held) | move cursor, event type `.leftMouseDragged` (the target app sees the drag track); Shift to accelerate / Option to slow, speed consistent with TAP normal |
+| `Enter` | `leftMouseUp` at the current position → drop; return to TAP normal (sticky → `scheduleStickyRehint()`; non-sticky → exit OFF, consistent with a hint commit) |
+| `Backspace` | warp the cursor back to `startPoint` → `leftMouseUp` at the start point (the target app sees a zero-displacement click, no drop triggered) → return to TAP normal, restore the hint overlay |
+| `Esc` | drop at cursor then deactivate back to OFF (the drop side-effect is unavoidable—the button must be released) |
+| `Caps Lock` (single click / + d / + w / + m chord) | before switching, `cleanupTapSub` does a mouseUp release at the current position (drop side-effect, same as Esc), then performs the corresponding mode switch |
+| Other keys | swallowed (even more so while mouseDown is held, no stray keys should slip through) |
 
-**为什么删了之前的两段式 armed/grab**：早先用 `Caps Lock + v` chord 进 armed（不 grab）、再按 bare `v` 才 grab，是为了"先 aim 再握"。但 TAP 里 hjkl 移光标本来就是 aim——用户走到目标上、然后想 drag 时按 v，**已经 aim 完了**，多一段 armed 反而要按两次 v、还要记当前是 armed 还是 dragging。把 DRAG 收编成 TAP 子状态 + 单段式：TAP 里 aim → bare v → 直接 grab → hjkl 拖 → Enter drop，认知模型最简。
+**Why the earlier two-stage armed/grab was removed**: early on, `Caps Lock + v` chord entered armed (no grab), and only a subsequent bare `v` grabbed, in order to "aim first, then grab". But in TAP, moving the cursor with hjkl is already aiming—the user walks onto the target and then presses v when they want to drag, **already done aiming**, so the extra armed stage instead requires pressing v twice and remembering whether the current state is armed or dragging. Folding DRAG into a TAP sub-state + single-stage: in TAP aim → bare v → grab directly → hjkl to drag → Enter to drop, the simplest cognitive model.
 
-**`v` 选键说明**：vim visual 的对应。`v` 被**从 hint 池里移除**（见 §4）—— TAP normal 里 bare v 永远是"进 DRAG"，不和 hint commit 冲突。代价：hint 池从 17 字母缩回 16；16² = 256 还远够覆盖 maxTargets = 200，没影响。
+**`v` key choice note**: the counterpart to vim visual. `v` is **removed from the hint pool** (see §4)—in TAP normal a bare v is always "enter DRAG", never conflicting with a hint commit. Cost: the hint pool shrinks from 17 letters back to 16; 16² = 256 still far covers maxTargets = 200, no impact.
 
-**典型用例**：
-- 拖文件：Caps Lock 进 TAP → hjkl 把光标精确移到文件图标上 → `v` → hjkl 拖到目标文件夹（hover 高亮 + 拖拽指示）→ Enter。
-- 选文字 + 复制：（先用 `/` 搜索定位起点光标——见 §6.5）→ `v` → hjkl 到终点（沿途文本被选中）→ Enter（释放，**选区保留**）→ Cmd+C 复制。
-- 拖 divider / slider / 时间轴 trim：hjkl 把 cursor 移到 divider 上 → `v` → hjkl 拖 → Enter。
+**Typical use cases**:
+- Drag a file: Caps Lock to enter TAP → hjkl to precisely move the cursor onto the file icon → `v` → hjkl to drag to the target folder (hover highlight + drag indicator) → Enter.
+- Select text + copy: (first use `/` search to position the start cursor—see §6.5) → `v` → hjkl to the end point (text along the way gets selected) → Enter (release, **selection retained**) → Cmd+C to copy.
+- Drag a divider / slider / timeline trim: hjkl to move the cursor onto the divider → `v` → hjkl to drag → Enter.
 
-**SCROLL 里的 drag（`ScrollSub.dragging`）**：和 TAP 版镜像,但多一条专属能力——**边拖边滚**。这正是"在 SCROLL 里拖"相对"在 TAP 里拖"的价值:按住拖的同时 `d/u`(垂直)/`b/f`(水平)继续驱动 `ScrollController`,鼠标键不松,可以跨视口拖选(从这里按住、`d` 往下滚选一大段超出屏幕的文字、Enter 放下)。
-- 进入:SCROLL normal 里 bare `v`(`v` 在 SCROLL 里本来是空的)→ `startDragFromScroll()`:`controller.stop()` 停掉连续滚动 → `DragController(at: cursor)` 合成 mouseDown → `scrollSub = .dragging` → `controller.hideOverlay()` 藏起 area picker → HUD `SCROLL · dragging`。
-- `h/j/k/l`:早期拦截里 `.scroll` 分支检测 `.dragging` → `allowsMoveHere=true, dragHeld=true`(normal 时仍 false、走 handleScrollNormal),所以拖动光标发 `.leftMouseDragged`。
-- `d/u/b/f`:`handleScrollDragging` 照常调 `controller.start(...)`(keyUp 经共享的 `handleKeyUp` scroll 路径停)。
-- `Enter` drop / `Backspace` cancel → `scrollDragDrop` / `scrollDragCancel`:mouseUp(cancel 先 warp 回 startPoint)、`controller.showOverlay()` 恢复 picker、回 SCROLL normal(**不退出**)。
-- `Esc` / 切 mode:走 `exit` / `teardownCurrentMode` → `cleanupScrollSub` 的 `.dragging` 分支补一个 mouseUp 释放按钮(同 `cleanupTapSub`)。
+**Drag inside SCROLL (`ScrollSub.dragging`)**: mirrors the TAP version, but with one extra dedicated capability—**scroll while dragging**. This is exactly the value of "drag inside SCROLL" over "drag inside TAP": while holding the drag, `d/u` (vertical) / `b/f` (horizontal) keep driving the `ScrollController`, the mouse button isn't released, so you can drag-select across viewports (hold here, `d` to scroll down and select a large chunk of text beyond the screen, Enter to drop).
+- Enter: bare `v` in SCROLL normal (`v` is otherwise empty in SCROLL) → `startDragFromScroll()`: `controller.stop()` stops the continuous scroll → `DragController(at: cursor)` synthesizes mouseDown → `scrollSub = .dragging` → `controller.hideOverlay()` hides the area picker → HUD `SCROLL · dragging`.
+- `h/j/k/l`: the early-intercept `.scroll` branch detects `.dragging` → `allowsMoveHere=true, dragHeld=true` (still false in normal, goes through handleScrollNormal), so dragging the cursor emits `.leftMouseDragged`.
+- `d/u/b/f`: `handleScrollDragging` calls `controller.start(...)` as usual (keyUp stops via the shared `handleKeyUp` scroll path).
+- `Enter` drop / `Backspace` cancel → `scrollDragDrop` / `scrollDragCancel`: mouseUp (cancel first warps back to startPoint), `controller.showOverlay()` restores the picker, return to SCROLL normal (**no exit**).
+- `Esc` / switch mode: goes through `exit` / `teardownCurrentMode` → the `.dragging` branch of `cleanupScrollSub` adds a mouseUp to release the button (same as `cleanupTapSub`).
 
-**实现注意点**：
-- `startDragFromTap()` / `startDragFromScroll()` 立刻 `MouseSynth.dragDown(at: cursor)`(由 `DragController(at:)` 构造时合成),没有 "armed 等 v" 的中间态。
-- 早期 hjkl 拦截读 `tapSub` / `scrollSub` 决定 `dragHeld`（dragging = `.leftMouseDragged`、其它子状态 = `.mouseMoved`）。
-- `cleanupTapSub()` / `cleanupScrollSub()` / `exit` 的 mouseUp 只在 dragging 子状态合成（其它子状态没东西可释放）。
-- 进 TAP DRAG 时取消 `pendingStickyRehint`（避免 100ms 延迟里 re-hint 在 drag 中途弹出 overlay）；SCROLL 没有 sticky-rehint,不需要。
+**Implementation notes**:
+- `startDragFromTap()` / `startDragFromScroll()` immediately `MouseSynth.dragDown(at: cursor)` (synthesized when `DragController(at:)` is constructed), with no intermediate "armed, wait for v" state.
+- The early hjkl intercept reads `tapSub` / `scrollSub` to decide `dragHeld` (dragging = `.leftMouseDragged`, other sub-states = `.mouseMoved`).
+- The mouseUp in `cleanupTapSub()` / `cleanupScrollSub()` / `exit` is synthesized only in the dragging sub-state (other sub-states have nothing to release).
+- On entering TAP DRAG, cancel `pendingStickyRehint` (to avoid the re-hint within the 100ms delay popping up an overlay mid-drag); SCROLL has no sticky-rehint, so it's not needed.
 
 ---
 
-## 6.5 `/`-搜索子状态（TAP 的子状态）
+## 6.5 `/`-search sub-state (a sub-state of TAP)
 
-按 bare `/` 进入：在焦点窗口里找 query 的所有出现位置、复用 hint label 池标记每个匹配——用户敲 query → Enter → 看到一群带 label 的高亮框 → 敲 label commit → cursor warp 到匹配文本左边沿（rect.minX, minY + 0.6×height）→ 回 TAP normal。
+Press bare `/` to enter: find all occurrences of the query in the focused window, reuse the hint label pool to mark each match—the user types the query → Enter → sees a cluster of labeled highlight boxes → types a label to commit → cursor warps to the left edge of the matched text (rect.minX, minY + 0.6×height) → back to TAP normal.
 
-**两条匹配路径**（`kickoffSearch` 按 frontmost bundleID 分流）：
+**Two match paths** (`kickoffSearch` branches by frontmost bundleID):
 
-- **浏览器 frontmost** → 走扩展 DOM `MouselessDetector.findTextMatches(query)`：TreeWalker 遍历可见 text node + Range.getClientRects() 出 viewport 内的 rect。**~5-20ms**，字符级 100% 准确。每个 visual line 一条 match（多行 wrap 自动展开成多个高亮框）。viewport 外的不返回（OCR 也看不到屏外内容，行为对齐）。**top frame only for v1**（iframe 内容延后）。
-- **其它所有 app** → 老的 Vision OCR 路径：`ScreenCapture.captureFocusedWindow()` + `OCRRefiner.recognizeText`（zh + en 双语）+ `findMatches(query, observations, windowRect)` 字符级 boundingBox。**80-200ms**，可能有 OCR 错读（"complete" → "tomplete" 之类）。
+- **Browser frontmost** → goes through the extension DOM `MouselessDetector.findTextMatches(query)`: TreeWalker traverses visible text nodes + Range.getClientRects() yields rects within the viewport. **~5-20ms**, character-level 100% accurate. One match per visual line (a multi-line wrap auto-expands into multiple highlight boxes). Off-viewport ones aren't returned (OCR can't see off-screen content either, behavior aligned). **top frame only for v1** (iframe content deferred).
+- **All other apps** → the old Vision OCR path: `ScreenCapture.captureFocusedWindow()` + `OCRRefiner.recognizeText` (zh + en bilingual) + `findMatches(query, observations, windowRect)` character-level boundingBox. **80-200ms**, may have OCR misreads ("complete" → "tomplete" and the like).
 
-终端日志区分两条：`[mouseless] search: ... — DOM match via extension` vs `... — capturing + OCR'ing focused window`。
+The terminal log distinguishes the two: `[mouseless] search: ... — DOM match via extension` vs `... — capturing + OCR'ing focused window`.
 
-`MouseSynth.warp` 用 `.mouseMoved` 合成事件让目标 view 收到事件、cursor flips to I-beam（同 §4.3 cursor park 同样的设计）。
+`MouseSynth.warp` uses a `.mouseMoved` synthesized event so the target view receives the event and the cursor flips to I-beam (the same design as the §4.3 cursor park).
 
-**为什么独立做、不复用 hint pipeline**：hint mode 走 AX walk + OmniParser 找 **可点元素**；search 走 OCR + 文本匹配找 **某个字符串在哪**——两个完全不同的检索意图。例如 WeChat 长聊天里要复制中间某条消息，hint 给的是消息行（每行只一个 commit 点、点完是选中行而不是 caret 落到字里），完全不能定位"那段文字的开头"；OCR 直接找字、按 character-level boundingBox 给出像素位置。
+**Why build it separately, not reuse the hint pipeline**: hint mode goes through AX walk + OmniParser to find **clickable elements**; search goes through OCR + text matching to find **where some string is**—two completely different retrieval intents. For example, to copy some middle message in a long WeChat chat, hint gives the message row (each row has only one commit point, and after clicking you select the row rather than landing the caret in the text), which can't locate "the start of that text" at all; OCR directly finds the text and gives the pixel position by character-level boundingBox.
 
-**为什么不依赖 AX 白名单**：用户明确指定 search 应该**对所有 app 都用 OCR**，不分 AX / OP。hint 池有白名单是因为 AX 给的可点元素更精确；search 是文本检索、AX 拿不到 "第 47 个字在第几像素"。统一走 OCR 反而最简单。
+**Why it doesn't depend on the AX whitelist**: the user explicitly specified that search should **use OCR for all apps**, with no AX / OP distinction. The hint pool has a whitelist because the clickable elements AX gives are more precise; search is text retrieval, and AX can't get "the pixel position of the 47th character". Going uniformly through OCR is actually the simplest.
 
-**为什么字符级 boundingBox**：`VNRecognizedText.boundingBox(for: range)` 给的是 substring 在图像里的精确像素 rect，而不是整行 OCR observation 的粗框。用户搜 "complete" 想落点到 c 前面，不是整段文字开头。
+**Why character-level boundingBox**: `VNRecognizedText.boundingBox(for: range)` gives the precise pixel rect of the substring in the image, rather than the coarse box of a whole-line OCR observation. The user searching "complete" wants to land in front of the c, not at the start of the whole paragraph.
 
-**输入侧目前只支持 ASCII**：OCR 双语（zh + en）但 search buffer 只接 a-z / 0-9 / space（含 **Shift+letter 大写**——`typingMods` 允许 Shift 通过，按下时把字符 `.uppercased()`）。原因是 CGEventTap 在 IME 之前拦截 keyDown、IME 收不到原料就 compose 不出字。中文支持已记入 `SPECS.md` §7 TODO list。
+**Input side currently supports ASCII only**: OCR is bilingual (zh + en) but the search buffer only accepts a-z / 0-9 / space (including **Shift+letter uppercase**—`typingMods` lets Shift through, and on press the character is `.uppercased()`). The reason is that CGEventTap intercepts keyDown before the IME, and the IME can't compose without the raw input. Chinese support is recorded in the `SPECS.md` §7 TODO list.
 
-**子状态机**：
+**Sub-state machine**:
 
-| 子状态 | 含义 | 进入条件 |
+| Sub-state | Meaning | Entry condition |
 | --- | --- | --- |
-| `.searchTyping(buffer)` | 用户在敲 query（buffer 还没 OCR）| TAP normal 按 `/` |
-| `.searchSearching` | OCR + 匹配跑中（异步 Task）| `.searchTyping` 按 Enter 且 buffer 非空 |
-| `.searchPicking(matches, typed)` | 匹配结果已绘制成带 label 的高亮框，用户在敲 label 选择 | OCR 完且 matches 非空 |
+| `.searchTyping(buffer)` | the user is typing the query (buffer not yet OCR'd) | press `/` in TAP normal |
+| `.searchSearching` | OCR + match running (async Task) | press Enter in `.searchTyping` with a non-empty buffer |
+| `.searchPicking(matches, typed)` | match results have been drawn as labeled highlight boxes, the user is typing a label to select | OCR done and matches non-empty |
 
-进 `.searchTyping` 时**隐藏** TAP 的 hint overlay（label 池要复用、视觉上不能撞）；matches 出来时通过 `SearchOverlay` 单独画黄色高亮框 + label chip；commit 时 hide search overlay、cursor warp、`tapSub = .normal`、`scheduleStickyRehint()` 让 hint overlay 100ms 后回来（如果用户在这 100ms 内按 v 进 drag，pending rehint 会被 startDragFromTap 取消——见 §6 实现要点）。
+On entering `.searchTyping`, **hide** TAP's hint overlay (the label pool is reused, and they can't clash visually); when matches come out, `SearchOverlay` separately draws a yellow highlight box + label chip; on commit, hide the search overlay, warp the cursor, `tapSub = .normal`, `scheduleStickyRehint()` to bring the hint overlay back 100ms later (if the user presses v to enter drag within that 100ms, the pending rehint is canceled by startDragFromTap—see the §6 implementation notes).
 
-**键位**：
+**Key bindings**:
 
-| 键 | `.searchTyping` | `.searchSearching` | `.searchPicking` |
+| Key | `.searchTyping` | `.searchSearching` | `.searchPicking` |
 | --- | --- | --- | --- |
-| 字母 / 数字 / 空格 | 追加到 buffer，更新 HUD | swallow（OCR 在跑）| 追加到 typed，过滤匹配 label；唯一完整命中 → commit |
-| `Enter` | kickoff OCR（buffer 非空才跑）| swallow | swallow（commit 由敲完 label 触发）|
-| `Backspace` | 删一字符；buffer 空再按 = cancel 回 TAP normal | swallow | 删一字符；typed 空再按 = 回 `.searchTyping("")` 重新输 query |
-| `Esc` | cancel 回 TAP normal（恢复 hint overlay）| cancel 回 TAP normal（OCR task 进 cancellation guard）| cancel 回 TAP normal |
-| Caps Lock 单击 / chord | 同 dragging：先 cleanup（关 search overlay 恢复 hints）再切 mode | 同 | 同 |
+| letter / digit / space | append to buffer, update HUD | swallow (OCR running) | append to typed, filter matching labels; a unique complete hit → commit |
+| `Enter` | kickoff OCR (only runs if buffer non-empty) | swallow | swallow (commit is triggered by finishing the label) |
+| `Backspace` | delete one character; press again on empty buffer = cancel back to TAP normal | swallow | delete one character; press again on empty typed = back to `.searchTyping("")` to re-enter the query |
+| `Esc` | cancel back to TAP normal (restore hint overlay) | cancel back to TAP normal (the OCR task enters the cancellation guard) | cancel back to TAP normal |
+| Caps Lock single click / chord | same as dragging: clean up first (close the search overlay, restore hints) then switch mode | same | same |
 
-**Commit 落点**：`(rect.minX, rect.minY + 0.6×height)` —— 匹配文本的**左边沿**、垂直从顶下来 60% 处。X 不加 inset（早期讨论过给个 -2pt 偏移让光标在第一个字符**外**，但所有 macOS 文本控件 hit-test 都对 minX 包容，落到 minX 就在文本里）。Y 用 60% 而非 50%：字符 boundingBox 通常贴文字本身，垂直正中（midY）会落在字符笔画里、文本视图 hit-test 有时把它判为"字符内部"而非"caret 间隙"；60%（midY 略偏下）落到字符基线附近，更稳定。Commit 后立刻可以按 `v` 起 drag（§6 入口），这是 search → drag 选文字复制的核心 workflow。
+**Commit landing point**: `(rect.minX, rect.minY + 0.6×height)` —— the **left edge** of the matched text, 60% down vertically from the top. X has no inset (early discussion considered a -2pt offset to put the cursor **outside** the first character, but all macOS text controls hit-test inclusively at minX, so landing at minX is inside the text). Y uses 60% rather than 50%: a character boundingBox usually hugs the text itself, and the vertical center (midY) would land in the character's strokes, and a text view's hit-test sometimes judges that as "inside the character" rather than a "caret gap"; 60% (slightly below midY) lands near the character baseline and is more stable. Right after commit you can press `v` to start a drag (the §6 entry), which is the core workflow of search → drag to select and copy text.
 
-**用 `.mouseMoved` 合成而非 `CGWarpMouseCursorPosition`**：CGWarp 把像素挪过去但**跳过事件管线**，目标 view 不知道鼠标进来过，cursor shape 还是 warp 前的样子（典型现象：落到文本框后光标仍是箭头不是 I-beam，要鼠动一下才翻）。改成合成一发 `.mouseMoved` 给同一个落点，view 收到正常事件 → 触发 cursorRect / hover state 更新 → I-beam 翻过来、按钮高亮、链接下划线、tooltip 等全部到位。代价是一次合成 `CGEvent` 比直接 warp 多 ~1ms，可忽略。
+**Synthesize with `.mouseMoved` rather than `CGWarpMouseCursorPosition`**: CGWarp moves the pixels over but **skips the event pipeline**, so the target view doesn't know the mouse came in, and the cursor shape stays as it was before the warp (typical symptom: after landing on a text box the cursor is still an arrow rather than an I-beam, and you have to jiggle the mouse to flip it). Changed to synthesizing one `.mouseMoved` to the same landing point, the view receives a normal event → triggers cursorRect / hover state updates → the I-beam flips over, the button highlights, the link underlines, the tooltip, etc. all come into place. The cost is that one synthesized `CGEvent` is ~1ms more than a direct warp, negligible.
 
-**为什么 OCR 直接对**整个焦点窗口**而不是按 OP 那种 crop**：用户搜的字可能在窗口任何位置；crop 不知道往哪 crop。整窗 OCR 一次 ~80-200ms（取决于字数），用户已经按了 Enter、可以接受这点延迟（不像 hint mode 是进入瞬间）。
+**Why OCR runs against the **whole focused window** rather than a crop like OP's**: the text the user searches for could be anywhere in the window; a crop doesn't know where to crop. A whole-window OCR takes ~80-200ms (depending on character count), and the user has already pressed Enter and can accept this latency (unlike hint mode, which is at the instant of entry).
 
-**实现注意点**：
-- `OCRRefiner.recognizeText(in:)` 抽出来给 search 用（同一个 `.accurate` + zh/en config，跟 OP refiner 共用）。
-- `findMatches(query, observations, windowRect)`：对每个 observation 找所有 substring 命中（同一行多次命中 = 多个 label），用 `topCandidates(1)[0].boundingBox(for: range)` 拿字符级 rect。case-insensitive。
-- Label 复用 `HintMode.generateLabels(count:)`（`generateLabels` 已开放为 internal），所以 search 的 label 和 hint label 视觉一致、按键习惯一致。
-- `SearchOverlay` 是另一个 `.statusBar` 级 borderless 透明 NSWindow（per-NSScreen），画黄色高亮框 + label chip（chip 在匹配文本**左侧**，挤不下时回退到内侧）。
-- 异步 OCR Task 在每个等待点 guard `tapSub == .searchSearching`，用户在 OCR 跑的时候 cancel / 切 mode 时 task 自己短路。
-
----
-
-## 7. WINDOW mode 键位
-
-整窗口尺寸调整。`WindowController` 持有状态 + 60fps timer，每 tick 算 delta 并直接 AX 写焦点窗口的 `AXPosition` / `AXSize`，瞬时无动画。
-
-| 键 | 行为 |
-| --- | --- |
-| **进入：`Caps Lock + w` chord**（任意 mode）| 两道 gate 都过才进（见下）。任一不过 → HUD 提示原因、不入 mode |
-| `h` / `j` / `k` / `l` (held) | 把对应 border 往**外**推（`k` 顶上 / `j` 底下 / `h` 左外 / `l` 右外），按住连续；步长 20pt/tick @ 60fps |
-| **双击** `hh` / `jj` / `kk` / `ll`（150ms 内连按两次同键，第二下保持按住）| **反向**该 edge：往内压 = 缩小该 edge。每条 edge 独立——可以 k 长按扩顶 + jj 双击缩底同时进行 |
-| `Shift + hjkl` | **加速**（80pt/tick = 4×，跨屏快速 reshape）。跟 TAP-hjkl 移光标、SCROLL d/u、MOVE hjkl 的 Shift 语义一致 |
-| `Option + hjkl` | **精细**步长（5pt/tick 替代默认 20pt/tick），用于和别的窗口/屏幕边贴齐时的微调 |
-| `Shift + Option + hjkl` | Option 优先 → slow（仿 `MouseMover.moveSpeed` / `WindowMoveController`：误按 Shift+Option 倾向"慢"而非"快"） |
-| 同时按（如 `h+j`）| 组合 → corner 推拉，4 个角都成立。双击反向也独立——`kk + jj` 双击同时按 = 顶底同时收 |
-| 矛盾对（`h+l` 或 `j+k`）| deltas 自然抵消（位置和大小都 +/− 相消，窗口不变） |
-| `Esc` | exit OFF（teardown：停 timer / 关 overlay） |
-| 其它键 | 吞掉 |
-| `Caps Lock`（单击 / + d / + w / + m chord）| 立即切到对应 mode。`teardownCurrentMode` 先停 timer + 关 overlay 再切；resize 不残留状态 |
-
-**入 mode 的两道 gate**（`enterWindowMode`）：
-
-1. **`AXWindowOps.hasTitleBarButton(window)`** —— 至少有一个标题栏按钮（`AXCloseButton` / `AXMinimizeButton` / `AXZoomButton` / `AXFullScreenButton`）。这是"是不是真正的用户窗口"的判据：
-   - **Finder Desktop**（没开 Finder 窗口时 `AXFocusedWindow` 落到的那个 desktop "窗口"）：没有任何标题栏按钮 → 拒绝。本来就不是用户可 resize 的东西。
-   - **macOS fullscreen 状态**：标题栏按钮被隐藏 → 拒绝。fullscreen 状态下也 resize 不了。
-   - **AX 黑洞 app**（Electron 等）：外壳 NSWindow chrome 是原生的，标题栏按钮在 AX 树里能查到（AX 黑洞是窗口**内容**那一层）→ 过。
-   - **为什么用这个而非 `AXSubrole == "AXStandardWindow"`**：AX 黑洞 app 的 subrole 经常 nil / 乱写 / 不暴露，严格 subrole 检查会误杀。标题栏按钮直接查 attribute 是否存在，比 subrole 鲁棒；最多 4 次 IPC（短路命中即返），一次性。
-2. **`AXWindowOps.isResizable(window)`** —— `AXPosition` 和 `AXSize` 两个都得 `AXUIElementIsAttributeSettable` 才行。resize 靠每 tick 写这俩属性，任一不通直接没法做。
-
-**视觉**（`WindowOpOverlay`）：蓝色实线 border（3pt）贴窗口外沿；4 个**两行 chip**（蓝底白字）贴在每边中点的**外侧**：
-- 第一行（大字粗体）：bare key + 扩展方向，如 `↑k`
-- 第二行（小字稍淡）：双击反向，如 `↓kk`
-
-完整对照：top `↑k / ↓kk`、bottom `↓j / ↑jj`、left `←h / →hh`、right `→l / ←ll`。角落**不画**——hjkl 组合是隐含的，不再加 chip。**chip 屏幕外不画**：每个 chip 单独检查是不是全部包含在某个 NSScreen 的 view bounds 内；窗口顶到屏幕顶时，顶部 chip 应该在屏幕外那一块，就**直接不画**（用户明确要求：不画到屏幕外）。
-
-**为什么双击反向、不是 Shift 反向**：早先版本用 `Shift+hjkl` 表示 shrink（反向）——但 Shift 在整个项目里固定语义是"加速"（TAP-hjkl 移光标、SCROLL d/u、MOVE-hjkl 都是 Shift=fast）。WINDOW 拿 Shift 做反向（a）跟其它 mode 不一致、用户切来切去会犯迷糊，（b）让 resize 失去了加速的能力。改成"双击同键反向"后：Shift 回归加速、反向落到一个本来就属于 vim 风格的肌肉记忆（连按）、每条 edge 的反向状态还能独立追踪（k 长按扩顶 + jj 双击缩底可以同时进行）。双击窗口是 150ms（`windowReverseTapWindow`，从初版 300ms → 200ms → 150ms 两次调短：300ms 把"按一下、看一眼结果、再按一下扩大"这种自然停顿误判成双击；200ms 还有少量边界 case；150ms 把窗口压到"故意快连按"的舒适区 80-130ms 略上方、把"看一眼再按"的自然停顿区 250ms+ 全部排除）。第二下要保持按住（"双击 + hold"，第二下放掉就只缩一格）。
-
-**HUD**：进 mode 时显示 `WINDOW`。
-
-**为什么用 chord 而非 bare `w`**：`w` 在 hint 字母池里（`a s d f g e r u i o p w t n m c v`，见 §4）。用 chord 触发，bare `w` 仍可当 hint label。也跟 SCROLL 的 `Caps Lock + d` 一致。
-
-**为什么不留 fallback 合成边缘拖拽路径**：原型最早有一条 fallback——AX 不可写时合成 `mouseDown` 在窗口 border 中点 / 角点、每 tick 合成 `.leftMouseDragged` 推光标。撞到 Finder Desktop 这种"AX 里是窗口、实际不是用户窗口"的 case 时 HUD 标 `WINDOW · synth-drag`，但 fallback 在 Desktop 上同样没效果（没 resize handle 给 OS hit-test），变成迷惑性 UX。加了标题栏按钮 gate 后，能过 gate 的窗口几乎都允许 AX 写——fallback 的复杂度不再值得，删掉。
-
-**实现要点**：
-- 触发：`HotkeyTap` F19 arm 期间按 `w` → `session.enterWindowMode()`，仿 `Caps Lock + d → enterScroll`。
-- 焦点窗口解析：`AXWindowOps.frontmostWindow()` 沿用 `ScreenCapture.focusedWindow()` 的链（`AXFocusedWindow` → `AXMainWindow` → `AXWindows[0]`）。
-- Edge math：`top` expand 概念上 = `AXPosition.y -= step, AXSize.height += step`；`bottom` expand = `AXSize.height += step`；left/right 对称。shrink 翻号——每条 edge 的 sign 独立由 `WindowController.reversedEdges` 决定。
-- **写顺序：anchored grow 走 position-first，其它走 size-first**。AX 一次只能写一个属性（不像 NSWindow 的 resize handle 是 atomic），中间状态是可被 app 拒绝的。
-
-  *Anchored grow*（顶/左 expand：`k` / `h` / `kh` / `kl` / `jh`…）走 `tickPositionFirst`：先 `writePosition` 把 origin 移到目标位置 → 读回 OS 实际允许的 origin（菜单栏会 clamp y，屏幕左缘会 clamp x） → 按**实际**位移 + 非 anchored edge 的 size 贡献算最终 size → `writeSize`。
-
-  *其它情况*（anchored shrink、纯 bottom/right、纯平移）走 `tickSizeFirst`：先 `writeSize` → 读回 → 按 actualΔ 比例移 origin → readback → 反向 clamp trim（origin 被 OS 卡住时把 size 也回收一下保持对边不动）。
-
-  踩坑：早期统一 size-first，WeChat 这种"右边 ≤ X" 约束的 app 在 `h` expand（向左扩 = 顶上 origin 不变、size 加宽）时拒绝 writeSize——因为中间态"old origin + new bigger size"会让右边超过 X。把 anchored grow 路径改成 position-first 后 origin 先到位，再写 size 时右边其实没动，app 接受。鼠标拖窗能无限拉，因为 NSWindow.resize 是 atomic，AX 写做不到 atomic，所以要靠写顺序绕。
-
-- **Contribution tracking**：anchored edge（top/left）的 origin 移动只该响应它**自己那份** size 贡献，不是整轴的 sizeΔ。`topContribution` / `leftContribution` 跟 `sizeDelta` 分别维护——`k+j` 同时按时，顶 contribution = +step、底 contribution = +step、整 sizeΔ.height = +2×step；origin.y 只该 -= step（顶的那份），不是 -= 2×step。早期版本用 `topActive: Bool` 标记 + `actualHDelta` 算 origin 位移，`k+j` 会变成"顶向上 2×step，底没动"，bug。
-- **Clamp suppression**：anchored edge 如果上一 tick 写完 origin 被 OS clamp 住（partial move），缓存到 `clampedOriginY / clampedOriginX`；下一 tick 这条 edge 直接跳过、不参与 sizeΔ 也不参与 contribution。否则会反复"写 origin → OS clamp → 写 size 长出去 → 视觉上对边在飘"。`stopEdge`（keyUp）时清缓存让用户重按重试。
-- **双击反向后的链式误判**：hh（双击 shrink）释放后 100ms 内再按 h，原本 `now - lastKeyUp < 150ms` 又被判为双击 = 又反向 = 还在 shrink，用户感觉"h 失灵"。修复：`stopEdge` 时如果当前是 reversed 状态，把 `lastWindowEdgeKeyUp[edge]` 清成 nil 而不是刷成 now——下次按 h 拿不到上一次的 timestamp，按"首次"逻辑走（grow）。
-- 双击检测：`VimSession.lastWindowEdgeKeyUp[edge]` 存每条 edge 上次 keyUp 的 `CFAbsoluteTimeGetCurrent()` 时间戳。下次同键 keyDown 时 `now - last < 0.15` → 此次 hold 标 reversed，传给 `controller.startEdge(edge, reversed: true)`。OS key-repeat 不会误触（key-repeat 不发 keyUp，timestamp 不更新）。退 WINDOW mode 时清空 `lastWindowEdgeKeyUp` 防再次进入读到旧时间戳。
-- 速度：bare = 20pt/tick，Shift = 80pt/tick (fast)，Option = 5pt/tick (slow)，Option > Shift 优先（同 `MouseMover.moveSpeed`）。
-- 软 min size 200×120 防 in-memory rect 跟实际拉得太开（app 自己也会 clamp）。
+**Implementation notes**:
+- `OCRRefiner.recognizeText(in:)` is extracted for search to use (the same `.accurate` + zh/en config, shared with the OP refiner).
+- `findMatches(query, observations, windowRect)`: for each observation find all substring hits (multiple hits on the same line = multiple labels), using `topCandidates(1)[0].boundingBox(for: range)` to get the character-level rect. case-insensitive.
+- Labels reuse `HintMode.generateLabels(count:)` (`generateLabels` has been opened up to internal), so search's labels are visually consistent with hint labels and have the same keying habits.
+- `SearchOverlay` is another `.statusBar`-level borderless transparent NSWindow (per-NSScreen), drawing a yellow highlight box + label chip (the chip is on the **left** of the matched text, falling back to the inside when it doesn't fit).
+- The async OCR Task guards `tapSub == .searchSearching` at every await point, so when the user cancels / switches mode while OCR is running, the task short-circuits itself.
 
 ---
 
-## 8. WINDOW MOVE mode 键位
+## 7. WINDOW mode key bindings
 
-窗口整体平移（不改尺寸）。跟 WINDOW resize 是**独立的两个 mode**——一个动 `AXPosition`、一个动 `AXPosition + AXSize`，混在一起做反而要给 hjkl 多挂修饰键，分开干净。
+Whole-window resize. `WindowController` holds state + a 60fps timer, and each tick computes the delta and directly AX-writes the focused window's `AXPosition` / `AXSize`, instantaneously and without animation.
 
-`WindowMoveController` 镜像 `WindowController` 结构：方向集合 + 60fps timer + 每 tick 写 `AXPosition`（**只写 position**，单 IPC，比 `writeRect` 省一次 IPC）。
-
-| 键 | 行为 |
+| Key | Behavior |
 | --- | --- |
-| **进入：`Caps Lock + m` chord**（任意 mode）| 两道 gate：`hasTitleBarButton`（同 WINDOW resize）+ `isMovable`（只查 `AXPosition` 可写，比 `isResizable` 松——move 不动 size） |
-| `h / j / k / l` (held) | 窗口往对应方向平移（h=左 / j=下 / k=上 / l=右，跟 cursor / SCROLL / WINDOW resize 同套 hjkl 方向编码）|
-| `Shift + hjkl` | **fast**（80pt/tick，4×）—— 跨屏快移 |
-| `Option + hjkl` | **slow**（5pt/tick）—— 精细对齐到其它窗口/屏幕边 |
-| `Shift + Option + hjkl` | **Option 优先 → slow**（跟 `MouseMover.moveSpeed` 优先级一致：误按 Shift+Option 时倾向"慢"而非"快"） |
-| 同时按（如 `h+j`）| 对角线平移（左下），两 axis 的 delta 独立叠加 |
-| 矛盾对（`h+l` 或 `j+k`）| 自然抵消（dx 或 dy 相加为 0，窗口不动） |
+| **Enter: `Caps Lock + w` chord** (any mode) | enters only if both gates pass (see below). If either fails → HUD shows the reason, doesn't enter the mode |
+| `h` / `j` / `k` / `l` (held) | push the corresponding border **outward** (`k` top up / `j` bottom down / `h` left out / `l` right out), hold for continuous; step 20pt/tick @ 60fps |
+| **double-tap** `hh` / `jj` / `kk` / `ll` (press the same key twice within 150ms, holding the second) | **reverse** that edge: push inward = shrink that edge. Each edge is independent—you can hold k to expand the top + double-tap jj to shrink the bottom at the same time |
+| `Shift + hjkl` | **accelerate** (80pt/tick = 4×, fast cross-screen reshape). Consistent with the Shift semantics of TAP-hjkl cursor move, SCROLL d/u, MOVE hjkl |
+| `Option + hjkl` | **fine** step (5pt/tick instead of the default 20pt/tick), for micro-adjusting when snapping to another window/screen edge |
+| `Shift + Option + hjkl` | Option wins → slow (mimicking `MouseMover.moveSpeed` / `WindowMoveController`: a mis-pressed Shift+Option leans toward "slow" rather than "fast") |
+| simultaneous (e.g. `h+j`) | combination → corner push/pull, all 4 corners work. The double-tap reverse is also independent—`kk + jj` double-tap held together = top and bottom shrink at the same time |
+| conflicting pair (`h+l` or `j+k`) | the deltas naturally cancel (both position and size cancel +/−, the window doesn't change) |
+| `Esc` | exit OFF (teardown: stop timer / close overlay) |
+| Other keys | swallowed |
+| `Caps Lock` (single click / + d / + w / + m chord) | immediately switch to the corresponding mode. `teardownCurrentMode` first stops the timer + closes the overlay before switching; resize leaves no residual state |
+
+**The two gates to enter the mode** (`enterWindowMode`):
+
+1. **`AXWindowOps.hasTitleBarButton(window)`** —— at least one title bar button (`AXCloseButton` / `AXMinimizeButton` / `AXZoomButton` / `AXFullScreenButton`). This is the criterion for "is this a real user window":
+   - **Finder Desktop** (the desktop "window" that `AXFocusedWindow` lands on when no Finder window is open): has no title bar buttons → rejected. It was never something the user can resize anyway.
+   - **macOS fullscreen state**: the title bar buttons are hidden → rejected. You can't resize in the fullscreen state either.
+   - **AX black-hole apps** (Electron, etc.): the shell NSWindow chrome is native, and the title bar buttons can be queried in the AX tree (the AX black hole is the window **content** layer) → passes.
+   - **Why this and not `AXSubrole == "AXStandardWindow"`**: AX black-hole apps' subrole is often nil / garbage / not exposed, and a strict subrole check would false-kill. Checking directly whether a title bar button attribute exists is more robust than subrole; at most 4 IPC (returns on a short-circuit hit), one-shot.
+2. **`AXWindowOps.isResizable(window)`** —— both `AXPosition` and `AXSize` must be `AXUIElementIsAttributeSettable`. Resize works by writing these two attributes each tick, so if either doesn't go through it simply can't be done.
+
+**Visual** (`WindowOpOverlay`): a blue solid border (3pt) hugging the window's outer edge; 4 **two-line chips** (blue background, white text) hugging the **outer side** of each edge's midpoint:
+- First line (large bold): bare key + expand direction, e.g. `↑k`
+- Second line (small, slightly faded): double-tap reverse, e.g. `↓kk`
+
+Full mapping: top `↑k / ↓kk`, bottom `↓j / ↑jj`, left `←h / →hh`, right `→l / ←ll`. Corners are **not drawn**—the hjkl combinations are implicit, no extra chip. **Off-screen chips are not drawn**: each chip individually checks whether it's fully contained within some NSScreen's view bounds; when the window is flush against the top of the screen, the top chip would be in the off-screen area, so it's **simply not drawn** (the user explicitly required: don't draw off-screen).
+
+**Why double-tap to reverse, not Shift to reverse**: earlier versions used `Shift+hjkl` for shrink (reverse)—but Shift's fixed semantics across the whole project is "accelerate" (TAP-hjkl cursor move, SCROLL d/u, MOVE-hjkl are all Shift=fast). Having WINDOW use Shift for reverse (a) is inconsistent with other modes, so the user gets confused switching back and forth, and (b) makes resize lose its accelerate ability. After changing to "double-tap the same key to reverse": Shift returns to accelerate, reverse lands on a muscle memory that's already vim-style (double-tap), and each edge's reverse state can be tracked independently (holding k to expand the top + double-tap jj to shrink the bottom can happen at the same time). The double-tap window is 150ms (`windowReverseTapWindow`, shortened twice from the initial 300ms → 200ms → 150ms: 300ms misjudged the natural pause of "press once, glance at the result, press again to expand" as a double-tap; 200ms still had a few boundary cases; 150ms compresses the window to just above the "deliberately fast double-tap" comfort zone of 80-130ms while excluding the entire "glance then press" natural-pause zone of 250ms+). The second press must be held ("double-tap + hold"; releasing the second only shrinks one step).
+
+**HUD**: shows `WINDOW` on entering the mode.
+
+**Why a chord rather than bare `w`**: `w` is in the hint letter pool (`a s d f g e r u i o p w t n m c v`, see §4). Using a chord trigger keeps bare `w` usable as a hint label. It's also consistent with SCROLL's `Caps Lock + d`.
+
+**Why no fallback synthesized edge-drag path is kept**: the prototype originally had a fallback—when AX isn't writable, synthesize `mouseDown` at the window border's midpoint / corner and synthesize `.leftMouseDragged` each tick to push the cursor. Hitting cases like Finder Desktop ("a window in AX, but actually not a user window"), the HUD marked `WINDOW · synth-drag`, but the fallback had no effect on the Desktop either (no resize handle for OS hit-test), becoming confusing UX. After adding the title bar button gate, almost every window that passes the gate allows AX writes—the fallback's complexity is no longer worth it, removed.
+
+**Implementation notes**:
+- Trigger: pressing `w` during `HotkeyTap` F19 arm → `session.enterWindowMode()`, mimicking `Caps Lock + d → enterScroll`.
+- Focused-window resolution: `AXWindowOps.frontmostWindow()` follows the chain of `ScreenCapture.focusedWindow()` (`AXFocusedWindow` → `AXMainWindow` → `AXWindows[0]`).
+- Edge math: `top` expand conceptually = `AXPosition.y -= step, AXSize.height += step`; `bottom` expand = `AXSize.height += step`; left/right are symmetric. shrink flips the sign—each edge's sign is independently decided by `WindowController.reversedEdges`.
+- **Write order: anchored grow goes position-first, everything else goes size-first**. AX can only write one attribute at a time (unlike NSWindow's resize handle, which is atomic), and the intermediate state can be rejected by the app.
+
+  *Anchored grow* (top/left expand: `k` / `h` / `kh` / `kl` / `jh`…) goes through `tickPositionFirst`: first `writePosition` to move the origin to the target position → read back the origin the OS actually allowed (the menu bar clamps y, the left screen edge clamps x) → compute the final size from the **actual** displacement + the non-anchored edges' size contribution → `writeSize`.
+
+  *Other cases* (anchored shrink, pure bottom/right, pure pan) go through `tickSizeFirst`: first `writeSize` → read back → move the origin proportionally by actualΔ → readback → reverse clamp trim (when the origin is held by the OS, reclaim some of the size to keep the opposite edge fixed).
+
+  Gotcha: early on it was uniformly size-first, and an app like WeChat with a "right ≤ X" constraint rejected writeSize on an `h` expand (expanding left = top origin unchanged, size widened)—because the intermediate state "old origin + new bigger size" would push the right edge past X. After changing the anchored-grow path to position-first so the origin is in place first, the right edge actually doesn't move when size is written, and the app accepts it. Dragging a window with the mouse can stretch endlessly because NSWindow.resize is atomic; AX writes can't be atomic, so the write order has to work around it.
+
+- **Contribution tracking**: an anchored edge's (top/left) origin move should respond only to **its own share** of the size contribution, not the whole axis's sizeΔ. `topContribution` / `leftContribution` are maintained separately from `sizeDelta`—when `k+j` are pressed together, top contribution = +step, bottom contribution = +step, the whole sizeΔ.height = +2×step; origin.y should only -= step (the top's share), not -= 2×step. An early version used a `topActive: Bool` flag + `actualHDelta` to compute the origin move, and `k+j` would become "top up 2×step, bottom unmoved", a bug.
+- **Clamp suppression**: if an anchored edge's origin got clamped by the OS last tick (partial move), it's cached to `clampedOriginY / clampedOriginX`; next tick this edge is simply skipped, participating in neither sizeΔ nor contribution. Otherwise it would repeatedly "write origin → OS clamp → write size grows out → visually the opposite edge drifts". On `stopEdge` (keyUp) the cache is cleared so the user can re-press to retry.
+- **Chained misjudgment after a double-tap reverse**: pressing h again within 100ms after releasing hh (double-tap shrink), the original `now - lastKeyUp < 150ms` judges it as a double-tap again = reverse again = still shrinking, and the user feels "h is broken". Fix: on `stopEdge`, if the current state is reversed, clear `lastWindowEdgeKeyUp[edge]` to nil instead of refreshing it to now—the next h press gets no previous timestamp and goes through the "first time" logic (grow).
+- Double-tap detection: `VimSession.lastWindowEdgeKeyUp[edge]` stores the `CFAbsoluteTimeGetCurrent()` timestamp of each edge's last keyUp. On the next same-key keyDown, `now - last < 0.15` → this hold is marked reversed, passed to `controller.startEdge(edge, reversed: true)`. OS key-repeat doesn't mis-trigger it (key-repeat doesn't emit keyUp, so the timestamp doesn't update). On exiting WINDOW mode, `lastWindowEdgeKeyUp` is cleared to prevent reading a stale timestamp on the next entry.
+- Speed: bare = 20pt/tick, Shift = 80pt/tick (fast), Option = 5pt/tick (slow), Option > Shift priority (same as `MouseMover.moveSpeed`).
+- A soft min size of 200×120 prevents the in-memory rect from drifting too far from the actual drag (the app clamps too).
+
+---
+
+## 8. WINDOW MOVE mode key bindings
+
+Whole-window pan (no resize). It's **two independent modes** with WINDOW resize—one moves `AXPosition`, the other moves `AXPosition + AXSize`—and mixing them would instead require hanging extra modifiers on hjkl; keeping them separate is cleaner.
+
+`WindowMoveController` mirrors the `WindowController` structure: a direction set + a 60fps timer + writing `AXPosition` each tick (**writes only position**, single IPC, one fewer IPC than `writeRect`).
+
+| Key | Behavior |
+| --- | --- |
+| **Enter: `Caps Lock + m` chord** (any mode) | two gates: `hasTitleBarButton` (same as WINDOW resize) + `isMovable` (only checks that `AXPosition` is writable, looser than `isResizable`—move doesn't touch size) |
+| `h / j / k / l` (held) | pan the window in the corresponding direction (h=left / j=down / k=up / l=right, the same hjkl direction encoding as cursor / SCROLL / WINDOW resize) |
+| `Shift + hjkl` | **fast** (80pt/tick, 4×) —— fast cross-screen move |
+| `Option + hjkl` | **slow** (5pt/tick) —— fine alignment to another window/screen edge |
+| `Shift + Option + hjkl` | **Option wins → slow** (same priority as `MouseMover.moveSpeed`: a mis-pressed Shift+Option leans toward "slow" rather than "fast") |
+| simultaneous (e.g. `h+j`) | diagonal pan (down-left), the two axes' deltas stack independently |
+| conflicting pair (`h+l` or `j+k`) | naturally cancel (dx or dy sums to 0, the window doesn't move) |
 | `Esc` | exit OFF |
-| 其它键 | 吞掉 |
-| `Caps Lock`（单击 / + d / + w / + m chord）| 立即切到对应 mode。`teardownCurrentMode` 先停 timer + 关 overlay 再切 |
+| Other keys | swallowed |
+| `Caps Lock` (single click / + d / + w / + m chord) | immediately switch to the corresponding mode. `teardownCurrentMode` first stops the timer + closes the overlay before switching |
 
-**视觉**：跟 WINDOW resize 共用 `WindowOpOverlay`，但 `show(rect:withChips:)` 这里传 `false`——**蓝色 border 照画，4 个边缘 chip 不画**。原因：resize 的 chip（`↑k / ↓j / ←h / →l`）暗示"这个 border 往那边推"，绑边语义；move 里 hjkl 是方向、不绑边，挂同样的 chip 反而让人误以为是 resize。border + HUD `MOVE` 标签足够，hjkl 方向跟其它 mode 一致不用每次重学。
+**Visual**: shares `WindowOpOverlay` with WINDOW resize, but here `show(rect:withChips:)` passes `false`—**the blue border is still drawn, the 4 edge chips are not**. The reason: resize's chips (`↑k / ↓j / ←h / →l`) imply "push this border that way", an edge-bound semantics; in move, hjkl are directions, not edge-bound, and hanging the same chips would instead make people think it's resize. The border + the HUD `MOVE` label are enough, and the hjkl directions are consistent with other modes so there's no need to relearn each time.
 
-**HUD**：进 mode 时显示 `MOVE`。
+**HUD**: shows `MOVE` on entering the mode.
 
-**为什么用 chord 而非 bare `m`**：`m` 在 hint 字母池里（`a s d f g e r u i o p w t n m c v`，见 §4）。chord 触发，bare `m` 仍是 hint label。也跟 SCROLL `Caps Lock + d` / WINDOW resize `Caps Lock + w` 一致。
+**Why a chord rather than bare `m`**: `m` is in the hint letter pool (`a s d f g e r u i o p w t n m c v`, see §4). A chord trigger keeps bare `m` as a hint label. It's also consistent with SCROLL's `Caps Lock + d` / WINDOW resize's `Caps Lock + w`.
 
-**实现要点**：
-- 触发：`HotkeyTap` F19 arm 期间按 `m` → `session.enterWindowMove()`。
-- `AXWindowOps` 加 `isMovable`（只 probe `AXPosition` settable）+ `writePosition`（单 IPC 只写 origin）。
-- 控制器：`WindowMoveController.swift`，~70 行。`enum Direction { left, right, up, down }` + `Set<Direction>` 追踪按住的方向。tick 里每 axis 独立加 step 算 `dx, dy`。
-- Mode 互斥：MOVE 时其它 mode 触发（`enterWindowMode` / `enterScroll` / `enterDrag` / `handleTriggerTap`）都 guard 掉，必须先 Esc。
+**Implementation notes**:
+- Trigger: pressing `m` during `HotkeyTap` F19 arm → `session.enterWindowMove()`.
+- `AXWindowOps` adds `isMovable` (only probes `AXPosition` settable) + `writePosition` (single IPC, writes only origin).
+- Controller: `WindowMoveController.swift`, ~70 lines. `enum Direction { left, right, up, down }` + `Set<Direction>` tracks the held directions. The tick adds the step per axis independently to compute `dx, dy`.
+- Mode mutual exclusion: while in MOVE, other mode triggers (`enterWindowMode` / `enterScroll` / `enterDrag` / `handleTriggerTap`) are all guarded out, you must Esc first.
 
 ---
 
-## 9. 命令面板键位
+## 9. Command palette key bindings
 
-| 键 | 行为 |
+| Key | Behavior |
 | --- | --- |
-| 字母 a–z | 追加到 buffer |
-| `Backspace` on non-empty | 删一个字符 |
-| `Backspace` on empty | 关闭面板，回到底层 mode |
-| Caps Lock (bare) | 关闭面板，回到底层 mode（跟空 buffer + Backspace 等效） |
-| `Return` | 执行命令 |
-| `Esc` | deactivate Mouseless（回 OFF，进程仍在 menu bar） |
+| letter a–z | append to buffer |
+| `Backspace` on non-empty | delete one character |
+| `Backspace` on empty | close the palette, return to the underlying mode |
+| Caps Lock (bare) | close the palette, return to the underlying mode (equivalent to empty buffer + Backspace) |
+| `Return` | execute the command |
+| `Esc` | deactivate Mouseless (back to OFF, the process is still in the menu bar) |
 
-注意面板**只接字母**（`letterChar(for:)` 显式只列 a–z）。数字 / 符号会被忽略。原因：当前未来的命令都是
-字母短串（`st`、`dr`），让用户少思考"这个键是不是命令"。
+Note the palette **only accepts letters** (`letterChar(for:)` explicitly lists only a–z). Digits / symbols are ignored. The reason: all current and future commands are
+short letter strings (`st`, `dr`), to make the user think less about "is this key a command".
 
-### 当前命令
+### Current commands
 
-| 命令 | 行为 |
+| Command | Behavior |
 | --- | --- |
-| 任何当前未实现的字母组合 | buffer 清空，**面板保持打开**，让用户继续输 |
+| any currently-unimplemented letter combination | buffer is cleared, **the palette stays open**, letting the user keep typing |
 
-故意**没有 `:q` 命令**——Esc 已经 deactivate，quit 进程是 menu bar 行为，跟 hint mode 里的命令面板不是一回事（见 §3.1 三层级）。把"退进程"放进面板会模糊"deactivate vs quit"的界限。
+There is deliberately **no `:q` command**—Esc already deactivates, and quitting the process is a menu bar behavior, a different matter from the command palette inside hint mode (see the three levels in §3.1). Putting "quit process" into the palette would blur the line between "deactivate vs quit".
 
-未来 mode 通过 `executeCommand` 接入：
+Future modes are wired in via `executeCommand`:
 ```swift
 case "st": switchTo(.selectText(...))
 ```
 
-（不需要 `dr` 命令——DRAG 已经收编成 TAP 子状态，bare `v` 进入；palette 不再为子状态留口子。）
+(No `dr` command needed—DRAG has been folded into a TAP sub-state, entered with bare `v`; the palette no longer keeps an opening for sub-states.)
 
 ---
 
-## 10. KeyCode 常量
+## 10. KeyCode constants
 
-`KeyCode.swift` 里的是 `kVK_ANSI_*`，**物理键位**。Dvorak / 国际键盘上字母位会错。
-迁移路径：用 `UCKeyTranslate` 或 `CGEventKeyboardGetUnicodeString` 把 keyCode + flags → 字符再匹配。
-TODO 已经留在 `KeyCode.swift` 头部注释。
+Those in `KeyCode.swift` are `kVK_ANSI_*`, **physical key positions**. On Dvorak / international keyboards the letter positions will be wrong.
+Migration path: use `UCKeyTranslate` or `CGEventKeyboardGetUnicodeString` to turn keyCode + flags → a character and then match.
+The TODO is already left in the header comment of `KeyCode.swift`.
 
-主要常量：
+Main constants:
 
-| 名字 | 码 | 说明 |
+| Name | Code | Description |
 | --- | --- | --- |
-| `f19` | 80 | **触发键**——物理 Caps Lock 经 hidutil 重映射后到达这里 |
-| `grave` | 50 | `` ` `` / `~` —— 保留常量，目前没用作触发 |
-| `escape` | 53 | 退出键 |
-| `semicolon` | 41 | `;` —— Shift 后是 `:`，打开面板 |
-| `quote` | 39 | `'` —— TAP normal 里 toggle move-only arm（见 §4.3.5）|
-| `return` | 36 | 执行命令 |
+| `f19` | 80 | **the trigger key**—physical Caps Lock arrives here after being remapped via hidutil |
+| `grave` | 50 | `` ` `` / `~` —— a reserved constant, currently not used as a trigger |
+| `escape` | 53 | the exit key |
+| `semicolon` | 41 | `;` —— after Shift it's `:`, opens the palette |
+| `quote` | 39 | `'` —— in TAP normal toggles move-only arm (see §4.3.5) |
+| `return` | 36 | execute the command |
 | `delete` | 51 | Backspace |
-| `tab` | 48 | 暂未用 |
-| `space` | 49 | 暂未用 |
-| `a..l` | 0,1,2,3,5,4,38,40,37 | home row 9 键（注意 g/h 顺序：g=5, h=4）；`h/j/k/l` = hjkl 移光标，`a s d f g` = hint 字母 |
-| `i` | 34 | hint 字母（上排，非 home row） |
-| `q..p` | 12,13,14,15,17,16,32,34,31,35 | 上排（`e r u i o p w t` 现作 hint 字母） |
-| `z..m` | 6,7,8,9,11,45,46 | 下排（`c=8 n=45 m=46` 现作 hint 字母）|
-| `1..0` | 18,19,20,21,23,22,26,28,25,29 | 数字（注意 5=23, 6=22；7=26, 9=25） |
-| `arrow*` | 123–126 | left/right/down/up，给未来 select-text mode |
+| `tab` | 48 | unused for now |
+| `space` | 49 | unused for now |
+| `a..l` | 0,1,2,3,5,4,38,40,37 | the 9 home row keys (note the g/h order: g=5, h=4); `h/j/k/l` = hjkl cursor move, `a s d f g` = hint letters |
+| `i` | 34 | hint letter (top row, not home row) |
+| `q..p` | 12,13,14,15,17,16,32,34,31,35 | top row (`e r u i o p w t` now serve as hint letters) |
+| `z..m` | 6,7,8,9,11,45,46 | bottom row (`c=8 n=45 m=46` now serve as hint letters) |
+| `1..0` | 18,19,20,21,23,22,26,28,25,29 | digits (note 5=23, 6=22; 7=26, 9=25) |
+| `arrow*` | 123–126 | left/right/down/up, for a future select-text mode |
 
-**键位用途速查**（TAP mode）：`h/j/k/l` = hjkl 移光标；hint 字母 = `a s d f g e r u i w t n m`（13 个，不含 hjkl/v/c/o/p）；`v` = bare 进 DRAG 子状态；`c` = bare 点击（`cc` 双击 / `Shift+c` 右键）；`/` = bare 进 search 子状态；`Enter` = 放行给 app；数字 = Dock hint / SCROLL 切区域。
+**Key usage quick reference** (TAP mode): `h/j/k/l` = hjkl cursor move; hint letters = `a s d f g e r u i w t n m` (13, excluding hjkl/v/c/o/p); `v` = bare to enter the DRAG sub-state; `c` = bare click (`cc` double-click / `Shift+c` right-click); `/` = bare to enter the search sub-state; `Enter` = pass through to the app; digits = Dock hint / SCROLL area switch.
 
 ---
 
-## 11. 修饰键策略汇总
+## 11. Modifier key strategy summary
 
-| 键 / 修饰键 | 在任何 mode 内的行为 | 为什么 |
+| Key / modifier | Behavior in any mode | Why |
 | --- | --- | --- |
-| `Cmd` | 整个事件放行 | 保 Spotlight / Cmd+Tab / 截屏 / 关窗口等 |
-| `Ctrl` | 整个事件放行 | 保 Mission Control / Ctrl+↑ 等；也因为 power user 把 Ctrl+hjkl 当方向键 |
-| `↑ / ↓ / ← / →`（任意 mode、任意修饰键组合）| 整个事件放行 | Mouseless 用 hjkl 做自己的光标 / 滚动 / 窗口移动；箭头键让位给焦点 app 的原生导航（滚列表、移文本 caret、走菜单等）。如果不放行，sticky TAP 里就没法用箭头翻页 |
-| `Enter`（TAP normal / SCROLL）| 整个事件放行 | Enter 在 app 里经常有自己的语义——确认菜单、提交表单、决定选项。配合上面的箭头键放行，组成"↑↓ nav 菜单 + Enter 选中"完整闭环。原 Enter 点击的功能挪到 bare `c`（见 §4 / §5）。 dragging 子状态 / search-typing / palette 仍内部用 Enter（drop / kickoff OCR / execute），那些场景跟 app 的 Enter 语义没冲突 |
-| `Shift` | 消费 —— hint 末位字符 / `c` = **右键**（按住）；移光标键(hjkl) = 加速；hjkl 双击 = 跳整屏（否则 1/2）。**双击点击不靠 Shift**，统一是 `cc`（§4.4） | Shift 潜意识 = "另一种点击" = 右键；双击让给独立的 `cc` 手势 |
-| `Option` | 消费 —— **点击动作已不再用 Option**（空出来留作他用）；只剩移光标键 = 精细慢速 | 旧"Option = 右键"已废（够不顺手）；移光标非 hint 字母，不冲突 |
-| `'`（TAP normal）| 消费 —— toggle move-only arm（下一个 hint pick warp 光标不点击，见 §4.3.5）| Cmd/Ctrl 跟系统冲突、Shift/Option 占了，`'` 是非修饰键的轻量前缀 |
+| `Cmd` | the whole event passes through | preserves Spotlight / Cmd+Tab / screenshot / close window, etc. |
+| `Ctrl` | the whole event passes through | preserves Mission Control / Ctrl+↑, etc.; also because power users use Ctrl+hjkl as arrow keys |
+| `↑ / ↓ / ← / →` (any mode, any modifier combination) | the whole event passes through | Mouseless uses hjkl for its own cursor / scroll / window move; the arrow keys yield to the focused app's native navigation (scroll a list, move the text caret, walk a menu, etc.). If not passed through, you couldn't page through with the arrow keys in sticky TAP |
+| `Enter` (TAP normal / SCROLL) | the whole event passes through | Enter often has its own semantics inside an app—confirm a menu, submit a form, decide an option. Combined with the arrow-key pass-through above, it forms the complete loop of "↑↓ nav a menu + Enter to select". The original Enter-click function moved to bare `c` (see §4 / §5). The dragging sub-state / search-typing / palette still use Enter internally (drop / kickoff OCR / execute), and those scenarios don't conflict with the app's Enter semantics |
+| `Shift` | consumed —— hint last character / `c` = **right-click** (held); cursor-move keys (hjkl) = accelerate; hjkl double-tap = jump a whole screen (otherwise 1/2). **Double-click clicking doesn't rely on Shift**, it's uniformly `cc` (§4.4) | Shift subconsciously = "another kind of click" = right-click; double-click is given to the independent `cc` gesture |
+| `Option` | consumed —— **click actions no longer use Option** (freed up for other uses); only the cursor-move keys = fine slow speed | the old "Option = right-click" is abolished (not comfortable enough); cursor move isn't a hint letter, no conflict |
+| `'` (TAP normal) | consumed —— toggle move-only arm (the next hint pick warps the cursor without clicking, see §4.3.5) | Cmd/Ctrl conflict with the system, Shift/Option are taken, and `'` is a lightweight non-modifier prefix |
 
-放行 vs 消费在 `VimSession.handle()` 顶部判断：先 `flags.intersection([.maskCommand, .maskControl]).isEmpty` 排掉系统快捷键，再独立判一次 keyCode 是不是箭头键（任意修饰组合都放行）。hjkl 移动额外要求不含 Cmd/Ctrl/Option（只允许 Shift 加速）。
+Pass-through vs consume is decided at the top of `VimSession.handle()`: first `flags.intersection([.maskCommand, .maskControl]).isEmpty` rules out system shortcuts, then independently checks once whether the keyCode is an arrow key (any modifier combination passes through). hjkl movement additionally requires no Cmd/Ctrl/Option (only Shift to accelerate is allowed).
 
 ---
 
-## 12. 新 mode 接入路径
+## 12. New mode wiring path
 
-加一个新 mode（例如 select-text）的最小改动：
+The minimal changes to add a new mode (e.g. select-text):
 
-1. **`Mode` enum 加 case**：`case selectText(SelectTextMode)`。
-2. **`handleMode` switch 加分支**：dispatch 到 `handleSelectText(...)`。
-3. **写 `SelectTextMode` 类**：仿 `HintMode` 的 `activate / deactivate / handle` 接口。
-4. **`executeCommand` 接命令**：`case "st": switchTo(.selectText(SelectTextMode()))`。
-5. **mode 切换函数**（如果还没有）：
+1. **Add a case to the `Mode` enum**: `case selectText(SelectTextMode)`.
+2. **Add a branch to the `handleMode` switch**: dispatch to `handleSelectText(...)`.
+3. **Write the `SelectTextMode` class**: mimic `HintMode`'s `activate / deactivate / handle` interface.
+4. **Wire the command into `executeCommand`**: `case "st": switchTo(.selectText(SelectTextMode()))`.
+5. **A mode-switch function** (if not already present):
    ```swift
    private func switchTo(_ newMode: Mode) {
        if case .tap(let h) = self.mode { h.deactivate() }
@@ -678,6 +678,6 @@ TODO 已经留在 `KeyCode.swift` 头部注释。
        renderModeHUD()
    }
    ```
-6. **HUD 文案**：`renderModeHUD` 的 switch 加分支。
+6. **HUD text**: add a branch to the `renderModeHUD` switch.
 
-palette 不需要改，因为它和 mode 正交。
+The palette needs no changes, because it's orthogonal to mode.

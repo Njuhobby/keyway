@@ -1,111 +1,111 @@
 # OmniParser Fallback — Design Notes
 
-视觉路径接进 Mouseless 的设计草稿。**不是实现计划**，是一份"我们到目前为止知道什么、还要决定什么"的备忘录。
+A design draft for wiring the visual path into Mouseless. **Not an implementation plan** — a memo of "what we know so far and what we still have to decide."
 
-**核心定位**：AX 是主路径。AX 快（稳态 ~50ms）、信息量大（role、enabled、action 都给）。OmniParser **只在 AX 显然不够时兜底**。fall-through，**不并行**。理由见 §4。
+**Core positioning**: AX is the primary path. AX is fast (steady state ~50ms) and information-rich (it gives you role, enabled, action). OmniParser is **only a fallback for when AX is clearly insufficient**. Fall-through, **not parallel**. Rationale in §4.
 
-PoC 代码在仓库**外**：`~/Desktop/mouseless-omniparser-poc/`（throwaway，不跟踪）。
-
----
-
-## 1. 起源 / 现状
-
-`hint-discovery.md` §5 留了一个 known gap：destructive click 后 ~500ms 扫描尖峰，根因是目标 app 的 AX server 在 cleanup 期间 per-IPC 延迟暴涨。spec 把"OmniParser 视觉路径"作为长远方向：脱离 AX server，扫描跟它的内部状态解耦，尖峰自然消失。
-
-同样动机的还有：**Electron / 复杂 web app 的 AX 兼容性**（SPECS.md known gap #2）。WeChat 的文件列表 / Wrike 的 SPA 这类 app，AX 大量元素是 `AXGroup` 无 action 无 label，hint 路径直接给不出来。视觉路径绕开。
-
-PoC 目的：先验证 OmniParser 在 Apple Silicon 上的延迟和召回是否足以撑起这条路径，**再决定**要不要正经实现。
+The PoC code lives **outside** the repo: `~/Desktop/mouseless-omniparser-poc/` (throwaway, untracked).
 
 ---
 
-## 2. PoC 结果
+## 1. Origin / Current State
 
-环境：`uv` + Python 3.11 + torch 2.11 (MPS) + ultralytics 8.4 + transformers 4.57，OmniParser-v2.0 detector (`microsoft/OmniParser-v2.0` HF repo, `icon_detect/model.pt`).
+`hint-discovery.md` §5 left a known gap: the ~500ms scan spike after a destructive click, whose root cause is that the target app's AX server sees its per-IPC latency blow up during cleanup. The spec held up the "OmniParser visual path" as a long-term direction: detached from the AX server, the scan is decoupled from its internal state, so the spike disappears naturally.
 
-三张全屏截图（2992×1934）detection-only 数据：
+There's also a same-motivation case: **AX compatibility for Electron / complex web apps** (SPECS.md known gap #2). Apps like WeChat's file list / Wrike's SPA have a large number of AX elements that are `AXGroup` with no action and no label, so the hint path simply can't produce anything. The visual path routes around it.
 
-| 截图 | 内容 | boxes | detect p50 | detect p90 |
+PoC goal: first verify whether OmniParser's latency and recall on Apple Silicon are enough to carry this path, **then decide** whether to do a proper implementation.
+
+---
+
+## 2. PoC Results
+
+Environment: `uv` + Python 3.11 + torch 2.11 (MPS) + ultralytics 8.4 + transformers 4.57, OmniParser-v2.0 detector (`microsoft/OmniParser-v2.0` HF repo, `icon_detect/model.pt`).
+
+Detection-only data for three full-screen screenshots (2992×1934):
+
+| Screenshot | Content | boxes | detect p50 | detect p90 |
 | --- | --- | --- | --- | --- |
-| `fullscreen.png` | Clash Verge 设置 + dock + menu bar 混合 | 143 | 142.3 ms | 144.1 ms |
-| `wechat.png` | WeChat 聊天列表 + 桌面 + status bar | 174 | 141.1 ms | 146.3 ms |
-| `wechat2.png` | Chrome + Wrike SPA（实际是个 web 黑洞） | 177 | 111.1 ms | 118.5 ms |
+| `fullscreen.png` | Clash Verge settings + dock + menu bar mixed | 143 | 142.3 ms | 144.1 ms |
+| `wechat.png` | WeChat chat list + desktop + status bar | 174 | 141.1 ms | 146.3 ms |
+| `wechat2.png` | Chrome + Wrike SPA (actually a web black hole) | 177 | 111.1 ms | 118.5 ms |
 
-**关键观察**：
+**Key observations**:
 
-- **延迟稳态 110–145 ms**，远低于 spec §5 设的 300ms 上限。p90 - p50 < 10ms，抖动几乎不存在。
-- **召回明显高于 AX**。Wrike 的 inbox 卡片、task detail 字段、Activity feed 每条事件、Wrike 左侧 ~25 项导航——这些在 AX 树里大概率是一片 `AXGroup`，OmniParser 一次全捞回来。
-- 测的 WeChat 文件列表那张（之前讨论过的 AX = 0 hint 的视图）—— PoC 期间该截图意外丢失，没拿到正式数据，但 wechat.png 同来源 app 的高召回已经印证。
-- **冷启动 detector load ~170s**（首次下权重），后续启动 1s。生产环境模型常驻，冷启动成本一次性。
+- **Steady-state latency 110–145 ms**, well below the 300ms ceiling set in spec §5. p90 - p50 < 10ms; jitter is practically nonexistent.
+- **Recall clearly higher than AX**. Wrike's inbox cards, task detail fields, every event in the Activity feed, Wrike's ~25 left-nav items — these are very likely a sea of `AXGroup` in the AX tree, and OmniParser scoops them all back in one shot.
+- The WeChat file-list screenshot we tested (the AX = 0 hint view discussed earlier) — that screenshot was accidentally lost during the PoC, so we didn't get formal data, but the high recall on wechat.png from the same source app already corroborates it.
+- **Cold-start detector load ~170s** (first-time weight download), subsequent startups 1s. In production the model is resident, so cold start is a one-time cost.
 
-结论按 spec §5 决策树：**OmniParser 路径技术上 viable，值得做正经集成**——作为 fallback，不是替代。
+Conclusion per the spec §5 decision tree: **the OmniParser path is technically viable and worth a proper integration** — as a fallback, not a replacement.
 
-PoC overlay 图存在 `~/Desktop/mouseless-omniparser-poc/screenshots/*_overlay.png`，是判断召回的视觉证据。
-
----
-
-## 3. Captioner：尝试过，搁置
-
-`OmniParser-v2.0` 在 detector 之外还配了一个基于 Florence-2 的 **icon captioner**（每个 box 输出一句自然语言描述，如 "Send button" / "User avatar with name"）。**试了，三层版本不兼容连环坑**：
-
-1. `transformers==5.x` 把 `forced_bos_token_id` 从 config 移走 → Florence-2 community modeling 代码访问失败
-2. 降到 4.57，又撞 `_supports_sdpa` 没设（Florence-2 代码 2024-10 写的，早于 SDPA 标准化）
-3. 加 `attn_implementation="eager"` 绕开，又撞 `past_key_values[0][0]` 是 `None`（KV cache 接口在 transformers 4.45+ 改成 `Cache` 对象，老代码仍按 tuple 索引）
-
-**之所以放弃**（而不是继续降 transformers 到 ~4.49 把所有坑填了）：
-
-- **Mouseless 不需要语义 caption**：hint label 是我们**自己分配**的两字母编码（`as`、`af`...），不是自然语言。captioner 输出零用于画 hint 这一步。
-- captioner 唯一能加 value 的场景：根据 box 推断"这是 button / link / 文本框"，从而在 OmniParser 路径下选择对应的合成动作。**但 fall-through 路径下，OmniParser 只在 AX 不够时启用**——AX 够用时 role 信号已经从 AX 拿到；AX 不够（黑洞 app）时统一合成 mouse click 就好，不需要再分类。
-- 推断 caption 延迟：Florence-2 base 在 MPS 上自回归 ~20 token 估每 box 50-200ms。全屏 100+ box 一次 caption 是几秒级，**根本进不了实时路径**。哪怕只 caption 选中那一个（commit 后），那时点击已经发生，太晚。
-
-未来如果真要用 caption（比如做 box "可点性"二次过滤），用 **OCR 文本探针**（easyOCR / 系统 Vision framework）比 VLM caption 快一个数量级。**但是否真有用，目前是臆测**，见 §5.2。
+The PoC overlay images live in `~/Desktop/mouseless-omniparser-poc/screenshots/*_overlay.png`; they're the visual evidence for judging recall.
 
 ---
 
-## 4. OP-default：OmniParser 主，AX 在 whitelist 上兜底
+## 3. Captioner: Tried It, Shelved It
 
-> **本节经过 3 次重写**。先是"AX 主、OP 黑洞兜底"（fall-through），然后"框架探测路由"，最后落到当前的"OP-default + AX whitelist"。每次推翻的原因都记在 §4.4 末尾的「历史决策」。
+`OmniParser-v2.0` ships, alongside the detector, a Florence-2-based **icon captioner** (it emits a natural-language description per box, e.g. "Send button" / "User avatar with name"). **Tried it, hit a three-layer chain of version-incompatibility gotchas**:
 
-### 4.1 为什么不并行 fusion
+1. `transformers==5.x` moved `forced_bos_token_id` out of config → the Florence-2 community modeling code fails to access it
+2. Downgrading to 4.57, hit `_supports_sdpa` not being set (the Florence-2 code was written 2024-10, predating SDPA standardization)
+3. Adding `attn_implementation="eager"` to route around it, hit `past_key_values[0][0]` being `None` (the KV cache interface changed in transformers 4.45+ to a `Cache` object, but the old code still indexes it as a tuple)
 
-之前考虑过"并行 + IoU fusion"——两条路径都跑、按 IoU 合并候选。**否决了**：并行 fusion 引入了 IoU 合并、两路结果协调的复杂度，**而对任何单一 app 来说只有一条路径是真正信息源**（要么 AX 信息全、要么 AX 信息空）——fusion 拿不到对应价值。
+**Why we gave up** (instead of continuing to downgrade transformers to ~4.49 and filling all the holes):
 
-### 4.1a 也不"AX-default with OP fallback"
+- **Mouseless doesn't need semantic captions**: the hint label is a two-letter code **we assign ourselves** (`as`, `af`...), not natural language. The captioner output contributes zero to the step of drawing a hint.
+- The only scenario where the captioner could add value: inferring "this is a button / link / text field" from the box, so that under the OmniParser path you can pick the corresponding synthesized action. **But under the fall-through path, OmniParser is only enabled when AX is insufficient** — when AX is good enough, the role signal already came from AX; when AX is insufficient (a black-hole app), just synthesize a uniform mouse click, no further classification needed.
+- Caption inference latency: Florence-2 base autoregressing ~20 tokens on MPS is roughly 50-200ms per box. Captioning 100+ boxes full-screen at once is in the seconds range — **it simply can't enter the real-time path**. Even captioning just the one selected box (after commit), by then the click has already happened, too late.
 
-中间一版方案是 AX-default：所有 app 先跑 AX，框架探测说是 AX-bad 才补 OP。这一版被 WeChat 击破——WeChat 是 native AppKit（bundle 是 AppKit、`AXTable` `AXRow` `AXColumn` 等标准 widget 都在 AX 树里），但**聊天消息气泡是自定义 NSView，AX 树里没有**。AX 焦点 walk 在 WeChat 上返回 ~58 个候选（够多），却**漏掉了用户最想点的东西**（消息、文件、表情）。
+If we ever truly need captions in the future (e.g. for a secondary "clickability" filter on boxes), use an **OCR text probe** (easyOCR / the system Vision framework), which is an order of magnitude faster than a VLM caption. **But whether it's actually useful is, for now, speculation** — see §5.2.
 
-由此推出：**framework ≠ AX 质量**。同样模式的 app 还有 QQ / 钉钉 / 飞书 / 网易系——一大类「**native AppKit 但 AX 黑洞**」根本无法通过 bundle 探测识别。Blacklist 路径会无限膨胀。
+---
 
-详见 §4.4 末尾的"历史决策"。
+## 4. OP-default: OmniParser primary, AX as fallback on a whitelist
 
-### 4.2 Fall-through 流程
+> **This section has been rewritten 3 times**. First it was "AX primary, OP black-hole fallback" (fall-through), then "framework-detection routing," and finally it landed on the current "OP-default + AX whitelist." The reason each one was overturned is recorded in the "historical decisions" at the end of §4.4.
 
-#### AX walk 不是一个动作，是 4 个独立来源
+### 4.1 Why not parallel fusion
 
-`HintMode.collectAll()` 当前同时跑 4 个 AX 来源：
+We previously considered "parallel + IoU fusion" — run both paths, merge candidates by IoU. **Vetoed**: parallel fusion introduces the complexity of IoU merging and reconciling the two sets of results, **while for any single app only one path is the real information source** (either AX is information-complete, or AX is information-empty) — fusion can't capture the corresponding value.
 
-| 来源 | AX 表现 | OP 能替代吗 | 备注 |
+### 4.1a Also not "AX-default with OP fallback"
+
+An intermediate version was AX-default: every app runs AX first, and OP only supplements when framework detection says it's AX-bad. This version was broken by WeChat — WeChat is native AppKit (its bundle is AppKit, and standard widgets like `AXTable` `AXRow` `AXColumn` are all in the AX tree), but **the chat message bubbles are custom NSViews, not in the AX tree**. The AX focus walk on WeChat returns ~58 candidates (plenty), yet **misses exactly what the user most wants to click** (messages, files, emoji).
+
+This leads to: **framework ≠ AX quality**. Apps in the same pattern include QQ / DingTalk / Feishu / NetEase's family — a whole class of "**native AppKit but AX black hole**" that simply cannot be identified by bundle detection. The blacklist path would balloon without end.
+
+See the "historical decisions" at the end of §4.4 for details.
+
+### 4.2 Fall-through Flow
+
+#### The AX walk is not one action, it's 4 independent sources
+
+`HintMode.collectAll()` currently runs 4 AX sources simultaneously:
+
+| Source | AX behavior | Can OP replace it? | Notes |
 | --- | --- | --- | --- |
-| **焦点 app 子元素树**（窗口内按钮/列表项等） | Electron/WebContent/Catalyst 上烂 | ✅ 可以——OP 截焦点窗口看到的就是这一层 | 这是**唯一**需要 OP 兜底的部分 |
-| **Dock items** | 永远好（苹果原生 AX）| ❌ 不行——dock 不在焦点窗口内，OP 截图看不到 | 永远 AX 提供 |
-| **焦点 app 的 AXMenuBar** | 永远好（AppKit/SwiftUI 渲染）| ❌ 同上，菜单栏不在焦点窗口内 | 永远 AX 提供 |
-| **Menu bar extras**（status icons） | 永远好（苹果原生 AX）| ❌ 同上 | 永远 AX 提供 |
+| **Focused app's child element tree** (in-window buttons / list items etc.) | Bad on Electron/WebContent/Catalyst | ✅ Yes — what OP captures from the focused window is exactly this layer | This is the **only** part that needs OP fallback |
+| **Dock items** | Always good (Apple's native AX) | ❌ No — the dock isn't inside the focused window, OP's screenshot can't see it | Always provided by AX |
+| **Focused app's AXMenuBar** | Always good (AppKit/SwiftUI rendered) | ❌ Same as above, the menu bar isn't inside the focused window | Always provided by AX |
+| **Menu bar extras** (status icons) | Always good (Apple's native AX) | ❌ Same as above | Always provided by AX |
 
-**关键洞察**：OP 路径**只替代第一行**。其他 3 个来源在 OP 路径下**继续保留 AX walk**——它们既快（dock + extras + menubar 合计 ~50ms）又准（苹果原生 100% 覆盖），而且 OP 物理上看不到（截图只覆盖焦点窗口）。
+**Key insight**: the OP path **only replaces the first row**. The other 3 sources **keep doing the AX walk** under the OP path — they're both fast (dock + extras + menubar total ~50ms) and accurate (Apple-native, 100% coverage), and OP physically can't see them (the screenshot only covers the focused window).
 
-#### 完整流程
+#### Full flow
 
 ```
 collectAll:
-    # 永远跑（OP 看不到这 3 个来源——dock/menubar/extras 不在焦点窗口内）
+    # always run (OP can't see these 3 sources — dock/menubar/extras aren't inside the focused window)
     dock_targets       = AX walk: Dock                       // ~6ms
     menubar_targets    = AX walk: focused app's AXMenuBar    // ~7ms
     extras_targets     = AX walk: menu extras                // ~44ms
 
-    # 焦点 app 子元素树：OP-default，少数 app 走 AX
+    # focused app's child element tree: OP-default, a few apps go AX
     if app.bundleID in AX_FOCUSED_WHITELIST:
         focused_targets = AX walk: focused app children      // ~150-200ms
     else:
-        # 默认路径——任何不在 whitelist 里的 app
+        # default path — any app not in the whitelist
         screenshot      = capture focused window             // ~60ms warm
         visual_boxes    = OmniParser detect(screenshot)      // ~30ms
         focused_targets = apply_baseline_filters(visual_boxes)   // §5.1, ~5ms
@@ -113,11 +113,11 @@ collectAll:
     return dock_targets ∪ menubar_targets ∪ extras_targets ∪ focused_targets
 ```
 
-**`AX_FOCUSED_WHITELIST`** 见 `Sources/Mouseless/AppRegistry.swift`。初始内容：Apple 自家 AppKit app（Finder、Mail、Safari、Pages、Xcode...），10-15 条。第三方 app 必须经过实测验证 AX 覆盖好才能进。
+**`AX_FOCUSED_WHITELIST`** is in `Sources/Mouseless/AppRegistry.swift`. Initial contents: Apple's own AppKit apps (Finder, Mail, Safari, Pages, Xcode...), 10-15 entries. A third-party app must be empirically verified to have good AX coverage before it gets in.
 
-#### 延迟分析（M3 Max，实测数）
+#### Latency analysis (M3 Max, measured numbers)
 
-**Whitelist 路径**（Finder / Mail / Xcode / ... 这种 AX 优秀的）：
+**Whitelist path** (Finder / Mail / Xcode / ... the AX-excellent ones):
 
 ```
 thread A: dock + menubar + extras AX walk    ~50ms
@@ -126,7 +126,7 @@ thread B: AX walk focused app subtree         150-200ms
 user-facing = max(A, B) = 150-200ms
 ```
 
-**OP-default 路径**（WeChat / Slack / VS Code / Tauri app / 任何不在 whitelist 的）：
+**OP-default path** (WeChat / Slack / VS Code / Tauri apps / anything not in the whitelist):
 
 ```
 thread A: dock + menubar + extras AX walk    ~50ms
@@ -135,31 +135,31 @@ thread B: screencap + OP infer + filter      60 + 30 + 5 = 95ms warm
 user-facing = max(A, B) = ~95ms
 ```
 
-**反直觉**：OP-default 比 whitelist 路径还**更快**——因为 AX 焦点 walk（150-200ms）是 Mouseless 最重的操作，OP 取代它后 wall-clock 反而下降。AX walk 的速度优势其实早被现代 ScreenCaptureKit + CoreML on Metal GPU 抹平了（详见 P1 spike `omniparser-coreml-spike` 的 29ms 推理数据 + P2 `ScreenCapture.swift` 的 60ms warm screencap）。
+**Counterintuitive**: OP-default is **even faster** than the whitelist path — because the AX focus walk (150-200ms) is Mouseless's heaviest operation, and once OP replaces it, wall-clock actually drops. The AX walk's speed advantage was in fact long since erased by modern ScreenCaptureKit + CoreML on Metal GPU (see the 29ms inference numbers from the P1 spike `omniparser-coreml-spike` + the 60ms warm screencap from P2's `ScreenCapture.swift`).
 
-Whitelist 在性能上**只是相同/略劣**，它存在的真正理由是别的：
-- 不依赖 Screen Recording 权限（仅对真正不想授权的用户有意义）
-- AX 元素携带 role / label / state，未来 mode 扩展（selectText、drag）可能用得到
-- AX click 精度 100%（box 中心一定可点），不需要 §4.6 的 OCR refiner
+The whitelist is, performance-wise, **only equal/slightly worse**; the real reasons for its existence are different:
+- Doesn't depend on the Screen Recording permission (only meaningful to users who genuinely don't want to grant it)
+- AX elements carry role / label / state, which future mode expansions (selectText, drag) might use
+- AX click precision is 100% (the box center is always clickable), so it doesn't need the OCR refiner of §4.6
 
-权衡后选 OP-default 是因为：**universal coverage + 简单决策（一个 set lookup） + 大多数 app 上更快**。Whitelist 的两项优势对当前 hint mode 实际用不上，未来需要再扩展。
+After weighing it, we chose OP-default because: **universal coverage + simple decision (one set lookup) + faster on most apps**. The whitelist's two advantages aren't actually used by the current hint mode; they're for future expansion if needed.
 
-### 4.3 每类目标的 commit 行为
+### 4.3 Commit behavior per target class
 
-| 来源 | sourceWindow | commit 时怎么点 |
+| Source | sourceWindow | how to click on commit |
 | --- | --- | --- |
-| AX target | 有 | 合成 mouse event 到 rect 中心（见 `hint-rendering.md` §3——AX action 路径已废，统一走合成） |
-| OmniParser-only target | 无 | 合成 mouse event 到 box 中心（见 §4.6 含 OCR refiner） |
+| AX target | yes | Synthesize a mouse event to the rect center (see `hint-rendering.md` §3 — the AX action path is deprecated, everything goes through synthesis) |
+| OmniParser-only target | no | Synthesize a mouse event to the box center (see §4.6 with the OCR refiner) |
 
-两条路径 commit 机制**完全统一**，区别只在 click point 怎么算（AX 有现成 rect；OP 要 OCR refiner 处理容器嵌套问题）。
+The commit mechanism for the two paths is **completely unified**; the only difference is how the click point is computed (AX has a ready-made rect; OP needs the OCR refiner to handle the container-nesting problem).
 
-Sticky rescan / `HintWindowCache` 逻辑保留——AX 是主路径，缓存有价值。OmniParser 这一支每次重新跑 detection（140ms 稳态，不值得缓存复杂度）。
+The sticky rescan / `HintWindowCache` logic is retained — AX is the primary path, so the cache is valuable. The OmniParser branch re-runs detection every time (140ms steady state, not worth the caching complexity).
 
-### 4.4 路径选择：OP-default + AX whitelist
+### 4.4 Path selection: OP-default + AX whitelist
 
-**决策**：bundle ID 在 `AX_FOCUSED_WHITELIST` 里 → AX 焦点 walk；其他全部 → OP 路径。Dock / menubar / extras AX walk 永远跑（§4.2）。
+**Decision**: bundle ID in `AX_FOCUSED_WHITELIST` → AX focus walk; everything else → OP path. The Dock / menubar / extras AX walk always runs (§4.2).
 
-实现位于 `Sources/Mouseless/AppRegistry.swift`：
+The implementation is in `Sources/Mouseless/AppRegistry.swift`:
 
 ```swift
 @MainActor
@@ -186,448 +186,448 @@ enum AppRegistry {
 }
 ```
 
-#### 维护原则
+#### Maintenance principles
 
-- **保守入选**：第三方 app 必须经过实测 + 主观确认"在这个 app 里 AX 路径 hint 体验明显优于 OP 路径"才入。默认是 OP。
-- **错向无害**：whitelist 漏了一个 AX-good app → 多花 ~80ms 跑 OP（OP 也能给好 hint），不影响功能正确性。whitelist 误收一个 AX-bad app → 用户直接观察到"hint 在这个 app 上少了关键东西"，剔除即可。**错向都不致命，但漏比误便宜**。
-- **不依赖自动探测**：上一轮设计尝试 framework detection 自动分类（Catalyst / Electron / WKWebView / 自渲染），但 WeChat 击破了"native = AX-good"的假设（详见下文「历史决策」第三轮），证明自动探测不可靠。**手工 whitelist + 错向便宜 = 正确权衡**。
+- **Conservative admission**: a third-party app gets in only after empirical testing + subjective confirmation that "the AX-path hint experience in this app is clearly better than the OP path." The default is OP.
+- **Errors are harmless either way**: the whitelist misses an AX-good app → spend an extra ~80ms running OP (OP can also give good hints), no impact on functional correctness. The whitelist wrongly admits an AX-bad app → the user directly observes "hints in this app are missing key things," and you just remove it. **Neither error direction is fatal, but missing is cheaper than wrongly admitting**.
+- **No reliance on auto-detection**: the previous design round tried framework detection to auto-classify (Catalyst / Electron / WKWebView / self-rendered), but WeChat broke the "native = AX-good" assumption (see the third round in the "historical decisions" below), proving auto-detection unreliable. **Manual whitelist + cheap errors = the right tradeoff**.
 
-#### 决策是否要 per-view 细化（暂不做）
+#### Whether to refine per-view (not for now)
 
-理想情况：
+Ideally:
 
-- Safari → chrome (AppKit, 好) + web view (per-site varies)
-- Xcode → 编辑器 (好) + 集成 doc viewer (WebKit)
-- VS Code → menu bar (native, 好) + editor (Monaco) + bottom panel
+- Safari → chrome (AppKit, good) + web view (per-site varies)
+- Xcode → editor (good) + integrated doc viewer (WebKit)
+- VS Code → menu bar (native, good) + editor (Monaco) + bottom panel
 
-严格说应该 per-view 判定。**第一版按 app 维度足够 80/20**。哪个 app 真的需要 per-view 分流再单独处理。
+Strictly speaking it should be judged per-view. **The first version is good enough at the app granularity for 80/20**. Whichever app truly needs per-view splitting gets handled separately.
 
-#### 历史决策
+#### Historical decisions
 
-这一节**经过三轮翻盘**：
+This section **went through three reversals**:
 
-**第一轮（推翻）**：最初按 "count 阈值是主信号" 写——AX 返回候选数 < N 时触发 OP。发现两头都不准：AX-bad app 经常返回虚高 count（menu bar / dock / sidebar 加起来 30+ 但实际内容区域 = 0），AX-good app 偶发合法 low count（空 Finder 窗口、简单对话框）。**改成"框架探测优先 + count 当安全网"**。
+**Round 1 (overturned)**: it was originally written as "count threshold is the primary signal" — trigger OP when the AX candidate count is < N. Found it inaccurate at both ends: AX-bad apps often return a falsely high count (menu bar / dock / sidebar add up to 30+ but the actual content area = 0), and AX-good apps occasionally have a legitimate low count (an empty Finder window, a simple dialog). **Changed to "framework detection first + count as a safety net."**
 
-**第二轮（推翻）**：第一版框架探测只用 bundle-layout（Catalyst Info.plist / Electron Framework 路径），漏掉 WKWebView 包装的 web shell（New Outlook、Teams、OneNote 新版）。**改成"两层探测：bundle fast path + AXWebArea BFS 兜底"**——Layer 2 BFS 到 depth 5 能命中绝大多数 web 内核 app（Clash Verge / Tauri 等也覆盖）。
+**Round 2 (overturned)**: the first version of framework detection only used bundle-layout (Catalyst Info.plist / Electron Framework path), missing WKWebView-wrapped web shells (New Outlook, Teams, the new OneNote). **Changed to "two-layer detection: bundle fast path + AXWebArea BFS fallback"** — Layer 2 BFS to depth 5 hits the vast majority of web-kernel apps (Clash Verge / Tauri etc. also covered).
 
-**第三轮（推翻——本次）**：实测 WeChat 击破核心假设「**non-native = AX-bad / native = AX-good**」。WeChat 是 genuine native AppKit（bundle 含 swift dylibs 和 .nib 资源、AX 树里有 `AXTable` `AXRow` `AXScrollArea` 等 AppKit 标准 widget），但**聊天消息气泡是自定义 NSView，AX 完全看不到**——AX 焦点 walk 返回 58 个候选（够多），却全是 sidebar 和 nav，**用户真正想点的消息内容 0 候选**。
+**Round 3 (overturned — this time)**: empirical testing of WeChat broke the core assumption "**non-native = AX-bad / native = AX-good**." WeChat is genuine native AppKit (its bundle contains swift dylibs and .nib resources, and the AX tree has AppKit-standard widgets like `AXTable` `AXRow` `AXScrollArea`), but **the chat message bubbles are custom NSViews, completely invisible to AX** — the AX focus walk returns 58 candidates (plenty), yet all of them are sidebar and nav, with **0 candidates for the message content the user actually wants to click**.
 
-WeChat 不是孤例：QQ / 钉钉 / 飞书 / 网易系一大类中国大厂 native app 都是这个模式。一旦"框架 ≠ AX 质量"，整个 framework-detection 路由失去基础——blacklist 路径不可持续。
+WeChat is not an isolated case: QQ / DingTalk / Feishu / NetEase's family — a whole class of native apps from large Chinese vendors — all follow this pattern. Once "framework ≠ AX quality," the entire framework-detection routing loses its foundation — the blacklist path is unsustainable.
 
-**改成"OP-default + 显式 AX whitelist"**：
+**Changed to "OP-default + explicit AX whitelist"**:
 
-- OP 路径**对所有 app 都 work**（包括 WeChat 这种 "native + 自渲染" 的 AX 黑洞）
-- OP 性能数据（screencap 60ms warm + CoreML 推理 29ms = ~95ms parallel with AX 50ms = max 95ms wall-clock）**已经比 AX 焦点 walk 快**（AX 焦点 walk 单独要 150-200ms）。OP-default 的成本只是 Screen Recording 权限要求和略低的 click 精度（用 OCR refiner 补偿，§4.6）。
-- 决策机制简化为一个 `Set<String>` lookup，**没有自动探测、没有缓存、没有 BFS、没有 fallback chain**。
+- The OP path **works for all apps** (including AX black holes like WeChat that are "native + self-rendered")
+- The OP performance data (screencap 60ms warm + CoreML inference 29ms = ~95ms parallel with AX 50ms = max 95ms wall-clock) is **already faster than the AX focus walk** (the AX focus walk alone takes 150-200ms). The cost of OP-default is only the Screen Recording permission requirement and slightly lower click precision (compensated with the OCR refiner, §4.6).
+- The decision mechanism is simplified to a single `Set<String>` lookup, with **no auto-detection, no cache, no BFS, no fallback chain**.
 
-`FrameworkDetector.swift` 已经从代码库删除（保留在 git commit `04f57f4` 里供未来回看）。
+`FrameworkDetector.swift` has already been deleted from the codebase (preserved in git commit `04f57f4` for future reference).
 
-留这段史是为了**警告未来读者**：每次撞墙的反应都是"再加一层启发式探测让它更智能"，但实际上**人工 whitelist 比自动探测更便宜、更可控、更可解释**。下一次想要"自动 detect AX-bad app"之前，先问"我们为什么不直接维护 whitelist？"
+This history is kept to **warn future readers**: the reflex on every wall hit was "add one more layer of heuristic detection to make it smarter," but in reality **a manual whitelist is cheaper, more controllable, and more explainable than auto-detection**. Before you next want to "auto-detect AX-bad apps," first ask "why don't we just maintain a whitelist?"
 
-### 4.5 跟 AX 卡顿尖峰（hint-discovery.md §5）的关系
+### 4.5 Relationship to the AX stall spike (hint-discovery.md §5)
 
-destructive click 后的 ~500ms AX cleanup 期：
+The ~500ms AX cleanup period after a destructive click:
 
-- 现在：sticky rescan 跑进 cleanup 期，IPC 单价飙到 40ms，扫描 500ms。
-- 接入 OmniParser 后：fall-through 本身没缓解尖峰，**因为 AX 候选数仍然多**（cleanup 期 AX 返回值不一定变少）。需要单独检测"AX is busy" 信号才能切到 OmniParser 兜底。
-- 实际更可能的修法：**等 AX 稳定**（hint-discovery.md §5 提到的事件驱动等通知方案）+ **OmniParser 仍然只用于 AX 黑洞场景**。两者解决不同问题。
+- Now: the sticky rescan runs into the cleanup period, the per-IPC unit cost spikes to 40ms, and the scan takes 500ms.
+- After wiring in OmniParser: fall-through by itself doesn't relieve the spike, **because the AX candidate count is still high** (the AX return value during cleanup doesn't necessarily shrink). You'd need to separately detect an "AX is busy" signal to switch to the OmniParser fallback.
+- The more likely actual fix: **wait for AX to stabilize** (the event-driven wait-for-notification approach mentioned in hint-discovery.md §5) + **OmniParser is still only used for AX black-hole scenarios**. The two solve different problems.
 
-OmniParser **不是** AX cleanup 尖峰的银弹。它是 AX 黑洞场景的兜底。SPECS.md 上一版里我说"OmniParser 落地后这个尖峰自然消失"是错的，那个尖峰要单独治。
+OmniParser is **not** a silver bullet for the AX cleanup spike. It's the fallback for AX black-hole scenarios. In the last version of SPECS.md I said "once OmniParser lands, this spike disappears naturally" — that was wrong; that spike has to be fixed separately.
 
-### 4.6 OmniParser commit 的精度问题
+### 4.6 The precision problem of OmniParser commit
 
-AX 路径 commit 时跟坐标无关——`AXUIElementPerformAction(element, "AXPress")` 按元素引用派发，元素在屏幕上的位置不影响。OmniParser 路径**没有元素**，commit 只能合成 mouse event 到一个 `(x, y)` 坐标，**这个坐标必须落进真实可点区域**。
+The AX path's commit is coordinate-independent — `AXUIElementPerformAction(element, "AXPress")` dispatches by element reference, and the element's on-screen position doesn't matter. The OmniParser path **has no element**; commit can only synthesize a mouse event to an `(x, y)` coordinate, and **that coordinate must land inside the truly clickable region**.
 
-这给 OP 路径引入了一类 AX 路径下不存在的失败：**hint 出现，用户按下，合成 click 成功，但点的位置没命中实际的 click handler，UI 无变化**。
+This introduces to the OP path a class of failure that doesn't exist under the AX path: **the hint appears, the user presses, the synthesized click succeeds, but the clicked position misses the actual click handler, and the UI doesn't change**.
 
-#### click point 和 hint label 视觉位置是两件事
+#### The click point and the hint label's visual position are two different things
 
-不能混淆。沿用 AX 路径目前的 label 排版逻辑（badge 在元素旁、不挡内容、密集时级联等等，见 `hint-rendering.md`），但 **commit 时合成 click 的目标坐标不等于 label 视觉位置**：
+Don't conflate them. We reuse the AX path's current label layout logic (the badge next to the element, not occluding content, cascading when dense, etc., see `hint-rendering.md`), but **the target coordinate of the synthesized click on commit is not the same as the label's visual position**:
 
 ```swift
-// 错的：
+// wrong:
 synthesizeClick(at: target.labelPosition, ...)
 
-// 对的：
+// right:
 synthesizeClick(at: target.clickPoint, ...)
-// where clickPoint 是 box 内部一个真正可点的像素
+// where clickPoint is a genuinely clickable pixel inside the box
 ```
 
-`clickPoint` 怎么算见下面。
+How `clickPoint` is computed is below.
 
-#### click point 的失败模式
+#### Failure modes of the click point
 
-box 中心**不总是**可点像素。5 类：
+The box center is **not always** a clickable pixel. 5 classes:
 
-1. **box 框得偏移**：detector 输出边缘抖动，几何中心落到 padding 或 border 外。
-2. **可点区域 ≠ 视觉区域**：web app 里 click handler 装在外层 `<div>` 上、可视按钮是个 `<span>`，或反之；OmniParser 只看视觉，无法看 hit-test 边界。
-3. **透明 overlay 截获**：modal 上面盖一层吃点击的层，click 落到它身上而不是底下的目标。
-4. **HiDPI 坐标系**：截图是物理像素，合成 event 走 logical points。**转换错就直接点空气**。这是实现侧的死活要保证的。
-5. **容器嵌套**：大框套小框（IoU 不达 NMS 阈值都保留），大框的几何中心落进小框区域，按外层 hint 反而触发了内层目标的 click handler。
+1. **Box framed with an offset**: the detector output has edge jitter, and the geometric center lands in the padding or outside the border.
+2. **Clickable region ≠ visual region**: in a web app the click handler is on an outer `<div>` and the visible button is a `<span>`, or vice versa; OmniParser only sees visuals and can't see the hit-test boundary.
+3. **Transparent overlay intercepts**: a click-eating layer covers a modal, and the click lands on it instead of the target underneath.
+4. **HiDPI coordinate system**: the screenshot is in physical pixels, but the synthesized event uses logical points. **Get the conversion wrong and you click thin air.** This is the implementation side's life-or-death must-get-right.
+5. **Container nesting**: a big box wraps a small box (both kept when IoU is below the NMS threshold), the big box's geometric center lands inside the small box's region, and pressing the outer hint instead triggers the inner target's click handler.
 
-第 4 类是工程问题（必须正确），1-3 + 5 类是 OP 路径的**固有概率性失败**——AX 路径下完全不存在。下面的 refiner **只处理第 5 类**（容器嵌套）——这是唯一能在不 OCR 的情况下廉价检测、且 OCR 修复收益明确的一类。第 1、2 类（box 偏移 / 可点≠视觉）实测下 box 中心命中率已经够高，无脑 OCR 反而引入新错误（详见下方"历史决策"）；第 3、4 类 refiner 处理不了。
+Class 4 is an engineering problem (must be correct); classes 1-3 + 5 are the OP path's **inherent probabilistic failures** — completely nonexistent under the AX path. The refiner below **only handles class 5** (container nesting) — it's the only class that can be cheaply detected without OCR and where the OCR fix has clear payoff. For classes 1 and 2 (box offset / clickable ≠ visual), the box-center hit rate is already high enough in practice, and blindly applying OCR introduces new errors instead (see "historical decisions" below); classes 3 and 4 the refiner can't handle.
 
-#### 实现版本：fast-path 优先，只在 center 冲突时才 OCR
+#### The implemented version: fast-path first, OCR only when the center conflicts
 
-> 实现见 `Sources/Mouseless/OCRRefiner.swift`。**早期草稿（保留在本节下方"历史决策"）是"无脑 OCR 优先"——实测推翻了，现在是"先判断 center 是否真的有问题，只在有问题时才 OCR"**。
+> Implementation in `Sources/Mouseless/OCRRefiner.swift`. **The early draft (preserved in the "historical decisions" below this section) was "blind OCR first" — empirical testing overturned it, and it's now "first judge whether the center really has a problem, OCR only when there is one."**
 
-观察：**点文字几乎一定命中 click handler**（文字在可视区域内、贴近中央）。但**"无脑 OCR 出文字就点文字中心"是错的**——实测在 WeChat 聊天行上：
+Observation: **clicking text almost always hits the click handler** (text is inside the visible region, close to center). But **"OCR out some text and click the text center" is wrong** — empirically, on WeChat chat rows:
 
-- 聊天行是"整行可点"——行内任何像素点击都触发选中
-- box 中心本来就 work
-- 但 OCR 只识别到角落的 "21:52" 时间戳（漏了中文名/消息），refiner 反而把 click **从行中央拽到右上角的 21:52**——更糟
+- A chat row is "the whole row is clickable" — clicking any pixel in the row triggers selection
+- The box center already works
+- But OCR only recognizes the corner "21:52" timestamp (missing the Chinese name / message), and the refiner instead drags the click **from the row's center to the top-right "21:52"** — worse
 
-教训：**OCR refiner 只该在 box 中心"真的有问题"时介入**。怎么判断有问题？
+Lesson: **the OCR refiner should only step in when the box center "really has a problem."** How do you judge there's a problem?
 
-§4.6 列的 5 类 misclick 里，只有**第 5 类（容器嵌套）能在不 OCR 的情况下廉价检测**——直接判断 `box 中心 ∈ 某个 inner box`。第 1 类（box 框偏移）罕见，且 OCR 误判的风险比它的收益大。所以：
+Of the 5 misclick classes listed in §4.6, only **class 5 (container nesting) can be cheaply detected without OCR** — just check `box center ∈ some inner box`. Class 1 (box framing offset) is rare, and the risk of OCR misjudgment outweighs its payoff. So:
 
 ```
 refine(B, inner_boxes):
-    center = B 的几何中心
+    center = B's geometric center
 
-    # Fast path：center 不在任何 inner box 里 → 直接用 center
-    # 覆盖绝大多数（聊天行、列表项、无嵌套的按钮）。
-    # 零 screencap、零 OCR、零额外延迟。
+    # Fast path: center isn't in any inner box → use center directly
+    # Covers the vast majority (chat rows, list items, un-nested buttons).
+    # Zero screencap, zero OCR, zero extra latency.
     if center ∉ any inner_box:
         return center
 
-    # Slow path：center 落在某个 inner box 里 → 点它会触发 inner box
-    # 的 handler 而非 B 自己的。重新截屏 + OCR B 的 crop，找一个
-    # "在 B 内、但避开所有 inner box" 的点。
-    text_regions = OCR(B.crop)        # .accurate + 显式中文语言
+    # Slow path: center lands in some inner box → clicking it triggers the inner box's
+    # handler rather than B's own. Re-screencap + OCR B's crop, find a point
+    # "inside B, but avoiding all inner boxes."
+    text_regions = OCR(B.crop)        # .accurate + explicit Chinese languages
 
-    # Step 1: own_text = 中心不在任何 inner box 内的文字
+    # Step 1: own_text = text whose center isn't inside any inner box
     own_text = [t for t in text_regions if t.center ∉ any inner_box]
-    if own_text 非空:
-        return 最长 own_text 段的中心
+    if own_text is non-empty:
+        return the center of the longest own_text segment
 
-    # Step 2: 没有 own_text（文字全属于 inner box）→ 找 own_region
-    #   候选 = [B 中心, B 四条边中点]
-    #   过滤掉落在 inner box 里的候选
-    #   取剩下里离所有 inner box 最远的那个
+    # Step 2: no own_text (all text belongs to inner boxes) → find own_region
+    #   candidates = [B center, midpoints of B's four edges]
+    #   filter out candidates that land in an inner box
+    #   take the one among the rest farthest from all inner boxes
     candidates = [B.center, top_mid, bottom_mid, left_mid, right_mid]
     outside = [c for c in candidates if c ∉ any inner_box]
-    if outside 非空:
-        return outside 里离 inner box 最远的
-    # Step 3: 全部候选都在 inner box 里（病态，B 几乎被 inner 完全覆盖）
+    if outside is non-empty:
+        return the one in outside farthest from inner boxes
+    # Step 3: all candidates are in inner boxes (pathological, B is almost fully covered by inner)
     return B.center
 ```
 
-设计原则不变（**两个 hint = 两个独立目标，外层 click 必须避开 inner box 覆盖范围**），但**触发条件收紧了**：不是"有 OCR 文字就用"，而是"只有 center 真的撞 inner box 才动用 OCR"。
+The design principle is unchanged (**two hints = two independent targets, the outer click must avoid the inner box's coverage area**), but **the trigger condition is tightened**: it's not "use it whenever there's OCR text," but "only invoke OCR when the center really collides with an inner box."
 
-#### 每个 case 的具体处理
+#### The concrete handling for each case
 
-| 场景 | 走哪条路径 |
+| Scenario | Which path it takes |
 | --- | --- |
-| 聊天行 / 列表项 / 普通按钮（无 inner box 或 center 不撞 inner） | **fast path** → 点 box 中心，不 OCR |
-| 大框套小框，小框含文字，**大框中心恰好压在小框上** | slow path：OCR → Step 1 own_text（大框自己的文字）或 Step 2 own_region |
-| 大框中心压在小框上 + 大框有自己标题 "Tech Backlog" | slow path → own_text = ["Tech Backlog"] → 点它中心 |
-| 大框中心压在小框上 + 大框无自己文字 | slow path → own_text 空 → Step 2 own_region（边中点离 inner 最远的） |
-| 大框中心**不**压在小框上（小框偏在一侧） | fast path → 点大框中心（中心本来就是大框自己的区域） |
+| Chat row / list item / plain button (no inner box, or center doesn't collide with inner) | **fast path** → click the box center, no OCR |
+| Big box wraps a small box, the small box contains text, **and the big box's center happens to rest on the small box** | slow path: OCR → Step 1 own_text (the big box's own text) or Step 2 own_region |
+| Big box's center rests on a small box + the big box has its own title "Tech Backlog" | slow path → own_text = ["Tech Backlog"] → click its center |
+| Big box's center rests on a small box + the big box has no text of its own | slow path → own_text empty → Step 2 own_region (the edge midpoint farthest from inner) |
+| Big box's center does **not** rest on the small box (the small box is off to one side) | fast path → click the big box's center (the center is already the big box's own region) |
 
-关键区别：**只有"大框中心恰好压在小框"才进 slow path**。"大框套小框但小框偏在角落" → 大框中心仍在自己区域 → fast path。
+The key distinction: **only "the big box's center happens to rest on the small box" enters the slow path**. "Big box wraps a small box but the small box is off in a corner" → the big box's center is still in its own region → fast path.
 
-#### CJK OCR 配置（实现细节，但 load-bearing）
+#### CJK OCR configuration (an implementation detail, but load-bearing)
 
-slow path 的 OCR 必须能识别非拉丁字符，否则 containment 算法在中文/日文/韩文 UI 上失效：
+The slow-path OCR must be able to recognize non-Latin characters, otherwise the containment algorithm fails on Chinese/Japanese/Korean UIs:
 
 ```swift
-request.recognitionLevel = .accurate         // .fast 是拉丁偏向的字符检测器，漏 CJK
-request.recognitionLanguages = ["zh-Hans", "zh-Hant", "en-US"]  // 显式，否则跟系统 locale
-request.usesLanguageCorrection = false       // UI 文字不是句子
+request.recognitionLevel = .accurate         // .fast is a Latin-biased character detector, misses CJK
+request.recognitionLanguages = ["zh-Hans", "zh-Hant", "en-US"]  // explicit, otherwise follows the system locale
+request.usesLanguageCorrection = false       // UI text isn't sentences
 ```
 
-`.fast` 实测在 WeChat 上只能识别 "21:52" 这种数字，中文名直接漏掉。`.accurate` + 显式中文语言后，"许大维长点脑子" / "洗好了" 都能识别。代价 ~20-40ms，但 slow path 本来就罕见。
+`.fast` empirically only recognizes things like the digits "21:52" on WeChat, missing CJK text (names, message content) entirely. With `.accurate` + explicit Chinese languages configured, that CJK text is recognized too. The cost is ~20-40ms, but the slow path is rare to begin with.
 
-#### own_region 的简化实现
+#### The simplified implementation of own_region
 
-完整版 `own_region = B.rect minus union(inner_boxes.rects)`（轴对齐矩形减法，结果是 L 形 / frame 形）理论上更精确，但实现复杂。当前用**边中点近似**：候选 = {B 中心 + 四边中点}，过滤掉落在 inner box 里的，取离 inner 最远的。~10 行，大多数 case 行为正确。观察到边界 case 失败再升级到完整多边形减法。
+The full version `own_region = B.rect minus union(inner_boxes.rects)` (axis-aligned rectangle subtraction, result is an L-shape / frame shape) is more precise in theory but complex to implement. We currently use an **edge-midpoint approximation**: candidates = {B center + four edge midpoints}, filter out those that land in an inner box, take the one farthest from inner. ~10 lines, behaves correctly for most cases. Upgrade to full polygon subtraction once a boundary case is observed failing.
 
-#### 这条路径处理的失败模式
+#### The failure modes this path handles
 
-回到 §4.6 前面列的 5 类 misclick：
+Back to the 5 misclick classes listed earlier in §4.6:
 
-- **第 1 类**（偏移 box）：fast path 下不处理（接受 box 中心，罕见且 OCR 风险大于收益）
-- **第 2 类**（可点区域 ≠ 视觉）：同上，fast path 接受 box 中心
-- **第 3 类**（透明 overlay 截获）：refiner 无能为力 ✗
-- **第 4 类**（HiDPI 坐标系）：工程问题，跟 refiner 无关 ✗
-- **第 5 类**（容器嵌套导致外层 hint 错点内层目标）：**slow path 专门处理** ✓
+- **Class 1** (offset box): not handled under the fast path (accept the box center, rare and OCR risk > payoff)
+- **Class 2** (clickable region ≠ visual): same as above, fast path accepts the box center
+- **Class 3** (transparent overlay intercepts): the refiner is powerless ✗
+- **Class 4** (HiDPI coordinate system): an engineering problem, unrelated to the refiner ✗
+- **Class 5** (container nesting causing the outer hint to mis-click the inner target): **the slow path handles it specifically** ✓
 
-注意跟早期草稿的区别：草稿声称 refiner 处理第 1、2 类（"点文字避开 padding"），实测发现**无脑 OCR 引入的新错误（聊天行被拽到时间戳）比它修的第 1、2 类更多**，所以收紧成只处理第 5 类。第 1、2 类留给 box 中心——实测大多数 OP box 中心都可点。
+Note the difference from the early draft: the draft claimed the refiner handled classes 1 and 2 ("click text, avoid padding"), but empirical testing found **the new errors introduced by blind OCR (chat rows dragged to the timestamp) outnumber the class 1 and 2 cases it fixes**, so it was tightened to handle only class 5. Classes 1 and 2 are left to the box center — empirically, most OP box centers are clickable.
 
-#### 历史决策
+#### Historical decisions
 
-§4.6 的 refiner 算法经过一次实测推翻：
+The §4.6 refiner algorithm went through one empirical reversal:
 
-**草稿版（已弃）**：commit 时**无脑** OCR box → Step 1 取最长 own_text 中心 → Step 2 own_region → Step 3 box 中心。理由是"点文字一定命中 handler"。
+**Draft version (discarded)**: on commit, **blindly** OCR the box → Step 1 take the center of the longest own_text → Step 2 own_region → Step 3 box center. The rationale was "clicking text always hits the handler."
 
-**实测推翻**：WeChat 聊天行——OCR 在 `.fast` 模式下只识别到 "21:52" 时间戳（漏中文），refiner 把 click 从行中央拽到右上角时间戳，**比直接点 box 中心更糟**。即使修好 CJK 识别（`.accurate`），无脑取"最长文字"在多文字行上也不一定是用户想点的位置。
+**Empirical reversal**: WeChat chat rows — OCR in `.fast` mode only recognized the "21:52" timestamp (missing the Chinese), and the refiner dragged the click from the row's center to the top-right timestamp, **worse than just clicking the box center**. Even if CJK recognition is fixed (`.accurate`), blindly taking "the longest text" on a multi-text row isn't necessarily the position the user wants to click.
 
-**改后版（当前）**：fast-path 优先——`box 中心 ∉ 任何 inner box` 就直接用中心（覆盖绝大多数），**只有 center 真的撞 inner box（容器嵌套的第 5 类）才动 OCR**。既省 60-90ms（大多数点击不 screencap/OCR），又避免 OCR 误判。
+**Revised version (current)**: fast-path first — if `box center ∉ any inner box`, use the center directly (covers the vast majority), and **only invoke OCR when the center really collides with an inner box (the class-5 container nesting)**. This both saves 60-90ms (most clicks do no screencap/OCR) and avoids OCR misjudgments.
 
-教训：**"理论上更精确的方案"（无脑 OCR）实测可能更差**——OCR 本身有识别失败/不全的概率，把它放进每次点击的关键路径，等于把它的失败概率叠加进来。只在"不用它一定错"（center 撞 inner box）时才用，是更稳的工程选择。
+Lesson: **a "theoretically more precise scheme" (blind OCR) can be empirically worse** — OCR itself has a probability of recognition failure / incompleteness, and putting it in the critical path of every click means stacking its failure probability on top. Using it only when "not using it is sure to be wrong" (the center colliding with an inner box) is the more robust engineering choice.
 
-#### 故意没处理：partial overlap
+#### Deliberately not handled: partial overlap
 
-NMS（§5.1.4）让两个 box 都活下来的条件是 `IoU < 0.5`，containment 只是其中一个特例——理论上也可能两个 box partial overlap（互不包含、但有交集），中心都落进交集那块文字。
+The condition under which NMS (§5.1.4) lets two boxes both survive is `IoU < 0.5`; containment is just one special case of that — in theory two boxes could also partial-overlap (not containing each other, but intersecting), with both centers landing in the intersecting text.
 
-PoC 三张图里**没观察到** detector 输出这种 partial overlap 形态——containment 是常见的（会话行套头像/名字），partial overlap 几乎没有，因为视觉上的 UI 元素本来就不该相互错位重叠。
+In the three PoC images we **did not observe** the detector outputting this partial-overlap shape — containment is common (a conversation row wrapping an avatar/name), partial overlap is almost absent, because visual UI elements shouldn't be mutually misaligned and overlapping in the first place.
 
-算法理论上一行字就能推广（把 `b.rect ⊂ B.rect` 换成 `intersects(b.rect, B.rect)`，own_region 计算原样适用），但**不在没观察到的情况下提前加**——同 §5.2 的纪律。
+The algorithm could in theory be generalized in one line (replace `b.rect ⊂ B.rect` with `intersects(b.rect, B.rect)`, with the own_region computation applying as-is), but **we don't add it ahead of time for an unobserved case** — same discipline as §5.2.
 
-如果日后接进 prototype 后真在 commit log 里看到 partial-overlap 导致的 misclick，再把 `inner_boxes` 字面改成 `overlapping_boxes`，算法骨架不动。
+If later, after wiring it into the prototype, we actually see partial-overlap-caused misclicks in the commit log, then literally change `inner_boxes` to `overlapping_boxes`, leaving the algorithm skeleton untouched.
 
-#### 为什么 OCR 在这里是 grounded 的（vs §5.2 的 OCR-as-filter）
+#### Why OCR is grounded here (vs the OCR-as-filter of §5.2)
 
-之前 §5.2 草稿里把 OCR 当 filter（"无文字 box → 丢"），那是臆测——纯 icon 按钮没字但确实可点，丢了就漏。
+In the earlier §5.2 draft, OCR was used as a filter ("box with no text → drop"), which was speculation — a pure-icon button has no text but is genuinely clickable, and dropping it loses it.
 
-OCR 当 **click-point refiner** 是不同 trade-off：
+OCR as a **click-point refiner** is a different trade-off:
 
-| 维度 | OCR-as-filter | OCR-as-refiner |
+| Dimension | OCR-as-filter | OCR-as-refiner |
 | --- | --- | --- |
-| 触发时机 | collect 路径（每次扫都跑） | commit 路径（只对用户选定的一个 box 跑） |
-| 全屏代价 | 50-200ms / 全屏 | 几 ms / 单 box |
-| OCR 失败的后果 | 把可点 box 误丢，**用户根本看不到 hint** | 降级 fallback 到 box 中心，**等同于没用 OCR** —— 无损 |
-| OCR 误识别的后果 | 影响过滤决策 | 至多影响"是点文字 A 还是文字 B"，两个都在 box 内部，都比边缘安全 |
+| Trigger timing | collect path (runs on every scan) | commit path (runs only on the one box the user selected) |
+| Full-screen cost | 50-200ms / full screen | a few ms / single box |
+| Consequence of OCR failure | drops a clickable box by mistake, **the user never even sees the hint** | degrades to the box center as fallback, **equivalent to not using OCR** — lossless |
+| Consequence of OCR misrecognition | affects the filtering decision | at most affects "click text A or text B," both of which are inside the box, both safer than the edge |
 
-refiner 用法**任何情况都不比不用差**。这是它跟 filter 用法的根本区别。
+The refiner usage is **never worse than not using it under any circumstance**. This is the fundamental difference from the filter usage.
 
-#### 实现细节
+#### Implementation details
 
-- macOS Vision framework: `VNRecognizeTextRequest`，硬件加速，无外部 ML 依赖
-- crop 区域：把 box 从全屏截图上 crop 出来（截图本身在 collect 阶段已经截过，commit 时复用同一张）
-- 单 box OCR wall-clock：几 ms 级，commit 路径上的额外延迟可忽略
-- 如果 box 内多个文本段，取最长那段的中心（一般是 button label，比 hint/tooltip 这种短附属文本更靠近 click handler）
+- macOS Vision framework: `VNRecognizeTextRequest`, hardware accelerated, no external ML dependency
+- crop region: crop the box out of the full-screen screenshot (the screenshot itself was already taken in the collect phase; reuse the same one at commit)
+- single-box OCR wall-clock: in the few-ms range, the extra latency on the commit path is negligible
+- if there are multiple text segments inside the box, take the center of the longest one (usually the button label, closer to the click handler than short ancillary text like a hint/tooltip)
 
-#### 用户体感对比
+#### User-perceived comparison
 
-| 失败模式 | AX 路径 | OP 路径（不带 OCR refiner） | OP 路径（带 OCR refiner） |
+| Failure mode | AX path | OP path (without OCR refiner) | OP path (with OCR refiner) |
 | --- | --- | --- | --- |
-| element 完全无 hint | 用户切回鼠标 | 用户切回鼠标 | 同 |
-| 点了没反应 | 几乎不会 | 偶发（box 偏移 / 可点≠视觉） | 显著降低（点字 ≈ 必然命中可点） |
+| element has no hint at all | user switches back to mouse | user switches back to mouse | same |
+| clicked, no response | almost never | occasional (box offset / clickable ≠ visual) | markedly reduced (clicking text ≈ certain to hit clickable) |
 
-OCR refiner 把 OP 路径的"hint 出现 ≠ 一定生效" 拉近 AX 路径的"hint 出现 ≈ 一定生效"。
+The OCR refiner pulls the OP path's "hint appears ≠ definitely effective" closer to the AX path's "hint appears ≈ definitely effective."
 
-#### 一个 commit 后的可观察 affordance
+#### An observable affordance after commit
 
-即使 OCR refiner 加上去，misclick 仍然可能发生。考虑 commit 后短暂高亮 click point —— 让用户至少知道"系统点了这个位置"。如果 UI 没反应，用户知道是 OP 路径的精度问题（vs 怀疑 Mouseless 没收到键），可以切鼠标重试。这是 UX 上的小投入，对调试和信任都有意义。
+Even with the OCR refiner added, misclicks can still happen. Consider briefly highlighting the click point after commit — to at least let the user know "the system clicked this position." If the UI doesn't respond, the user knows it's a precision problem of the OP path (vs suspecting Mouseless didn't receive the key) and can switch to the mouse and retry. It's a small UX investment that's meaningful for both debugging and trust.
 
 ---
 
-## 5. OmniParser 路径的过滤设计
+## 5. Filtering design for the OmniParser path
 
-AX 路径靠 `clickableRoles` + `hasMeaningfulLabel` + `skipRoles` 把 candidate 压到 50-100。OmniParser detector 输出未过滤，wechat.png 上是 174 box，**全做 hint 会出现 label 通胀**（屏幕铺满黄色标签）。
+The AX path relies on `clickableRoles` + `hasMeaningfulLabel` + `skipRoles` to compress the candidates down to 50-100. The OmniParser detector output is unfiltered — 174 boxes on wechat.png — and **making hints for all of them produces label inflation** (the screen carpeted with yellow labels).
 
-过滤是必须的。但**哪些过滤规则是可靠的、哪些是猜的**，要分清。
+Filtering is mandatory. But **which filter rules are reliable and which are guesses** must be kept distinct.
 
-### 5.1 Baseline：标准 CV 后处理（验证过、可以放心用）
+### 5.1 Baseline: standard CV post-processing (verified, safe to use)
 
-这一组过滤跟 UI 语义无关，是 object detection 的标准 post-processing，已经被 ML 社区在千万张图上验证过。**这些是上线时必加的**。
+This group of filters is independent of UI semantics; it's standard object-detection post-processing, already validated by the ML community on tens of millions of images. **These are must-adds at ship time.**
 
-四条：
+Four of them:
 
-1. **YOLO confidence 阈值**
-2. **Size 最小值**（≥ 8×8）
-3. **Size 最大值**（占屏 < N%）
-4. **NMS dedup**（IoU-based 去重）
+1. **YOLO confidence threshold**
+2. **Size minimum** (≥ 8×8)
+3. **Size maximum** (occupies < N% of the screen)
+4. **NMS dedup** (IoU-based deduplication)
 
-下面逐条展开。
+Each is expanded below.
 
-#### 5.1.1 YOLO confidence 阈值
+#### 5.1.1 YOLO confidence threshold
 
-每个 box 从 detector 出来时附带一个 `[0, 1]` 的 confidence score，代表模型对"这是一个 interactive UI element"的把握程度。
+Each box comes out of the detector with a `[0, 1]` confidence score, representing the model's certainty that "this is an interactive UI element."
 
-- 实现：`box.confidence >= threshold`，threshold 一般 0.3-0.5。
-- 作用：砍掉模型自己都不确定的检测，多半是误报。
-- threshold 怎么定：**这个数值需要在 UI 截图上扫一下**——0.3 太松会漏一些低 conf 但实际可点的元素，0.5 太严会丢掉一些半可见的合法目标。**PoC 阶段用 0.05 ~ 0.3 这种宽松值跑过**（看 PoC 数据时有 100-180 box，是宽松阈值的产物），真要上线时按"AX 黑洞 app 的 box 命中率"决定。
+- Implementation: `box.confidence >= threshold`, threshold typically 0.3-0.5.
+- Effect: cuts the detections the model itself isn't sure about, which are mostly false positives.
+- How to set the threshold: **this value needs to be swept on UI screenshots** — 0.3 too loose misses some low-conf but actually-clickable elements, 0.5 too strict drops some half-visible legitimate targets. **The PoC stage ran with loose values like 0.05 ~ 0.3** (the 100-180 boxes in the PoC data are a product of the loose threshold); for actual ship, decide based on "the box hit rate on AX black-hole apps."
 
-#### 5.1.2 Size 最小值
+#### 5.1.2 Size minimum
 
-- 实现：`rect.width >= 8 && rect.height >= 8`。
-- 作用：砍掉几像素的检测噪音。
-- 跟 AX 路径同条件（`hint-discovery.md` §2.2 收录条件第 2 条）。
-- 这条几乎不会误杀真实 UI 元素——再小的图标按钮也有十几像素。
+- Implementation: `rect.width >= 8 && rect.height >= 8`.
+- Effect: cuts the few-pixel detection noise.
+- Same condition as the AX path (`hint-discovery.md` §2.2, the 2nd admission condition).
+- This one almost never mistakenly kills a real UI element — even the smallest icon button is a dozen-plus pixels.
 
-#### 5.1.3 Size 最大值
+#### 5.1.3 Size maximum
 
-- 实现：`rect.width * rect.height <= MAX_SIZE_FRAC * screen.area`，`MAX_SIZE_FRAC` 取 0.25 ~ 0.5。
-- 作用：砍掉"detector 错把整个 panel / sidebar / 窗口当 interactive element"输出的大框。
-- **为什么需要单独一条**：直觉上"NMS 应该把覆盖了小框的大框去重掉"，**事实是不会**——见 §5.1.4 后面的 NMS 含义解释。
-- 实测看 PoC 的三张图没出现这种大框，但**不能假设永远不会**：训练数据覆盖不到的边缘 UI、模型对某些 web app 的容器层 hallucinate、未来 detector 版本变化，都可能产生。**几何 sanity check，加上去几乎无成本，错过的代价是屏幕上多一个无用的覆盖大区域的 hint label**。
-- 注：这条不区分"占满整屏"和"占了 30% 的 sidebar"——都是几乎不会被用户当 hint target 点击的尺寸级别。如果未来发现某些合法 UI（比如全屏弹框）被它误杀，再调 frac 或加 role-aware 的例外。
+- Implementation: `rect.width * rect.height <= MAX_SIZE_FRAC * screen.area`, with `MAX_SIZE_FRAC` set to 0.25 ~ 0.5.
+- Effect: cuts the big boxes the detector outputs when it mistakes a whole panel / sidebar / window for an interactive element.
+- **Why a separate rule is needed**: intuitively "NMS should dedup away the big box that covers a small box," but **in fact it won't** — see the NMS-meaning explanation after §5.1.4.
+- Empirically, the three PoC images didn't have such big boxes, but **we can't assume it'll never happen**: edge UIs the training data doesn't cover, the model hallucinating the container layer for certain web apps, or future detector-version changes could all produce them. **A geometric sanity check costs almost nothing to add, and the cost of missing it is one more useless, large-area-covering hint label on the screen.**
+- Note: this rule doesn't distinguish "fills the whole screen" from "takes up 30% of the sidebar" — both are size levels a user would almost never click as a hint target. If we later find some legitimate UI (e.g. a full-screen dialog) being mistakenly killed by it, then tune frac or add a role-aware exception.
 
-#### 5.1.4 NMS dedup（**附 NMS 行为说明**）
+#### 5.1.4 NMS dedup (**with an NMS behavior explanation**)
 
-- 实现：标准 Non-Maximum Suppression。两两计算 box 之间的 IoU，IoU 大于阈值（典型 0.5）的一对里，留 confidence 高的、抑制 confidence 低的。
-- 作用：detector 有时会对同一 UI 元素出两个紧挨的框（典型例子：图标 + 它紧挨的 label 各画一个，或者一个元素被检测两次重叠输出）。NMS 把这种"几乎重合"的去重，留一个代表。
+- Implementation: standard Non-Maximum Suppression. Compute the IoU between every pair of boxes; for a pair with IoU above the threshold (typically 0.5), keep the higher-confidence one and suppress the lower-confidence one.
+- Effect: the detector sometimes outputs two adjacent boxes for the same UI element (typical example: an icon + its adjacent label each getting a box, or one element detected twice with overlapping output). NMS dedups these "near-coincident" ones, keeping one representative.
 
-**这里要讲清楚一个反直觉的事：NMS 不去"包含关系"的重叠**，也就是大框完全套住小框这种场景。原因是 NMS 用 **IoU**（Intersection over Union），而 IoU 是：
-
-```
-IoU = 两框相交面积 / 两框并集面积
-```
-
-考虑大框完全包住小框：
+**Here we need to make clear one counterintuitive thing: NMS does not dedup "containment" overlaps**, i.e. the scenario where a big box fully wraps a small box. The reason is that NMS uses **IoU** (Intersection over Union), and IoU is:
 
 ```
-大框：1000×800 = 800,000 px²
-小框：  50×30  =   1,500 px²
+IoU = intersection area of the two boxes / union area of the two boxes
+```
 
-Intersection = 1,500 px²        （小框自身的面积，因为它整个在大框里）
-Union        = 800,000 px²      （≈ 大框面积，小框是它的子集）
+Consider a big box fully wrapping a small box:
+
+```
+big box:  1000×800 = 800,000 px²
+small box:  50×30  =   1,500 px²
+
+Intersection = 1,500 px²        (the small box's own area, since it's entirely inside the big box)
+Union        = 800,000 px²      (≈ the big box's area, the small box being a subset of it)
 IoU          = 1,500 / 800,000 = 0.0019
 ```
 
-IoU ≈ 0，远低于 NMS 阈值 0.5，**NMS 不会动这两个框，都保留**。
+IoU ≈ 0, far below the NMS threshold of 0.5, so **NMS won't touch these two boxes — both are kept**.
 
-这就是为什么 §5.1.3 必须存在：**NMS 不防大框污染候选集**。两条规则各管一边：
+This is why §5.1.3 must exist: **NMS doesn't guard against big boxes polluting the candidate set**. The two rules each cover one side:
 
-- NMS 处理"两个差不多大小的框互相重叠 ~50% 以上"（去重）。
-- Size 最大值处理"一个框大到不像 interactive element"（剔除巨型误报）。
+- NMS handles "two roughly equal-sized boxes overlapping by ~50% or more" (dedup).
+- Size maximum handles "a box too big to be an interactive element" (rejecting giant false positives).
 
-这俩不重叠，缺一不可。
+The two don't overlap, and neither is dispensable.
 
-#### 这四条加起来能压到多少
+#### How much these four together can compress to
 
-实测 PoC 三张图都是 100-180 box 量级的**未过滤**输出。这四条加上去通常能压到 60-100，**且不引入任何 UI 启发式**——纯 ML / 几何后处理。剩下的过滤（如果还需要）只能靠 §5.2 的 exploratory 信号，需要数据支撑。
+Empirically, all three PoC images are in the 100-180-box range of **unfiltered** output. Adding these four usually compresses to 60-100, **without introducing any UI heuristic** — pure ML / geometric post-processing. The remaining filtering (if still needed) can only rely on the exploratory signals of §5.2, which need data to back them up.
 
-### 5.2 Exploratory：UI 启发式（需要数据，目前是臆测）
+### 5.2 Exploratory: UI heuristics (need data, currently speculation)
 
-下面这些规则**听起来合理**，但**在真实 UI 上是否真有效，目前未知**。需要把 OmniParser 接进 prototype、跑过若干 AX 黑洞 app、看数据后才能决定：
+The rules below **sound reasonable**, but **whether they're actually effective on real UIs is, for now, unknown**. We need to wire OmniParser into the prototype, run it across a number of AX black-hole apps, and look at the data before deciding:
 
-| 候选规则 | 直觉 | 待验证的问题 |
+| Candidate rule | Intuition | Question to validate |
 | --- | --- | --- |
-| **Size × confidence 组合**：小框只在 conf 高时保留 | 大框 + 低 conf 多半是误报的容器 | 阈值定多少？同一规则在 web app vs native app 是否一致？ |
-| **Aspect ratio 过滤**：极宽 / 极高的框 → 丢 | 装饰横线 / 分隔条 | 跨度大的 toolbar 也是极宽，怎么区分？ |
+| **Size × confidence combination**: small boxes kept only when conf is high | a big box + low conf is mostly a false-positive container | What threshold? Is the same rule consistent across web apps vs native apps? |
+| **Aspect ratio filter**: extremely wide / extremely tall boxes → drop | decorative horizontal lines / dividers | A wide-span toolbar is also extremely wide; how do you distinguish them? |
 
-**结论**：上线时先**只用 §5.1 的 baseline 过滤**。Exploratory 这些，等真有 OmniParser-on-AX-bad-app 的数据再决定要不要加。**别在没数据的情况下提前预设规则**。
+**Conclusion**: at ship time, use **only the §5.1 baseline filtering**. These exploratory ones — decide whether to add them once we actually have data from OmniParser-on-AX-bad-apps. **Don't preset rules ahead of time without data.**
 
-> **OCR 不在这一节**——它一开始确实被列在 exploratory filter 里（"box 内无文字 → 丢"），但分析后挪到了 §4.6 commit-time refiner 的位置。区别见 §4.6 的对比表。简单说：filter 用法是臆测，refiner 用法是 grounded。
+> **OCR is not in this section** — it was indeed initially listed among the exploratory filters ("box with no text → drop"), but after analysis it was moved to the §4.6 commit-time refiner position. See the comparison table in §4.6 for the difference. In short: the filter usage is speculation, the refiner usage is grounded.
 
 ---
 
-## 6. 集成的开放问题
+## 6. Open questions for integration
 
-到正经实现之前要先回答的：
+To be answered before a proper implementation:
 
-### 6.1 进程边界
+### 6.1 Process boundary
 
-OmniParser 是 PyTorch 模型，不可能塞进 Swift 进程里跑。三个候选架构：
+OmniParser is a PyTorch model; there's no way to cram it into the Swift process. Three candidate architectures:
 
-| 方案 | 优 | 缺 |
+| Scheme | Pros | Cons |
 | --- | --- | --- |
-| **Python helper 进程 + XPC** | OmniParser 原生跑，无需转模型；可以单独升级 | Swift ↔ Python IPC 自己撸；Python 运行时 + venv 跟 .app 一起发；启动慢 |
-| **CoreML 转换 + Swift 推理** | 单 binary，启动快，Apple Neural Engine 加速 | YOLO 转 CoreML 可行（ultralytics 有 export 工具），但 Florence-2 转 CoreML 很难；至少 detector 部分能转 |
-| **subprocess（python script）+ stdio** | 简单粗暴 | 每次 detect 都要 spawn Python？或者长驻 worker + stdio 协议，差不多复杂 |
+| **Python helper process + XPC** | OmniParser runs natively, no model conversion needed; can be upgraded independently | hand-roll the Swift ↔ Python IPC; ship the Python runtime + venv alongside the .app; slow startup |
+| **CoreML conversion + Swift inference** | single binary, fast startup, Apple Neural Engine acceleration | YOLO → CoreML is feasible (ultralytics has an export tool), but Florence-2 → CoreML is hard; at least the detector part can convert |
+| **subprocess (python script) + stdio** | crude and simple | spawn Python on every detect? or a long-resident worker + stdio protocol, about as complex |
 
-#### P1 spike 实验结果 ✅ 选定 CoreML
+#### P1 spike experiment result ✅ CoreML selected
 
-`~/Desktop/mouseless-omniparser-coreml-spike/` 跑通了 PyTorch → CoreML 转换 + 推理基准。结论：**CoreML 路径远比预期好**。
+`~/Desktop/mouseless-omniparser-coreml-spike/` got the PyTorch → CoreML conversion + inference benchmark working. Conclusion: **the CoreML path is far better than expected.**
 
-**转换过程**（要拉通几个 pin）：
+**The conversion process** (a few pins to get right):
 
-- 直接 `yolo export model=icon_detect.pt format=coreml nms=True` 是死路——撞 coremltools `_int` 算子 bug
-- root cause：numpy 2.x 移除了多元素数组到 Python scalar 的隐式转换，但 coremltools 8.x 的 torch 前端代码还按 numpy 1.x 写
-- 修复：固定 `numpy<2.0` + `coremltools>=8.0,<9.0` + `torch>=2.2,<2.5` + `ultralytics>=8.2,<8.4`
-- ONNX 中转路径**死了**：coremltools 8.x 彻底删除 ONNX frontend，不再支持
-- 总结：export 时 toolchain 必须按上面 pin，**runtime 没有 Python 依赖**
+- `yolo export model=icon_detect.pt format=coreml nms=True` directly is a dead end — hits a coremltools `_int` operator bug
+- root cause: numpy 2.x removed the implicit conversion of multi-element arrays to a Python scalar, but coremltools 8.x's torch frontend code is still written for numpy 1.x
+- fix: pin `numpy<2.0` + `coremltools>=8.0,<9.0` + `torch>=2.2,<2.5` + `ultralytics>=8.2,<8.4`
+- the ONNX intermediate path is **dead**: coremltools 8.x completely removed the ONNX frontend, no longer supported
+- summary: the toolchain must follow the pins above at export time, but the **runtime has no Python dependency**
 
-**推理延迟**（M3 Max，1280×1280 输入，纯 CoreML.framework 调用，剥离 ultralytics wrapper）：
+**Inference latency** (M3 Max, 1280×1280 input, pure CoreML.framework calls, ultralytics wrapper stripped):
 
-| compute_units | p50 延迟 |
+| compute_units | p50 latency |
 | --- | --- |
 | CPU_ONLY | 145ms |
 | CPU_AND_NE (ANE) | 42ms |
-| ALL (runtime 自选) | 43ms |
+| ALL (runtime auto-selects) | 43ms |
 | **CPU_AND_GPU (Metal)** | **29ms** 🏆 |
 
-参考：PoC 报的 PyTorch + MPS 是 110-140ms。**CoreML + GPU 比 PyTorch MPS 快 4-5 倍**，比设计目标 300ms 快 10 倍。
+For reference: the PoC reported PyTorch + MPS at 110-140ms. **CoreML + GPU is 4-5x faster than PyTorch MPS**, 10x faster than the design target of 300ms.
 
-**意外发现**：**GPU 比 ANE 快 30%**。这跟"YOLO 是卷积密集型网络，Metal GPU 流水线效率高，ANE 更适合 attention-heavy（如 Transformer）"的实际工程经验一致。生产实现要 `MLModelConfiguration.computeUnits = .cpuAndGPU`，**不要**用默认的 `.all` 或显式 `.cpuAndNeuralEngine`。
+**Surprising finding**: **GPU is 30% faster than ANE**. This is consistent with the practical engineering experience that "YOLO is a convolution-heavy network, the Metal GPU pipeline is highly efficient, and ANE is better suited to attention-heavy networks (like Transformers)." The production implementation should use `MLModelConfiguration.computeUnits = .cpuAndGPU`, **not** the default `.all` or an explicit `.cpuAndNeuralEngine`.
 
-**召回质量**：
+**Recall quality**:
 
-- CoreML 原始输出比 PyTorch 少 30-40% 的 box（fullscreen 143→83、wechat 174→112、wechat2 177→133）
-- 原因：`nms=True` 导出时把 conf 阈值 ~0.25 烧进模型，过滤了低 conf 检测
-- 这些被砍的低 conf box **本来就是 §5.1.1 的 conf>0.3 baseline 过滤要丢的**——production impact = 0
-- 加 conf>0.3 baseline 过滤后 CoreML 最终输出 75/111/126 box，跟 PyTorch + conf>0.3 几乎对齐
-- 视觉 overlay 抽查：聊天列表、菜单栏、dock、消息气泡、桌面图标都各自打了框，质量跟 PoC 一致
+- CoreML raw output has 30-40% fewer boxes than PyTorch (fullscreen 143→83, wechat 174→112, wechat2 177→133)
+- reason: `nms=True` export bakes a conf threshold of ~0.25 into the model, filtering out low-conf detections
+- those cut low-conf boxes **were the ones the §5.1.1 conf>0.3 baseline filter would drop anyway** — production impact = 0
+- after adding the conf>0.3 baseline filter, CoreML's final output is 75/111/126 boxes, almost aligned with PyTorch + conf>0.3
+- visual overlay spot-check: chat list, menu bar, dock, message bubbles, desktop icons each got boxes, quality consistent with the PoC
 
-**模型输出 schema**：CoreML 模型有两个张量输出——
+**Model output schema**: the CoreML model has two tensor outputs —
 
 ```
-coordinates: (N, 4)   // [cx, cy, w, h], 归一化到 [0,1] 的 1280×1280 输入空间
-confidence:  (N, 80)  // 每个 box 80 个类别的 confidence
+coordinates: (N, 4)   // [cx, cy, w, h], normalized to the [0,1] of the 1280×1280 input space
+confidence:  (N, 80)  // confidence across 80 classes for each box
 ```
 
-YOLO11m 是多类训练的（80 类，COCO 标准），但 OmniParser fine-tune 数据全归一类。生产代码取 `confidence.max(axis=1)` 当 box 的 conf 用，**不关心具体类别**。坐标要乘原图尺寸还原到屏幕空间。
+YOLO11m is multi-class trained (80 classes, COCO standard), but the OmniParser fine-tune data all collapses to one class. Production code takes `confidence.max(axis=1)` as the box's conf, **not caring about the specific class**. Coordinates must be multiplied by the original image size to restore to screen space.
 
-**决策**：选 #2（CoreML in Swift）。理由不仅是"单 binary 部署"，更是"快得离谱 + 比 #1 的 IPC + Python runtime 简单一个量级"。完整路线见 [`omniparser-integration-roadmap.md`](./omniparser-integration-roadmap.md) P2/P4/P8。
+**Decision**: choose #2 (CoreML in Swift). The rationale isn't just "single-binary deployment," but "absurdly fast + an order of magnitude simpler than #1's IPC + Python runtime." Full roadmap in [`omniparser-integration-roadmap.md`](./omniparser-integration-roadmap.md) P2/P4/P8.
 
-PoC v2 的 throwaway spike 在 `~/Desktop/mouseless-omniparser-coreml-spike/`，可随时 `rm -rf`——production 不需要它。
+The PoC v2 throwaway spike is in `~/Desktop/mouseless-omniparser-coreml-spike/`, `rm -rf`-able any time — production doesn't need it.
 
-### 6.2 模型常驻 vs 按需加载
+### 6.2 Model resident vs on-demand load
 
-模型 weights ~30MB（detector）。常驻 ANE/MPS 内存 ~200-500MB。
+The model weights are ~30MB (detector). Resident ANE/MPS memory is ~200-500MB.
 
-- **常驻**：menu bar app 启动时 load，每次 trigger 直接推理。延迟最低。
-- **按需**：首次 trigger 加载，可能 1-2s 卡顿；之后常驻。
+- **Resident**: load when the menu bar app starts, infer directly on every trigger. Lowest latency.
+- **On-demand**: load on first trigger, possibly a 1-2s stall; resident thereafter.
 
-**fall-through 改变了这个权衡**：OmniParser 不是每次都用，可能用户大部分时间根本触发不到它。常驻 500MB 内存 99% 时间是浪费。
+**Fall-through changes this trade-off**: OmniParser isn't used every time; the user may not trigger it at all most of the time. 500MB resident memory is wasted 99% of the time.
 
-倾向：**首次需要时加载 + 之后常驻**（懒加载 + 不卸载）。第一次 AX-bad app 上稍微卡一下接受，之后回到稳态延迟。
+Leaning toward: **load on first need + resident thereafter** (lazy load + don't unload). A slight stall the first time on an AX-bad app is acceptable, then back to steady-state latency.
 
-### 6.3 触发判定
+### 6.3 Trigger decision
 
-`AX_USEFUL_THRESHOLD` 在 §4.4 已经讨论。这里只是再次强调：**这个决定需要数据**。落地时先用最保守的 `N=0`，运行一段时间看实际"OmniParser 是否经常被触发"，再调。
+`AX_USEFUL_THRESHOLD` was already discussed in §4.4. Here we just reiterate: **this decision needs data**. At ship time, use the most conservative `N=0` first, run it for a while to see how often "OmniParser actually gets triggered," then tune.
 
-### 6.4 截屏来源 + 范围（已定）
+### 6.4 Screenshot source + scope (decided)
 
-#### 范围：**只截焦点窗口**（不是全屏，不是焦点屏）
+#### Scope: **only capture the focused window** (not the full screen, not the focused screen)
 
-讨论时考虑过三种范围：
+During discussion we considered three scopes:
 
-| 方案 | 优 | 缺 |
+| Scheme | Pros | Cons |
 | --- | --- | --- |
-| 全屏 | API 最简单 | 跟 AX 路径在 Dock / menu bar 上重叠产生 label 冲突；3000×2000 → 1280² resize 后小图标接近模型识别下限，召回打折；隐私上把用户当前任务无关的内容也喂给 ML pipeline |
-| 焦点屏 | 多显示器场景过滤掉其他屏 | 仍然包含 Dock / menu bar / 桌面 / 其他窗口，重叠和召回问题不解 |
-| **焦点窗口** | 跟 AX 路径分工干净；窗口 1500×900 → 1280² resize 后小图标 scale ~0.85 召回更高；隐私上只看用户当前窗口 | API 略复杂（要先 AX 拿 windowID，再 ScreenCaptureKit 截特定窗口） |
+| Full screen | simplest API | overlaps with the AX path on the Dock / menu bar, producing label conflicts; after 3000×2000 → 1280² resize, small icons approach the model's recognition floor, discounting recall; privacy-wise it feeds content unrelated to the user's current task into the ML pipeline |
+| Focused screen | filters out other screens in a multi-display scenario | still includes the Dock / menu bar / desktop / other windows, the overlap and recall problems unsolved |
+| **Focused window** | clean division of labor with the AX path; a 1500×900 window → 1280² resize gives small icons a scale of ~0.85 for higher recall; privacy-wise it only looks at the user's current window | slightly more complex API (first AX to get the windowID, then ScreenCaptureKit to capture the specific window) |
 
-**决策：焦点窗口**。理由——AX 路径在 Dock / menu bar / menu extras 上**永远好用**（这些苹果原生 AX 100% 覆盖），不需要 OmniParser 重复识别。OmniParser **精确**地补 AX 黑洞问题——**焦点窗口内部的子元素**——所以截图范围跟 AX 路径互补、不重叠。
+**Decision: focused window**. Rationale — the AX path is **always good** on the Dock / menu bar / menu extras (these Apple-native AX have 100% coverage), so there's no need for OmniParser to redundantly recognize them. OmniParser **precisely** supplements the AX black-hole problem — **the child elements inside the focused window** — so the screenshot scope is complementary to, not overlapping with, the AX path.
 
-> **注：下面的实现块已过时。** 实际 `ScreenCapture.captureFocusedWindow` 用的是"截整个 display 再按窗口 rect crop"（读已合成 framebuffer，比 `desktopIndependentWindow` 的强制重渲染快），不再用 `_AXUIElementGetWindow` / CGWindowID。另外它带一个 `isolateApp` 开关：sticky 切 app 后的重扫用 `SCContentFilter(display:excludingApplications:[dockApp])` **排除 Dock 进程**，把 Cmd+Tab 切换器 HUD（Dock 拥有的窗口）从截图里去掉——否则 OP 会把切换器上的 app 图标识别成 hint。详见 `modes.md` §4.2。
+> **Note: the implementation block below is outdated.** The actual `ScreenCapture.captureFocusedWindow` uses "capture the whole display, then crop by the window rect" (reading the already-composited framebuffer, faster than `desktopIndependentWindow`'s forced re-render), no longer using `_AXUIElementGetWindow` / CGWindowID. It also carries an `isolateApp` switch: the rescan after a sticky app switch uses `SCContentFilter(display:excludingApplications:[dockApp])` to **exclude the Dock process**, removing the Cmd+Tab switcher HUD (a window owned by Dock) from the screenshot — otherwise OP would recognize the app icons on the switcher as hints. See `modes.md` §4.2 for details.
 
-#### AXFocusedWindow 在 AX-bad app 上也能拿吗？✅ 能
+#### Can AXFocusedWindow be obtained on AX-bad apps too? ✅ Yes
 
-AX 树有两层：
+The AX tree has two layers:
 
-- **顶层窗口骨架**（AXApplication → AXWindow → AXPosition / AXSize / AXTitle）：**任何 app 都正确**——macOS 系统 framework 在 NSWindow 创建时自动注册，不依赖 app 自身 AX 实现质量
-- **窗口内子元素树**（AXChildren 递归）：**这一层才会在 Electron / WKWebView / Catalyst 上变成 AXGroup 黑洞**
+- **The top-level window skeleton** (AXApplication → AXWindow → AXPosition / AXSize / AXTitle): **correct on any app** — the macOS system framework registers it automatically when the NSWindow is created, not dependent on the app's own AX implementation quality
+- **The in-window child element tree** (AXChildren recursive): **this is the layer that becomes an AXGroup black hole on Electron / WKWebView / Catalyst**
 
-OmniParser 路径只读顶层（窗口在哪、多大、CGWindowID），**完全不碰子元素树**——所以对 AX-bad app 同样 work。从这个角度看 OmniParser 是"AX 顶层元数据的优秀客户 + 子元素树的替代者"。
+The OmniParser path only reads the top level (where the window is, how big, the CGWindowID), and **never touches the child element tree** — so it works equally on AX-bad apps. From this angle OmniParser is "an excellent client of the AX top-level metadata + a replacement for the child element tree."
 
-边缘 case：
+Edge cases:
 
-| 场景 | 处理 |
+| Scenario | Handling |
 | --- | --- |
-| 焦点 app 没有窗口（menu bar agent app）| `AXFocusedWindow` = nil → OmniParser 不触发，AX 路径处理 menu bar |
-| 多窗口同时可见（多个 Finder） | 第一版只截 `AXFocusedWindow`，按观察决定要不要扩展到所有 AXWindows |
-| 焦点窗口被其他窗口部分遮挡 | ScreenCaptureKit 的 `desktopIndependentWindow` 模式忽略遮挡画完整窗口内容——正合需求 |
-| 全屏游戏（自渲染 bypass NSWindow） | 罕见。整个 Mouseless 本来就在游戏内不能 work，已知 limitation |
+| The focused app has no window (a menu bar agent app) | `AXFocusedWindow` = nil → OmniParser doesn't trigger, the AX path handles the menu bar |
+| Multiple windows visible at once (several Finders) | The first version only captures `AXFocusedWindow`; decide by observation whether to extend to all AXWindows |
+| The focused window is partially occluded by other windows | ScreenCaptureKit's `desktopIndependentWindow` mode ignores occlusion and draws the full window content — exactly what we need |
+| Full-screen games (self-rendered, bypassing NSWindow) | Rare. The whole of Mouseless can't work in a game to begin with, a known limitation |
 
-#### 实现路径：ScreenCaptureKit per-window
+#### Implementation path: ScreenCaptureKit per-window
 
 ```swift
-// 1. AX 拿焦点窗口 element
+// 1. AX gets the focused window element
 guard let focusedWindow = focusedApp.attribute("AXFocusedWindow") as? AXUIElement
-else { return .axOnly }   // 没窗口，OP 不触发
+else { return .axOnly }   // no window, OP doesn't trigger
 
-// 2. 拿 CGWindowID（私有 API but stable: _AXUIElementGetWindow）
+// 2. Get the CGWindowID (private API but stable: _AXUIElementGetWindow)
 var windowID: CGWindowID = 0
 guard _AXUIElementGetWindow(focusedWindow, &windowID) == .success
 else { return .axOnly }
 
-// 3. ScreenCaptureKit 截
+// 3. ScreenCaptureKit captures it
 let content = try await SCShareableContent.current
 guard let scWindow = content.windows.first(where: { $0.windowID == windowID })
 else { return .axOnly }
@@ -638,54 +638,54 @@ let image = try await SCScreenshotManager.captureImage(
 )
 ```
 
-**对比 API 候选**：
+**Comparison of API candidates**:
 
-- ✅ **ScreenCaptureKit (`SCScreenshotManager`)**：现代 API、per-window 原生支持、自动处理多屏 / HiDPI / 窗口 z-order
-- ⚠️ `CGWindowListCreateImage`：legacy，能 per-window 但 macOS 14+ 起被标 deprecated
-- ❌ `CGDisplayCreateImage`：只能整屏，不符合我们需求
+- ✅ **ScreenCaptureKit (`SCScreenshotManager`)**: modern API, native per-window support, automatically handles multi-display / HiDPI / window z-order
+- ⚠️ `CGWindowListCreateImage`: legacy, can do per-window but marked deprecated since macOS 14+
+- ❌ `CGDisplayCreateImage`: full-screen only, doesn't fit our need
 
-选 ScreenCaptureKit。
+Choose ScreenCaptureKit.
 
-#### Screen Recording 权限
+#### Screen Recording permission
 
-**这是 AX 之外多加的一个授权门槛**——权限模型是"AX + Screen Recording"。
+**This is one more authorization gate added on top of AX** — the permission model is "AX + Screen Recording."
 
-权限请求策略（**已从 lazy 改为启动时硬性 gate**）：
+Permission-request strategy (**changed from lazy to a hard startup gate**):
 
-- 早期是 lazy：启动不请求，首次落进 OP app 才弹 `CGPreflightScreenCaptureAccess()` prompt，没授权就 OP 路径降级为"无候选"（AX 候选仍可用）。
-- **现在是硬性要求**（`AppDelegate.ensureScreenRecording()`，与 `ensureAccessibility()` 并列）：启动时两个权限都检测、都弹 prompt，**两个都满足才启动**(否则 `M⚠` + 列出缺哪个 + 提示授权后重启)。改的原因:Screen Recording 现在不只 OP 在用——**内容 settle watch**(`WindowFingerprinter` 低分辨率小图,见 `modes.md` 机制 1/2)也靠它;没有它,OP 路由的 app 完全没 hint、且所有 app-switch/commit 重扫退回盲延迟。OP 是核心价值,不值得为"只想授 AX 的用户"保留半残体验。
-- Screen Recording 授权**进程内缓存**,授予后需**重启**才生效(`CGRequestScreenCaptureAccess()` 当次仍返回 false)——和 macOS 对其它 app 的行为一致。运行时 capture 仍保留 `CGPreflightScreenCaptureAccess()` 守卫(防用户运行中在设置里撤销),撤销则 capture 返回 nil 优雅降级。
+- Early on it was lazy: don't request at startup, pop the `CGPreflightScreenCaptureAccess()` prompt the first time you land in an OP app, and if not granted the OP path degrades to "no candidates" (the AX candidates are still available).
+- **Now it's a hard requirement** (`AppDelegate.ensureScreenRecording()`, alongside `ensureAccessibility()`): both permissions are checked at startup, both prompts are popped, and **the app only launches once both are satisfied** (otherwise `M⚠` + lists which is missing + a prompt to grant and restart). The reason for the change: Screen Recording is now used by more than just OP — the **content settle watch** (`WindowFingerprinter` low-resolution thumbnail, see mechanisms 1/2 in `modes.md`) also relies on it; without it, OP-routed apps get no hints at all, and every app-switch/commit rescan falls back to a blind delay. OP is core value, not worth keeping a half-crippled experience for "users who only want to grant AX."
+- Screen Recording authorization is **cached in-process**; after granting, a **restart** is needed for it to take effect (`CGRequestScreenCaptureAccess()` still returns false in the current run) — consistent with macOS's behavior for other apps. The runtime capture still keeps a `CGPreflightScreenCaptureAccess()` guard (in case the user revokes it in Settings while running); if revoked, capture returns nil and degrades gracefully.
 
-#### 坐标系对齐
+#### Coordinate-system alignment
 
-OmniParser 输出 box 是窗口截图内的归一化坐标 (0-1)。要还原到屏幕坐标用于合成 click：
+The boxes OmniParser outputs are normalized coordinates (0-1) within the window screenshot. To restore them to screen coordinates for synthesizing a click:
 
 ```
 screen_x = window.origin.x + box.cx_normalized * window.size.width
 screen_y = window.origin.y + box.cy_normalized * window.size.height
 ```
 
-`window.origin` / `window.size` 直接从前面那步的 AX `AXPosition` / `AXSize` 拿。**完全跟 AX 路径同一个坐标系**——合成 click 时无需特殊处理 OP 来源的 box。
+`window.origin` / `window.size` come straight from the AX `AXPosition` / `AXSize` from the earlier step. **Exactly the same coordinate system as the AX path** — no special handling needed for OP-sourced boxes when synthesizing a click.
 
-#### 多显示器
+#### Multiple displays
 
-OmniParser 只看焦点窗口——窗口在哪一块屏不重要。**多显示器场景自动正确**，无需特殊代码。
-
----
-
-## 7. 下一步
-
-详见 [`omniparser-integration-roadmap.md`](./omniparser-integration-roadmap.md)。
-
-该文档把本设计里散布的决策（§4.4 框架探测、§4.6 OCR refiner、§5.1 baseline 过滤、§6 开放问题）映射成 9 个可独立验收的实施阶段（P0 决策 → P8 发布），含估时、风险、降级路径、out-of-scope 边界。**改设计时同步更新那份**。
+OmniParser only looks at the focused window — which screen the window is on doesn't matter. **The multi-display scenario is automatically correct**, no special code needed.
 
 ---
 
-## 8. 参考
+## 7. Next steps
+
+See [`omniparser-integration-roadmap.md`](./omniparser-integration-roadmap.md).
+
+That document maps the decisions scattered across this design (§4.4 framework detection, §4.6 OCR refiner, §5.1 baseline filtering, §6 open questions) into 9 independently acceptance-testable implementation phases (P0 decision → P8 release), with time estimates, risks, degradation paths, and out-of-scope boundaries. **Update that document in sync when changing this design.**
+
+---
+
+## 8. References
 
 - OmniParser repo: `github.com/microsoft/OmniParser`
-- 权重: `huggingface.co/microsoft/OmniParser-v2.0` (`icon_detect/model.pt` 是 YOLOv8)
-- PoC 源代码：`~/Desktop/mouseless-omniparser-poc/`（throwaway，可以随时 `rm -rf`）
-- 相关 specs：
-  - `SPECS.md` known gap #2 (Electron / web compatibility) ← OmniParser 主要解决这个
-  - `SPECS.md` known gap #3 + `hint-discovery.md` §5 (AX cleanup spike) ← OmniParser **不**解决这个，单独治
+- Weights: `huggingface.co/microsoft/OmniParser-v2.0` (`icon_detect/model.pt` is YOLOv8)
+- PoC source code: `~/Desktop/mouseless-omniparser-poc/` (throwaway, `rm -rf`-able any time)
+- Related specs:
+  - `SPECS.md` known gap #2 (Electron / web compatibility) ← OmniParser mainly solves this
+  - `SPECS.md` known gap #3 + `hint-discovery.md` §5 (AX cleanup spike) ← OmniParser does **not** solve this, fix it separately

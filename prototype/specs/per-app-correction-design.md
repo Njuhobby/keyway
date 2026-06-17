@@ -1,90 +1,90 @@
-# Per-App 修正层设计（AX walker 覆写为主）
+# Per-App Correction Layer Design (AX walker overrides as the primary mechanism)
 
-> **状态：设计草稿，暂不实现**。OmniParser 集成（P0-P6）之后规划的**重要独立模块**，也是 Mouseless 主要的**护城河**。本文固化设计推理 + 被否决/降级的方案，等优先级到了直接照此实现。
+> **Status: design draft, not yet implemented**. An **important standalone module** planned for after OmniParser integration (P0-P6), and also Mouseless's main **moat**. This doc locks in the design reasoning + the rejected/downgraded approaches, so that when the priority comes up we can implement it directly from here.
 >
-> 相关：`omniparser-fallback-design.md`（OP 视觉路径主体）、`browser-support-design.md`（浏览器走扩展 DOM，是这套思路在浏览器域的对应物）。
+> Related: `omniparser-fallback-design.md` (the OP visual-path body), `browser-support-design.md` (browsers go through the extension DOM, which is this same line of thinking applied to the browser domain).
 >
-> **§11 是 scale 的关键** —— template 自动生成 pipeline（AX dump × 视觉 × walker 三方 diff → LLM/启发式合成 patch），不靠人力一条条写。
+> **§11 is the key to scale** — a template auto-generation pipeline (AX dump × visual × walker three-way diff → LLM/heuristic synthesized patch), rather than relying on writing rules one at a time by hand.
 
 ---
 
-## 0. TL;DR — 三层防线
+## 0. TL;DR — three lines of defense
 
 ```
-1. per-app AX walker 覆写（主力）  —— 80%+ 长尾 app，声明式 JSON 规则，~1-5ms
-2. OmniParser 视觉路径（fallback） —— 真·AX 黑洞 app（纯 canvas / 自绘），已实现
-3. pattern exclude / threshold override（辅助） —— OP/AX 误报与调参
+1. per-app AX walker overrides (primary)  —— 80%+ of long-tail apps, declarative JSON rules, ~1-5ms
+2. OmniParser visual path (fallback) —— true AX black-hole apps (pure canvas / custom-drawn), implemented
+3. pattern exclude / threshold override (auxiliary) —— OP/AX false positives and tuning
 ```
 
-**护城河 = 社区共建的、每个 app 的 AX 适配规则库** —— 把每个 app 怪异的 accessibility 树翻译成精确的可点元素。纯文本、可 diff、可 review、零模型维护、贡献门槛低到任何能用 AX Inspector 戳一下的人都能提 PR。
+**Moat = a community-built library of per-app AX adaptation rules** — translating each app's quirky accessibility tree into precise clickable elements. Pure text, diffable, reviewable, zero model maintenance, with a contribution barrier so low that anyone who can poke around with AX Inspector can submit a PR.
 
-NCC 模板匹配从早期设计的"主力"**降级到附录**（§A1）——重新分析后它的适用面被 AX 覆写从上面挤掉、被 OP 从下面盖住，夹在中间几乎没有立足之地。**v1 不实现，大概率永不实现。**
+NCC template matching was **downgraded from the early design's "primary mechanism" to an appendix** (§A1) — after re-analysis, its applicable surface gets squeezed out from above by AX overrides and covered from below by OP, leaving it wedged in the middle with almost no place to stand. **Not implemented in v1, and most likely never implemented.**
 
 ---
 
-## 1. 动机：AX-bad ≠ AX-absent
+## 1. Motivation: AX-bad ≠ AX-absent
 
-OmniParser 路径上线后的根本问题：OP 不是 100% 准确（漏 icon-only 按钮、误标标题栏文字）、confidence 阈值不通用、box 是匿名的（不知道是相机还是文件夹）。所以 Mouseless 成熟必须有 **per-app 个性化修正**。
+The fundamental problem once the OmniParser path went live: OP is not 100% accurate (misses icon-only buttons, mislabels title-bar text), the confidence threshold isn't universal, and boxes are anonymous (it doesn't know whether something is a camera or a folder). So a mature Mouseless must have **per-app personalized correction**.
 
-但关键的二次洞察（决定了主力机制）：**绝大多数"OP-bad"的 app,其实 AX 不是"没有",而是"不规范"**。
+But the key secondary insight (the one that determines the primary mechanism): **the vast majority of "OP-bad" apps actually do have AX — it just isn't "absent," it's "non-standard."**
 
-例子 —— Slack 的 Compose 按钮在 AX 树里是：
+Example — Slack's Compose button in the AX tree is:
 
 ```
 AXGroup (subrole=nil, action=nil)
   └── AXGroup
-        └── AXImage (action=AXPress, title="Compose")   ← 在这里!
+        └── AXImage (action=AXPress, title="Compose")   ← here!
 ```
 
-我们的通用 walker 跑 role 白名单 + depth 限制时跳过了这种"罩在两层 AXGroup 里、role 是 AXImage 但带 AXPress action"的元素。**App 是有信息的,我们没读到。**
+When our generic walker runs its role whitelist + depth limit, it skips this kind of element — "wrapped in two layers of AXGroup, role is AXImage but carries an AXPress action." **The app has the information; we just didn't read it.**
 
-真·视觉零 AX 的 app（WeChat 聊天自绘区、Figma canvas、网页游戏）是**少数**。Slack / Notion / Linear / Discord / Cursor / 大多数 Electron 和 SwiftUI app 都有相当程度的 AX，只是结构怪。
+Truly visual, zero-AX apps (WeChat's custom-drawn chat area, Figma canvas, web games) are **a minority**. Slack / Notion / Linear / Discord / Cursor / most Electron and SwiftUI apps all have a fair amount of AX — it's just structurally weird.
 
-**结论:对长尾 app 做深度适配,"customize AX 规则"是比"视觉补漏"更好的路** —— 所有规则都能用文字表示、便宜、抗 app 升级、社区可贡献。只有 app AX 真的啥都没有时才退回 OP。
+**Conclusion: for deep adaptation of long-tail apps, "customizing AX rules" is a better path than "patching the gaps visually"** — all rules can be expressed as text, are cheap, are resilient to app upgrades, and are community-contributable. Only when an app's AX truly has nothing at all do we fall back to OP.
 
 ---
 
-## 2. 为什么不是 per-app 模型 fine-tuning
+## 2. Why not per-app model fine-tuning
 
-直觉上"为每个 app 微调一套 OP 模型，教它相机可点"——**否决**。
+The intuitive idea of "fine-tune an OP model for each app, teach it that the camera is clickable" — **rejected**.
 
-| 维度 | per-app 模型 fine-tuning |
+| Dimension | per-app model fine-tuning |
 | --- | --- |
-| 标注 | 人工框出 app 所有界面状态的每个可点元素，几百-几千张/app |
-| 训练 | GPU + 管线 + 调参，per app 重来 |
-| 体积 | 每个 ~38MB，100 app = **3.8 GB** |
-| 维护 | **app 一更新 UI 模型就过时** → 重标注 + 重训 |
-| 讽刺点 | 你标注"相机可点"的那个框，**AX 本来就免费能拿到**（只是 walker 没收）|
+| Labeling | Manually box every clickable element across all of an app's UI states, hundreds to thousands of images per app |
+| Training | GPU + pipeline + tuning, redone per app |
+| Size | ~38MB each, 100 apps = **3.8 GB** |
+| Maintenance | **The moment an app updates its UI the model goes stale** → re-label + re-train |
+| The irony | The box you labeled "camera is clickable" was **available for free from AX all along** (the walker just didn't collect it) |
 
-fine-tuning 是"完全没有结构化信息、只能从像素学"时的最后手段。我们对绝大多数 app 有更便宜的信息源（AX 树本身）。真要训模型，也该是拿**聚合** UI 数据训一个更强的**通用**检测器替换 OmniParser，不是 per-app 一个模型。
-
----
-
-## 3. 核心洞察：self-gating，绕开窗口分类
-
-修正方案的第一个死结：**一个 app 不止一种窗口布局**（WeChat 有主窗口、通讯录、朋友圈、设置、图片预览……）。一条"左下角有相机"的规则套到设置窗口就凭空造假 hint。
-
-试图做"窗口分类器"（靠标题/尺寸/AXIdentifier 判断布局）是死结：标题会变、用户会 resize、很多 app 不设 AXIdentifier。
-
-**破解：不分类窗口。让规则锚到一个可判定的条件，条件的"成不成立"本身充当 gate。** 对 AX 覆写来说尤其干净 —— 规则是"AX 树里存在满足 predicate 的元素"，predicate 匹配不到就自动静默，零误报。设置窗口里没有那个 Compose 结构 → 规则自然不产出 hint。**分类窗口这一步直接消失。**
+Fine-tuning is the last resort for "no structured information whatsoever, can only learn from pixels." For the vast majority of apps we have a cheaper information source (the AX tree itself). If we really were going to train a model, it should be training a stronger **generic** detector on **aggregated** UI data to replace OmniParser — not one model per app.
 
 ---
 
-## 4. AX walker 覆写：主力机制
+## 3. Core insight: self-gating, sidestepping window classification
 
-要救的是"**AX 树里有这个元素,只是通用 walker 没收**"。覆写 = 一份声明式 JSON,告诉 walker 在某个 app 里**额外**把满足某些条件的元素算作可点。
+The first deadlock for the correction approach: **an app has more than one window layout** (WeChat has the main window, contacts, Moments, settings, image preview…). A "there's a camera in the bottom-left corner" rule, applied to the settings window, fabricates a hint out of thin air.
 
-### 4.1 数据形态
+Trying to build a "window classifier" (judging the layout by title/size/AXIdentifier) is a deadlock: titles change, users resize, and many apps don't set an AXIdentifier.
 
-每个 app 一份 `patch.json` + 可选 README：
+**The breakthrough: don't classify windows. Anchor a rule to a decidable condition, and let "whether the condition holds" itself act as the gate.** This is especially clean for AX overrides — a rule is "an element satisfying the predicate exists in the AX tree," and if the predicate matches nothing the rule silently does nothing, with zero false positives. The settings window doesn't contain that Compose structure → the rule naturally produces no hint. **The window-classification step simply disappears.**
+
+---
+
+## 4. AX walker overrides: the primary mechanism
+
+What we're rescuing is "**the element IS in the AX tree, the generic walker just didn't collect it**." An override = a declarative JSON file telling the walker to **additionally** treat elements satisfying certain conditions as clickable in a given app.
+
+### 4.1 Data shape
+
+One `patch.json` per app + an optional README:
 
 ```
 patches/com.tinyspeck.slackmacgap/
 ├── patch.json
-└── README.md          # 维护者备注（哪个版本 teach 的、截图示例）
+└── README.md          # maintainer notes (which version it was taught against, screenshot examples)
 ```
 
-`patch.json`（schema 草稿）：
+`patch.json` (schema draft):
 
 ```jsonc
 {
@@ -98,268 +98,268 @@ patches/com.tinyspeck.slackmacgap/
     {
       "role": "AXImage",
       "must_have_action": "AXPress",
-      "comment": "侧栏 Compose / Threads / Mentions icon"
+      "comment": "sidebar Compose / Threads / Mentions icon"
     },
     {
       "role": "AXGroup",
       "must_have_subrole": "AXButton",
-      "comment": "自定义按钮 wrap 在 group 里"
+      "comment": "custom button wrapped in a group"
     }
   ],
 
   "exclude": [
     { "role": "AXStaticText", "title_equals_window": true,
-      "comment": "标题栏文字" }
+      "comment": "title-bar text" }
   ],
 
   "fallback_op": false
 }
 ```
 
-**格式决策（v1 拍板）**：
+**Format decisions (locked in for v1)**:
 
-- **JSON 不用 YAML** —— Foundation 原生 parse、零依赖、CI 工具好写。可读性对这种扁平结构够用。
-- **predicate 扁平、不做 role_path** —— 一条 rule 内字段 AND（role=AXImage 且 has AXPress）；多条 rule 之间 OR。不支持祖先链（"AXGroup → AXGroup → AXImage 才算"）。绝大多数 case 扁平 predicate 够；真需要路径精准防误命中再在 v2 加。
-- **二值判定、不做 score** —— rule `matches → clickable`，纯布尔。文本规则没必要装小数。
-- **`fallback_op` 默认 false** —— patch 存在即表示"这 app 走 AX 自洽,不需要 OP"。设 true 才在 AX 收完后再叠 OP 补漏（给"AX 拿到大部分 + 动态内容如聊天气泡需要视觉兜底"的混合 app 用）。默认 false 避免开发者忘记关、白付 OP 的 ~95ms。
+- **JSON not YAML** — native Foundation parsing, zero dependencies, easy to write CI tooling for. Readability is good enough for this kind of flat structure.
+- **Predicates are flat, no role_path** — fields within a rule are AND'd (role=AXImage and has AXPress); multiple rules are OR'd together. Ancestor chains ("only AXGroup → AXGroup → AXImage counts") are not supported. A flat predicate is enough for the vast majority of cases; if path precision is genuinely needed to prevent mismatches, add it in v2.
+- **Binary decision, no score** — a rule `matches → clickable`, purely boolean. Text rules have no need to dress up with decimals.
+- **`fallback_op` defaults to false** — the existence of a patch signals "this app is self-consistent through AX and doesn't need OP." Set it to true only to layer OP on top after the AX collection to patch gaps (for hybrid apps where "AX gets most of it + dynamic content like chat bubbles needs a visual fallback"). Defaulting to false avoids the developer forgetting to turn it off and paying OP's ~95ms for nothing.
 
-predicate 可用字段（v1）：`role` / `subrole` / `must_have_action`（"AXPress"/"AXShowMenu"）/ `must_not_have_action` / `title_matches`（正则）等，按需扩。
+Available predicate fields (v1): `role` / `subrole` / `must_have_action` ("AXPress"/"AXShowMenu") / `must_not_have_action` / `title_matches` (regex), etc., extended as needed.
 
-### 4.2 接入现有 walker
+### 4.2 Hooking into the existing walker
 
-现状路由（`HintMode.collectAll`）：
+Current routing (`HintMode.collectAll`):
 
 ```
 frontmost.bundleID
-   ├─ isBrowserApp → BrowserProvider（扩展 DOM）
-   ├─ shouldUseAXForFocused → AX walk（hardcoded whitelist）
-   └─ 其它 → OmniParser
+   ├─ isBrowserApp → BrowserProvider (extension DOM)
+   ├─ shouldUseAXForFocused → AX walk (hardcoded whitelist)
+   └─ otherwise → OmniParser
 ```
 
-加 patch 后变成：
+After adding patches it becomes:
 
 ```swift
 if let patch = AppPatchRegistry.shared.patch(for: bundleID) {
-    walker.run(window: focusedWindow, augmentedBy: patch)   // AX walk + 额外规则
-    if patch.fallbackOP { mergeOP(...) }                    // 默认不跑
+    walker.run(window: focusedWindow, augmentedBy: patch)   // AX walk + extra rules
+    if patch.fallbackOP { mergeOP(...) }                    // off by default
 } else if AppRegistry.shouldUseAXForFocused(bundleID) {
-    walker.run(window: focusedWindow)                       // 原通用 walk
+    walker.run(window: focusedWindow)                       // original generic walk
 } else {
-    OmniParserPath.collect()                                // 无 patch + 非白名单 → OP
+    OmniParserPath.collect()                                // no patch + not whitelisted → OP
 }
 ```
 
-walker 判"某元素是否 clickable"时多过一遍 patch 的 `additional_clickable` 规则：
+When the walker decides "is this element clickable," it makes an extra pass over the patch's `additional_clickable` rules:
 
 ```swift
 func isClickable(element, patch) -> Bool {
-    if defaultClickableHeuristics(element) { return true }   // 已有通用判定
+    if defaultClickableHeuristics(element) { return true }   // existing generic decision
     if let patch, patch.additionalClickable.contains(where: { $0.matches(element) }) {
-        return true                                          // app-specific 补充
+        return true                                          // app-specific addition
     }
     return false
 }
 ```
 
-简单的 forward-chaining，零黑魔法。原 `AX_FOCUSED_WHITELIST` 语义保留 —— 那是"这 app **不用 patch** 也信通用 walker"（Finder / Mail / Notes 这种规范 a11y app）。**二分（AX whitelist vs OP）变三分（patch app / vanilla whitelist app / OP-only app）**，绝大多数长尾 app 从 OP 迁到 patch。
+Simple forward-chaining, zero black magic. The original `AX_FOCUSED_WHITELIST` semantics are preserved — that means "this app trusts the generic walker **without a patch**" (well-behaved a11y apps like Finder / Mail / Notes). **The binary split (AX whitelist vs OP) becomes a three-way split (patch app / vanilla whitelist app / OP-only app)**, with the vast majority of long-tail apps migrating from OP to patches.
 
-### 4.3 teach 闭环（抓 AX predicate）
+### 4.3 The teach loop (capturing an AX predicate)
 
 ```
-教学（每条规则一次性）：
-  1. 用户在 Slack，Compose 按钮没 hint
-  2. 触发 teach（menu bar "Teach a missing hint…" 选项）
-  3. 用户把鼠标指向 Compose 按钮
-  4. Mouseless 用 AXUIElementCopyElementAtPosition 拿那个元素
-  5. 读它的 role / subrole / actions → 生成一条候选 predicate
-     （"role=AXImage, must_have_action=AXPress"）
-  6. 存进本地 patch.json
-运行时：加载 patch → walk 时套用 → 命中 → 合成 hint
+teaching (once per rule):
+  1. User is in Slack, the Compose button has no hint
+  2. Trigger teach (menu bar "Teach a missing hint…" option)
+  3. User points the mouse at the Compose button
+  4. Mouseless uses AXUIElementCopyElementAtPosition to grab that element
+  5. Read its role / subrole / actions → generate a candidate predicate
+     ("role=AXImage, must_have_action=AXPress")
+  6. Save into the local patch.json
+runtime: load patch → apply during walk → match → synthesize hint
 ```
 
-teach 产物**从"截 icon PNG"变成"抓一条 AX predicate"** —— 这是主力换成 AX 覆写后 teach 的关键变化。门槛更低、PR 是几行 JSON 而非 PNG+JSON、review 更快、不存在"icon 改版模板失效"。
+The teach output **changes from "screenshot an icon PNG" to "capture an AX predicate"** — this is the key change in teach once the primary mechanism switches to AX overrides. Lower barrier, the PR is a few lines of JSON instead of PNG+JSON, review is faster, and there's no "the template breaks when the icon is redesigned."
 
-teach 入口走 **menu bar 下拉选项**（"Teach a missing hint…"），不抢 chord —— 一次性操作不值得占按键。
+The teach entry point is a **menu bar dropdown option** ("Teach a missing hint…"), not a chord — a one-off operation isn't worth occupying a key.
 
 ---
 
-## 5. exclude / threshold override（辅助）
+## 5. exclude / threshold override (auxiliary)
 
-**exclude** —— 删 OP/AX 误报（标题栏文字被标 hint）。优先 pattern-based（跨布局通用）：
+**exclude** — remove OP/AX false positives (title-bar text labeled as a hint). Prefer pattern-based (works across layouts):
 
 ```jsonc
-{ "role": "AXStaticText", "title_equals_window": true }   // 删文字 == 窗口标题的
+{ "role": "AXStaticText", "title_equals_window": true }   // remove text == window title
 ```
 
-标题栏文字 == 窗口标题这条所有布局通用，不用 per-layout 配。exclude 比 include 容易 —— 它作用在**已有** candidate 上，能做模式匹配。
+The "title-bar text == window title" rule is universal across all layouts, so it doesn't need per-layout config. exclude is easier than include — it operates on **existing** candidates and can do pattern matching.
 
-**threshold override** —— 某 app OP confidence 默认 0.3 不对，patch 里调一行。纯配置，~0 成本。仅对 `fallback_op: true` 或 OP-only 的 app 有意义。
+**threshold override** — when some app's default OP confidence of 0.3 is wrong, tune one line in the patch. Pure config, ~0 cost. Only meaningful for apps with `fallback_op: true` or OP-only apps.
 
 ---
 
-## 6. 分发飞轮：L0 → L1 → L2
+## 6. Distribution flywheel: L0 → L1 → L2
 
-护城河要转起来，靠社区共建。按复杂度递进，**做 L0→L1→L2，跳过 L3**：
+For the moat to spin up, it relies on community co-building. Progressing by complexity, **do L0→L1→L2, skip L3**:
 
-| 阶段 | 机制 | 消费门槛 | 贡献门槛 | 飞轮 |
+| Stage | Mechanism | Consumption barrier | Contribution barrier | Flywheel |
 |---|---|---|---|---|
-| **L0** 自带 curated | top ~30 app 的 patch 打包进 .app | 0 操作 | （我们手写）| 不增长 |
-| **L1** GitHub repo + 自动 pull | `Njuhobby/mouseless-patches` 公开 repo，启动时 pull 最新 + 本地 cache + 离线 fallback | 0 操作 | 懂 PR | 慢飞轮 |
-| **L2** 一键分享 | app 内 teach 完点"分享" → GitHub OAuth 自动提 PR（patch.json + 截图） | 0 操作 | **0 摩擦** | 真飞轮 |
-| L3 marketplace | 类 VS Code 扩展商店（搜/装/评分）| 完全消费式 | — | 强但工程量大,**不做** |
+| **L0** bundled curated | patches for the top ~30 apps packaged into the .app | 0 actions | (we hand-write them) | doesn't grow |
+| **L1** GitHub repo + auto pull | `Njuhobby/mouseless-patches` public repo, pull latest on launch + local cache + offline fallback | 0 actions | knows PRs | slow flywheel |
+| **L2** one-click share | after teaching in-app, click "share" → GitHub OAuth auto-opens a PR (patch.json + screenshot) | 0 actions | **0 friction** | true flywheel |
+| L3 marketplace | VS Code-extension-store-like (search/install/rate) | fully consumption-only | — | strong but high engineering effort, **not doing it** |
 
-L3 工程量太大、收益不匹配当前规模。L2 已经能让任何 macOS 用户（不懂 git）贡献。
+L3 is too much engineering effort and the payoff doesn't match the current scale. L2 already lets any macOS user (who doesn't know git) contribute.
 
-repo 结构：`patches/<bundleID>/{patch.json, README.md}`。
+repo structure: `patches/<bundleID>/{patch.json, README.md}`.
 
 ---
 
-## 7. 治理 / 抗噪 / 隐私
+## 7. Governance / noise resistance / privacy
 
-| 风险 | 缓解 |
+| Risk | Mitigation |
 |---|---|
-| **规则过时**（Slack v5 改了 AX 结构）| `verified_against` 记版本；app 版本号变了 UI 上 flag "可能需要重 teach"。AX role 命名通常很稳，比 PNG 模板抗升级得多 |
-| **误命中**（predicate 太宽，把不该点的标成可点）| teach 时生成的 predicate 尽量带约束（role + action 一起）；PR review 配套截图人眼对；CI 可在 reference 截图上跑"命中数是否爆炸"启发式 |
-| **质量参差** | CI 自动校验 patch.json schema + 在维护者提供的 reference AX dump 上跑规则、统计命中 |
-| **流量攻击** | GitHub Actions + CODEOWNERS 标准防护 |
-| **隐私** | teach 抓的是 AX role/action/title 文本,可能含用户数据（如窗口标题里的人名）→ teach UI 让用户预览 + 编辑后再存/提交;截图（仅 L2 分享时）强制让用户涂抹敏感区 |
+| **Stale rules** (Slack v5 changed its AX structure) | `verified_against` records versions; when the app version changes, flag in the UI "may need re-teaching." AX role names are usually very stable, far more upgrade-resistant than PNG templates |
+| **Mismatches** (predicate too broad, labels things that shouldn't be clicked as clickable) | the predicate generated during teach carries constraints where possible (role + action together); PR review pairs it with a screenshot for a human eyeball check; CI can run a "did the match count blow up" heuristic on the reference screenshot |
+| **Uneven quality** | CI auto-validates the patch.json schema + runs the rules against the maintainer-provided reference AX dump and counts matches |
+| **Traffic attacks** | GitHub Actions + CODEOWNERS standard protection |
+| **Privacy** | what teach captures is AX role/action/title text, which may contain user data (e.g. a person's name in a window title) → the teach UI lets the user preview + edit before saving/submitting; screenshots (only when sharing at L2) force the user to redact sensitive regions |
 
-**信任分级**：高风险 app（银行、1Password、密码管理器）的 patch 走人工审；普通 app CI 通过即可 merge。贡献多了引入 trusted contributor（贡献过高质量 PR 的用户授 merge 权）。
-
----
-
-## 8. Bootstrapping（鸡生蛋）
-
-**0 用户阶段（我们 seed）**：手动 teach ~30 个高频 app —— Slack / Discord / Notion / Linear / Figma / Zoom / Spotify / Music / Mail / Calendar / Notes / Telegram / Bear / Obsidian / Cursor / Warp / iTerm / Postman / Things / Excel / Numbers / Keynote / Pages / Sketch / TablePlus 之类。这波直接是产品 day-1 价值（装完主力 app 立刻好用）。
-
-**100 用户阶段**：激活 L2 一键 PR，我们每天 review 几个，catalog 从 30 → 100+。
-
-**1000+ 用户阶段**：trusted contributors + CI 自动化（schema 校验、staleness 检测、命中回归）。
+**Trust tiers**: patches for high-risk apps (banks, 1Password, password managers) go through manual review; ordinary apps can merge once CI passes. As contributions grow, introduce trusted contributors (users who've submitted high-quality PRs are granted merge rights).
 
 ---
 
-## 9. 护城河
+## 8. Bootstrapping (chicken-and-egg)
 
-- **数据护城河**：随使用积累的 per-app AX 规则库 —— 别人从零积累一千个 app 的适配
-- **形态是结构化文本,不是模型权重**：纯 JSON predicate,可 diff / review / 手编,过时改一行;不背训练 + 重训 + 体积成本
-- **贡献门槛极低**：teach 一键抓 predicate → PR 几行 JSON,任何能用 AX Inspector 的人都能贡献
-- **越用越准的闭环**：teach → PR → 预置库变强 → 新用户开箱即用
-- 对标 Vimium：它真正的护城河不是技术,是 15 年沉淀的每个网站的处理细节。我们是**OS 层**的对应物 —— 每个 app 的 AX 适配。竞品想追要从零积累。
-- Homerow 纯 AX、不做任何 per-app 适配；我们的差异化是**把每个 app 的 AX 怪癖都驯服**。
+**0-user stage (we seed)**: manually teach ~30 high-frequency apps — Slack / Discord / Notion / Linear / Figma / Zoom / Spotify / Music / Mail / Calendar / Notes / Telegram / Bear / Obsidian / Cursor / Warp / iTerm / Postman / Things / Excel / Numbers / Keynote / Pages / Sketch / TablePlus and the like. This batch is day-1 product value (the main apps just work right after install).
+
+**100-user stage**: activate L2 one-click PRs, we review a few each day, the catalog goes from 30 → 100+.
+
+**1000+-user stage**: trusted contributors + CI automation (schema validation, staleness detection, match regression).
+
+---
+
+## 9. Moat
+
+- **Data moat**: a per-app AX rule library accumulated through use — others have to accumulate adaptations for a thousand apps from scratch
+- **Its form is structured text, not model weights**: pure JSON predicates, diffable / reviewable / hand-editable, fix one line when stale; no training + re-training + size cost
+- **Extremely low contribution barrier**: teach one-click captures a predicate → PR a few lines of JSON, anyone who can use AX Inspector can contribute
+- **A loop that gets more accurate with use**: teach → PR → the bundled library gets stronger → new users get it out of the box
+- Benchmarking against Vimium: its real moat isn't technology, it's 15 years of accumulated per-site handling details. We're the **OS-layer** counterpart — per-app AX adaptation. A competitor wanting to catch up has to accumulate from scratch.
+- Homerow is pure AX and does no per-app adaptation at all; our differentiation is **taming every app's AX quirks**.
 
 ---
 
 ## 10. v1 scope
 
-做：
+Do:
 
-- `AppPatchRegistry` —— 加载 + 索引 patch.json（bundleID → patch）
-- AX walker 接 `additional_clickable` predicate（扁平、二值、AND/OR）
-- `exclude`（pattern-based，先做 title_equals_window）
-- `fallback_op` 开关（默认 false）
-- teach 流程：menu bar 入口 → `AXUIElementCopyElementAtPosition` 抓元素 → 生成 predicate → 写本地 patch
-- L0 curated 预置（~30 app）+ L1 GitHub pull 脚手架
+- `AppPatchRegistry` — load + index patch.json (bundleID → patch)
+- AX walker wired to `additional_clickable` predicates (flat, binary, AND/OR)
+- `exclude` (pattern-based, start with title_equals_window)
+- `fallback_op` switch (defaults to false)
+- teach flow: menu bar entry → `AXUIElementCopyElementAtPosition` grabs the element → generate predicate → write local patch
+- L0 curated bundle (~30 apps) + L1 GitHub pull scaffolding
 
-暂不做（defer）：
+Defer:
 
-- L2 一键 PR（先 L1 手动 PR 跑通飞轮再做）
-- threshold override（仅 fallback_op app 需要，量出来再做）
-- role_path 路径化 predicate（扁平不够用再加）
-- **NCC 模板匹配 + OCR-landmark + 几何缺口检测**（见 §A 附录，大概率永不做）
+- L2 one-click PR (get the flywheel running with L1 manual PRs first)
+- threshold override (only fallback_op apps need it, build it once there's measured demand)
+- role_path path-based predicate (add it once flat isn't enough)
+- **NCC template matching + OCR-landmark + geometric-gap detection** (see Appendix §A, most likely never)
 
 ---
 
-## 11. template 自动生成 pipeline（scale 的关键）
+## 11. The template auto-generation pipeline (the key to scale)
 
-纯人力写 predicate 不现实。但**生成 patch 这件事本身高度可自动化**,因为我们手里有 walker 没用到的 ground truth。
+Writing predicates purely by hand isn't realistic. But **generating patches is itself highly automatable**, because we hold ground truth that the walker doesn't use.
 
-### 11.1 核心洞察:三份对照数据,walker 只用了第一份
+### 11.1 Core insight: three datasets to compare, the walker only used the first
 
-| 数据 | walker 用了? | 告诉我们 |
+| Data | Used by walker? | Tells us |
 |---|---|---|
-| **walker 输出**(当前 hint) | ✅ | "现在收了哪些" |
-| **完整 AX 树 dump**(所有 role/action/subrole/rect,不过滤) | ❌ | "AX 里**到底有什么**" |
-| **视觉**(截图 + OmniParser/VLM 检测的可点框) | ❌ | "屏幕上**实际哪些**可点"(ground truth) |
+| **walker output** (current hints) | ✅ | "what got collected right now" |
+| **full AX tree dump** (all role/action/subrole/rect, unfiltered) | ❌ | "what's **actually in** the AX" |
+| **visual** (screenshot + clickable boxes detected by OmniParser/VLM) | ❌ | "which things on screen are **actually** clickable" (ground truth) |
 
-**生成 template = 做这三份的 diff**:视觉说"这里可点" + AX dump 说"这里有个 AXImage+AXPress" + walker 说"我没收它" → 自动得出一条 include 规则。
+**Generating a template = diffing these three**: visual says "this is clickable" + AX dump says "there's an AXImage+AXPress here" + walker says "I didn't collect it" → automatically derive an include rule.
 
-### 11.2 分层自动化(零 ML → 全自动)
+### 11.2 Layered automation (zero ML → fully automatic)
 
-**Tier 0:纯 AX 启发式(零 ML,覆盖大半)**
+**Tier 0: pure AX heuristics (zero ML, covers the majority)**
 
-dump 完整 AX 树 → 筛"有可点信号(AXPress/AXOpen action,或按钮类 subrole)但被 walker 拒了"的元素 → 按 `(role, action)` 签名聚类 → 每聚类提一条 include 规则。Slack 的 `AXImage+AXPress` 案例**零 ML 即可自动提出** `{role: AXImage, must_have_action: AXPress}`。估计能解决 60-70% 的 AX-irregular app。
+Dump the full AX tree → filter for "elements with a clickable signal (AXPress/AXOpen action, or button-class subrole) but rejected by the walker" → cluster by `(role, action)` signature → propose one include rule per cluster. The Slack `AXImage+AXPress` case **can be auto-proposed with zero ML** as `{role: AXImage, must_have_action: AXPress}`. Estimated to solve 60-70% of AX-irregular apps.
 
-**Tier 1:AX × 视觉 交叉验证(过滤误报 + 判定 fallback_op)**
+**Tier 1: AX × visual cross-validation (filter false positives + decide fallback_op)**
 
-Tier 0 风险:装饰性 `AXImage+AXPress`(no-op handler)收进来变误报。用视觉层校验:候选元素 rect 跟某个视觉可点框重合 → 确认是真按钮、保留;不重合 → 丢。反向:视觉可点框**没有任何 AX 元素对应** → 这块是真·AX 黑洞 → 自动标记走 OP fallback(`fallback_op: true`),不是 include 能救的。
+Tier 0 risk: a decorative `AXImage+AXPress` (no-op handler) gets collected and becomes a false positive. Validate with the visual layer: the candidate element's rect overlaps some visual clickable box → confirmed as a real button, keep it; doesn't overlap → drop it. The reverse: a visual clickable box that has **no corresponding AX element at all** → this region is a true AX black hole → auto-mark it for OP fallback (`fallback_op: true`), it's not something an include can rescue.
 
-**Tier 2:AI 合成(现在就能跑,无需自训模型)**
+**Tier 2: AI synthesis (runnable right now, no self-trained model needed)**
 
-Mouseless 加 debug 命令,在问题 app 里一键导出 bundle:`{完整 AX 树 JSON, 截图 PNG, walker 输出, OP 输出}`。把 bundle 交给一个 vision-capable LLM(开发期 = Claude),它看截图 + AX dump + walker gap **直接写 patch.json** —— 在结构化数据里找模式 + 判断"该可点 vs 装饰",是 LLM 擅长的合成任务。闭环:问题 app 按热键 → 导出 bundle → LLM 出 patch → 验证 → commit。
+Add a debug command to Mouseless that one-click exports a bundle from the problem app: `{full AX tree JSON, screenshot PNG, walker output, OP output}`. Hand the bundle to a vision-capable LLM (during development = Claude); it looks at the screenshot + AX dump + walker gap and **writes patch.json directly** — finding patterns in structured data + judging "should-be-clickable vs decorative" is exactly the kind of synthesis task LLMs are good at. The loop: hit the hotkey in the problem app → export bundle → LLM produces patch → verify → commit.
 
-**Tier 3:把合成烤进 app(终极 scale)**
+**Tier 3: bake synthesis into the app (ultimate scale)**
 
-把 Tier 2 的合成换成 app 内调 VLM(API 或本地模型):用户在任何 app 点"自动生成适配" → app 自己 dump + 调模型 + 出 patch + 本地验证。完全自助,是 §6 L2 飞轮的 AI 加持版。
+Replace Tier 2's synthesis with an in-app VLM call (API or local model): the user clicks "auto-generate adaptation" in any app → the app dumps + calls the model + produces a patch + verifies locally on its own. Fully self-service, the AI-powered version of the §6 L2 flywheel.
 
-### 11.3 验证 harness(生成只是一半)
+### 11.3 Verification harness (generation is only half)
 
-每个 Tier 出的候选 patch 用同一个客观函数打分:
+Score each Tier's candidate patch with the same objective function:
 
 ```
-应用候选 patch → 重跑 walker:
-  recall    = 视觉可点框被覆盖的比例 ↑（漏的修好没）
-  precision = hint 总数没爆炸 ↑（没过度匹配收一堆垃圾）
+apply candidate patch → re-run walker:
+  recall    = fraction of visual clickable boxes covered ↑ (were the misses fixed)
+  precision = total hint count didn't blow up ↑ (didn't over-match and collect a pile of junk)
 ```
 
-有了这个客观函数,甚至能**自动搜索 predicate 变体**(加 region 收紧 / 换 action 约束)挑 recall/precision 最优,人只需最后 approve。
+With this objective function, we can even **automatically search predicate variants** (add a region to tighten / switch the action constraint) and pick the best recall/precision tradeoff, with a human only needing to approve at the end.
 
-### 11.4 边界(诚实)
+### 11.4 Boundaries (honest)
 
-- 视觉框 bbox 精度有限 → AX-rect 匹配留容差
-- 真·canvas app(Figma 画布)AX 啥都没有 → 没有 predicate 能救,pipeline 自动暴露成"OP-only",这是正确结果不是失败
-- 过度泛化(一条规则收了 compose + 50 个 emoji)→ 验证 harness 的 precision 项专门兜
+- Visual box bbox precision is limited → leave a tolerance for AX-rect matching
+- True canvas apps (the Figma canvas) have nothing in AX → no predicate can rescue them, the pipeline auto-exposes them as "OP-only," which is the correct result, not a failure
+- Over-generalization (one rule collects compose + 50 emoji) → the verification harness's precision term specifically catches this
 
-### 11.5 实施顺序
+### 11.5 Implementation order
 
-先做三件零 ML、互相独立的:**① bundle 导出工具 ② Tier 0 启发式生成器 ③ 验证 harness**。三件做完,立刻能用 LLM 当 Tier 2 引擎跑通"问题 app → patch.json"完整闭环。Tier 3(in-app VLM)等闭环验证有效再投。这三件也是 v1 实现里 teach 流程(§4.3)的自然超集 —— teach 是"人指一个元素",pipeline 是"自动找所有该指的元素"。
+Do three zero-ML, mutually independent things first: **① bundle export tool ② Tier 0 heuristic generator ③ verification harness**. Once those three are done, you can immediately use an LLM as the Tier 2 engine to run the complete "problem app → patch.json" loop. Tier 3 (in-app VLM) waits until the loop is verified to work before investing. These three are also a natural superset of the teach flow (§4.3) in the v1 implementation — teach is "a human points at one element," the pipeline is "automatically find all the elements that should be pointed at."
 
 ---
 
-## 附录 A：被砍 / 降级的方案
+## Appendix A: cut / downgraded approaches
 
-### A1. NCC 模板匹配 —— 从"主力"降到"附录脚注"
+### A1. NCC template matching — from "primary mechanism" to "appendix footnote"
 
-早期设计把 NCC 视觉模板匹配当 include 主力（teach 一张 icon PNG，运行时在截图里 NCC 匹配补 hint）。重新分析后**砍掉**：
+The early design treated NCC visual template matching as the include primary mechanism (teach one icon PNG, at runtime NCC-match it in the screenshot to patch hints). After re-analysis it was **cut**:
 
-NCC 唯一站得住的场景是"**目标可见可点、但 AX 树里压根没有这个 node**"。但这个场景：
-- 从上面被 **AX 覆写**挤掉（AX 里有 node 的，覆写就搞定，不用视觉）
-- 从下面被 **OmniParser** 盖住（AX 真没有的，OP 的通用视觉检测已经在兜）
+The only scenario where NCC holds up is "**the target is visible and clickable, but the node simply doesn't exist in the AX tree at all**." But this scenario:
+- gets squeezed out from above by **AX overrides** (if there's a node in AX, the override handles it, no visual needed)
+- gets covered from below by **OmniParser** (if AX genuinely doesn't have it, OP's generic visual detection already catches it)
 
-NCC 想占的是"AX 没有 + OP 也漏 + 但又是视觉稳定固定 icon"的三重交集 —— **面积极小**。当初它是"补 OP 漏检"，但 OP 自己已退居 fallback（只服务真黑洞 app），NCC 就成了 fallback 的 fallback，性价比不成立。
+What NCC wants to occupy is the triple intersection of "AX doesn't have it + OP misses it too + but it's a visually stable fixed icon" — **a tiny area**. Originally it was "patching OP's miss-detections," but OP itself has retreated to being a fallback (serving only true black-hole apps), so NCC becomes the fallback's fallback, and the cost-benefit doesn't hold up.
 
-附带好处：砍掉 NCC，护城河数据更纯（全是文本 JSON，无 PNG 库）、体积更小、贡献门槛更低、没有"icon 改版模板失效"的维护负担。
+A side benefit: cutting NCC makes the moat data purer (all text JSON, no PNG library), smaller in size, with a lower contribution barrier and no "the template breaks when the icon is redesigned" maintenance burden.
 
-（NCC 技术本身的设计 —— Accelerate vImage 实现、归一化抗暗色模式、区域限定 ~5ms、DPR 缩放 —— 如果将来真碰到非做不可的 canvas-app icon 场景，git 历史里有完整推理可捞。）
+(The design of the NCC technique itself — Accelerate vImage implementation, normalization for dark-mode resistance, region-limited ~5ms, DPR scaling — if we ever do hit a must-do canvas-app icon scenario, the full reasoning is recoverable from git history.)
 
-### A2. OCR-text-landmark —— defer
+### A2. OCR-text-landmark — defer
 
-"可点元素在文字 'Search' 右边"，靠区域限定 OCR 找文字 landmark 定位。成本是软肋（每次 collect 跑 region OCR ~5-10ms）。只在 AX 覆写也搞不定（元素 AX 没有、外观会变、但附近有稳定文字）时才有意义 —— 罕见，defer。
+"The clickable element is to the right of the text 'Search'," locating it via region-limited OCR to find the text landmark. Cost is the weak point (running region OCR ~5-10ms per collect). It's only meaningful when AX overrides also can't handle it (the element isn't in AX, its appearance changes, but there's stable text nearby) — rare, defer.
 
-### A3. OP-相对锚定 —— 否决
+### A3. OP-relative anchoring — rejected
 
-"相机在文件夹 icon 右边"：OP 的 box 是匿名的，不知道哪个是文件夹，无法解析"相对某个有身份的框"。唯一不靠身份的形式是纯几何缺口检测（等间距图标行里推断"中间有洞 → 漏了一个"），但又窄又险（缺口可能是故意分隔 → 误报），大概率不做。
+"The camera is to the right of the folder icon": OP's boxes are anonymous, it doesn't know which one is the folder, so it can't resolve "relative to some box with an identity." The only identity-free form is pure geometric gap detection (in an evenly-spaced icon row, infer "there's a hole in the middle → one is missing"), but it's both narrow and risky (the gap might be an intentional separator → false positive), most likely not doing it.
 
-### A4. 窗口分类器 —— 死结
+### A4. Window classifier — deadlock
 
-见 §3。靠标题/尺寸/AXIdentifier 判断"我在哪个布局"没有可靠信号。被 self-gating 取代。
+See §3. There's no reliable signal for judging "which layout am I in" from title/size/AXIdentifier. Replaced by self-gating.
 
 ---
 
-## 附录 B：决策史（防止重走弯路）
+## Appendix B: decision history (to avoid retreading dead ends)
 
-1. **per-app fine-tune 模型** → 否决（标注/训练/维护/体积天文成本，AX 免费能拿到的没必要用模型学）
-2. **修正 JSON + 窗口分类器** → 死结（布局多、无可靠分类信号）→ 改成 **self-gating**
-3. **NCC 模板匹配当 include 主力** → 重新定位后**降级到附录**（被 AX 覆写从上挤、被 OP 从下盖，交集极小）
-4. **主力改为 per-app AX walker 覆写** → 关键洞察"AX-bad 多半是 AX-irregular 不是 AX-absent"，大多数长尾 app 有 AX 只是结构怪，声明式规则比视觉补漏更便宜/更稳/更易贡献
+1. **per-app fine-tuned model** → rejected (astronomical labeling/training/maintenance/size cost, no need to make a model learn what AX gives for free)
+2. **correction JSON + window classifier** → deadlock (many layouts, no reliable classification signal) → changed to **self-gating**
+3. **NCC template matching as the include primary mechanism** → after repositioning, **downgraded to the appendix** (squeezed from above by AX overrides, covered from below by OP, tiny intersection)
+4. **primary mechanism changed to per-app AX walker overrides** → the key insight "AX-bad is mostly AX-irregular, not AX-absent," most long-tail apps have AX that's just structurally weird, and declarative rules are cheaper/more stable/easier to contribute than patching the gaps visually
 
-想要 per-app 精度时，第一反应应该是 **"写一条 AX predicate 覆写"**，不是"训模型" / "做窗口分类器" / "存 icon 模板"。
+When you want per-app precision, the first instinct should be **"write an AX predicate override,"** not "train a model" / "build a window classifier" / "store icon templates."

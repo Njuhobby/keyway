@@ -1,65 +1,66 @@
 # Hint Rendering & Click Commit
 
-标签生成、用户输入到提交点击、overlay 绘制、HUD 提示。
+Label generation, user input through to click commit, overlay drawing, HUD prompts.
 
-相关文件：`HintMode.swift`（生成 + commit + synth click），`HintOverlay.swift`，`HUD.swift`。
+Related files: `HintMode.swift` (generation + commit + synth click), `HintOverlay.swift`, `HUD.swift`.
 
 ---
 
-## 1. 标签生成
+## 1. Label generation
 
-`HintMode.alphabet`：
+`HintMode.alphabet`:
 ```swift
 static let alphabet: [Character] = [
     "a","s","d","f","g","e","r","u","i","w","t","n","m",
 ]
 ```
-13 个字母。**不含 h/j/k/l/v/c/o/p**——h/j/k/l 在 TAP 和 SCROLL 里都是 hjkl 移光标键、`v` 在 TAP normal 里是"进 DRAG 子状态"触发键、`c` 是"点击当前光标位置"触发键，裸按它们都有专门含义、不能再当 hint 标签（见 `modes.md` §4 / §6）。`o`/`p` 则因右手小拇指外伸太别扭被剔除——而且两字母 tier 里生成器把每个键和其它每个键两两配对，`o`/`p` 会作为首字符 *和* 次字符频繁出现，正是小拇指最遭罪的地方。除这八个外其它顺手字母都纳入。顺序按手感前置（左手 home row `a s d f g` 在前），因为单字母 label 用 `prefix` 取前缀、最短 label 最快 commit。
+13 letters. **Excludes h/j/k/l/v/c/o/p** — h/j/k/l are the hjkl cursor-movement keys in both TAP and SCROLL, `v` is the "enter DRAG sub-state" trigger key in TAP normal, `c` is the "click at current cursor position" trigger key; pressing any of them bare already has a dedicated meaning and they can't double as hint labels (see `modes.md` §4 / §6). `o`/`p` are dropped because reaching out with the right pinky is too awkward — and in the two-letter tier the generator pairs every key with every other key, so `o`/`p` would appear frequently as both the first *and* the second character, which is exactly where the pinky suffers most. Every other comfortable letter besides these eight is included. The order is hand-feel-front-loaded (left-hand home row `a s d f g` first), because single-letter labels take a `prefix` slice and the shortest labels commit fastest.
 
-**历史**：池容量在 16/17/15/13 之间来回过几轮。`v` 曾短暂被纳入（17 字母，那是 DRAG 还是独立 mode、`Caps Lock + v` chord 进入时），DRAG 收编成 TAP 子状态、bare `v` 改成进 DRAG 触发键后又移除（16）。`c` 那一轮：原本是 Enter 当点击键、`c` 留在池里；Enter 经常跟 app 的菜单确认 / 表单提交冲突（被 Mouseless 吃掉），把 Enter 放行 + 点击挪到 bare `c` 后，`c` 也从池里移除（15）。最近一轮：`o`/`p` 因右小拇指外伸手感差被剔除（13），代价是超密屏幕容量从 225 降到 169（`maxTargets` 同步降到 169）。
+**History**: the pool capacity has bounced between 16/17/15/13 over several rounds. `v` was briefly included (17 letters, back when DRAG was either still a separate mode entered via a `Caps Lock + v` chord); after DRAG was absorbed into a TAP sub-state and bare `v` was repurposed as the enter-DRAG trigger key, it was removed again (16). The `c` round: originally Enter was the click key and `c` stayed in the pool; Enter frequently collided with an app's menu confirmation / form submission (swallowed by Mouseless), so after letting Enter pass through and moving the click onto bare `c`, `c` was also removed from the pool (15). The most recent round: `o`/`p` were dropped because the right-pinky reach feels bad (13), at the cost of dropping the ultra-dense-screen capacity from 225 to 169 (`maxTargets` lowered to 169 to match).
 
-**字母组**（焦点 app + menu extras 共享），同一次扫描内所有标签**等长**——混长度会前缀冲突（"aa" 是 "aaa" 的前缀，用户输 "aa" 会卡住等第三字符）：
-- count ≤ 13：单字母
-- 14–169：两字母（13 × 13）
-- 170+：三字母——**实际不可达**：`maxTargets` 是 169 = 13²，所以任何一次扫描都落在 ≤2 字母。三字母分支只作 pool/cap 变动时的安全网。
+**Letter group** (shared by the focused app + menu extras), all labels in a single scan are **equal length** — mixing lengths causes prefix collisions ("aa" is a prefix of "aaa", so typing "aa" stalls waiting for a third character):
+- count ≤ 13: single letter
+- 14–169: two letters (13 × 13)
+- 170+: three letters — **actually unreachable**: `maxTargets` is 169 = 13², so any single scan lands in ≤2 letters. The three-letter branch exists only as a safety net for when the pool/cap changes.
 
-**数字组**（Dock 独享）：
-- count ≤ 10：单字符 `0, 1, ..., 9`
-- count > 10：两字符 `00, 01, ..., 99`
+**Number group** (Dock-exclusive):
+- count ≤ 10: single character `0, 1, ..., 9`
+- count > 10: two characters `00, 01, ..., 99`
 
-字母 / 数字独立空间的好处：用户输入 `a` 立刻锁定字母组，输入 `1` 立刻锁定 Dock，前缀不会撞。
+The benefit of independent letter / number spaces: typing `a` immediately locks in the letter group, typing `1` immediately locks in the Dock, and prefixes never collide.
 
-两字母 / 两数字标签的好处：第一字符过滤一次，第二字符才提交，错按时前缀不匹配 `.ignored` 吞掉（不误触发、也不退出）。
+The benefit of two-letter / two-number labels: the first character filters once, the second character commits; on a mis-press the prefix doesn't match and `.ignored` swallows it (no false trigger, and no exit).
 
-**标签分配 = 跨扫描 rect 身份匹配 + 空间顺序兜底（label 稳定性）**：每个池（Dock 数字 / 其余字母）分两趟（候选都先按量化 (y, x) 阅读顺序排，保证确定性）：
-1. **preserve（保留）**：每个候选去上一次扫描的 targets 里找**几何上最近**的一个（中心点距离 ≤ `posTol=8px` 且各边尺寸在 ±`sizeTol=25%` 内），匹配上就**复用它的旧 label**。这是 label 稳定性的真正来源——元素没动就保住 label，哪怕屏幕别处全变了。
-2. **fill（兜底）**：没匹配上的（首次扫描 / 真正新出现的元素）按空间阅读顺序领走剩下的 label。
+**Label assignment = cross-scan rect identity matching + spatial-order fallback (label stability)**: each pool (Dock numbers / everything-else letters) runs two passes (candidates are first sorted by quantized (y, x) reading order, guaranteeing determinism):
+1. **preserve**: each candidate looks for the **geometrically nearest** target in the previous scan's targets (center-point distance ≤ `posTol=8px` and each side's dimension within ±`sizeTol=25%`); on a match it **reuses that old label**. This is the real source of label stability — if the element hasn't moved it keeps its label, even if everything else on screen changed.
+2. **fill (fallback)**: those that didn't match (first scan / genuinely newly appeared elements) take the remaining labels in spatial reading order.
 
-匹配是**纯几何**的——不看 role、不看 source，所以 OP 路径（所有 box 共享常量 role `"AXOmni"`、没有有意义的 role）和 AX 一视同仁。`posTol=8px` 足够吸收 OP 每次几像素的抖动，又远小于列表行距（WeChat ~70px），相邻行不会误配。用屏幕绝对坐标（非 window 相对）即可：sticky rehint 在点击后 ~100ms 触发、窗口没动，没动的元素绝对 rect 就是稳定锚点（窗口若被拖动则其内容重新发 label，优雅降级；OP 也没有 window ref 可换算）。
+Matching is **purely geometric** — it doesn't look at role or source, so the OP path (where all boxes share the constant role `"AXOmni"` and have no meaningful role) and AX are treated identically. `posTol=8px` is enough to absorb the few-pixel jitter OP produces each time, yet far smaller than list row spacing (WeChat ~70px), so adjacent rows won't be mismatched. Screen-absolute coordinates (not window-relative) suffice: sticky rehint fires ~100ms after the click while the window hasn't moved, so a stationary element's absolute rect is a stable anchor (if the window is dragged its contents re-emit labels, a graceful degradation; OP also has no window ref to convert against).
 
-> **历史**：曾经只用空间排序（无身份匹配）。失败原因正是 label = 阅读顺序里的第 N 位 ⇒ 第 N 位取决于"它前面排了多少元素"。WeChat 点开另一个会话后**左边会话列表一像素没动**，但右边消息区换了一屏气泡，气泡的 y 和左列行交错，全屏一遍式发 label 就把下游所有 label（含没动的左列）挤位重排。空间排序治不了"别处变了连累没变的"——只有按 rect 把没动的元素钉回旧 label 才行。空间排序因此从"稳定性机制"**降级**为"给没有 prior 可匹配的新元素一个确定的发牌顺序"（否则新元素会落回 OmniParser 的非确定置信度顺序，重新抖）。
+> **History**: it once used spatial sorting only (no identity matching). The failure cause was precisely that label = the Nth position in reading order ⇒ the Nth position depends on "how many elements are sorted ahead of it." After opening another conversation in WeChat **the left conversation list didn't move by a single pixel**, but the right message area swapped in a screen's worth of bubbles; the bubbles' y values interleave with the left column's rows, so a full-screen one-pass label assignment shoved all downstream labels (including the unmoved left column) out of position and reshuffled them. Spatial sorting can't cure "something elsewhere changed and dragged the unchanged along with it" — only pinning unmoved elements back to their old labels by rect works. Spatial sorting was therefore **demoted** from a "stability mechanism" to "giving new elements that have no prior to match against a deterministic dealing order" (otherwise new elements fall back to OmniParser's non-deterministic confidence order and jitter again).
+
 >
-> **跨实例传递 prior**：sticky rehint 走 `rehintSticky` 会 new 一个 `HintMode`，需要把旧扫描喂给它。坑：hint commit 在 `handle()` 里**先 `deactivate()`（清空 `targets`）再**隔 100ms 调 `scheduleStickyRehint`，等 rehint 跑时 live `targets` 早没了。所以另存一份 `lastScanTargets`（每次 `applyCollected` 末尾写入、**`deactivate()` 不清它**，同 `lastCommittedTarget` 的活法）；`snapshotTargets()` 返回它、`seedPriorTargets()` 种进新实例，preserve 趟才有 prior 可匹配（app 切换 `fromAppSwitch` 时**不种**——旧 app 的 rect 和新 app 无关）。`refreshInPlace` 同实例不需要，`self.targets` 本就是 prior。
+> **Passing prior across instances**: sticky rehint goes through `rehintSticky`, which `new`s a fresh `HintMode` and needs to be fed the old scan. Gotcha: hint commit in `handle()` **first calls `deactivate()` (clearing `targets`), then** 100ms later calls `scheduleStickyRehint`, so by the time the rehint runs the live `targets` are long gone. So a separate copy `lastScanTargets` is kept (written at the end of each `applyCollected`, and **`deactivate()` does not clear it**, same lifecycle as `lastCommittedTarget`); `snapshotTargets()` returns it, `seedPriorTargets()` seeds it into the new instance, so the preserve pass has a prior to match against (on app switch `fromAppSwitch` it is **not** seeded — the old app's rects are unrelated to the new app). `refreshInPlace` is the same instance and doesn't need it — `self.targets` is already the prior.
 
-Dock targets 先入 `targets` 数组、非 Dock 后入；绘制完全按 target 自己的 rect 定位（数组顺序只影响 typing 过滤遍历，不影响位置）。
+Dock targets enter the `targets` array first, non-Dock after; drawing is positioned entirely by each target's own rect (the array order only affects the typing-filter traversal, not position).
 
 ---
 
-## 2. Typing → Commit 状态机
+## 2. Typing → Commit state machine
 
-`HintMode.handle(char:action:)`：
+`HintMode.handle(char:action:)`:
 
 ```swift
 let next = typed + String(char)
 let matches = targets.filter { $0.label.hasPrefix(next) }
 if matches.isEmpty {
-    return .ignored          // 误按：吞掉，typed 不变，留在 TAP
+    return .ignored          // mis-press: swallow, typed unchanged, stay in TAP
 }
 if matches.count == 1 && matches[0].label == next {
-    if moveArmed {                         // `'` 前缀武装了 move-only
-        commit(target: matches[0], action: .move)   // warp 不点击
+    if moveArmed {                         // `'` prefix armed move-only
+        commit(target: matches[0], action: .move)   // warp, no click
         typed = ""; moveArmed = false; renderOverlay()
-        return .moved                      // 留在 TAP，hints 不撤
+        return .moved                      // stay in TAP, hints not dismissed
     }
     commit(target: matches[0], action: action)
     deactivate()
@@ -70,15 +71,15 @@ renderOverlay()
 return .pending
 ```
 
-四种返回值由 `VimSession.handleTap` 处理：
-- `.pending` —— 啥也不做，等下一个键
-- `.committed` —— 看 sticky：true 则 re-scan 进新 HintMode；false 则 exit
-- `.ignored` —— 误按（不匹配任何 hint 前缀）：吞掉不退出，typed 保持上一个有效值。退出只靠 Esc。（另有 `backspace()` 撤销已输入的前缀字符。）
-- `.moved` —— move-only pick（`'` 前缀，见 `modes.md` §4.3.5）：光标已 warp，hints 留着、**不管 sticky 都留在 TAP**（move 是导航不是终结）。移完内容没变 → 不重扫，同一批 targets 瞬间重显示。
+The four return values are handled by `VimSession.handleTap`:
+- `.pending` — do nothing, wait for the next key
+- `.committed` — check sticky: if true, re-scan into a new HintMode; if false, exit
+- `.ignored` — mis-press (doesn't match any hint prefix): swallow without exiting, `typed` keeps its last valid value. Exit is only via Esc. (There's also `backspace()` to undo already-typed prefix characters.)
+- `.moved` — move-only pick (`'` prefix, see `modes.md` §4.3.5): the cursor has already warped, hints stay, and **regardless of sticky it stays in TAP** (move is navigation, not a terminal action). Since nothing changed after the move → no rescan, the same batch of targets is instantly re-displayed.
 
 ---
 
-## 3. Commit：纯合成 mouse event
+## 3. Commit: pure synthesized mouse event
 
 ```swift
 private func commit(target: HintTarget, action: ClickAction) {
@@ -91,41 +92,41 @@ private func commit(target: HintTarget, action: ClickAction) {
     case .double:
         synthesizeClick(at: center, button: .left,  count: 2)
     case .move:
-        MouseSynth.warp(to: center)   // 只移光标不点击（`'` 前缀，见 modes.md §4.3.5）
+        MouseSynth.warp(to: center)   // move cursor only, no click (`'` prefix, see modes.md §4.3.5)
     }
 }
 ```
 
-**唯一通用 commit 机制 = 合成 mouse event 到 rect 中心**。简单、可预测、跟用户的心智模型 ("按 hint = 鼠标点这里") 一致。`.move` 是例外:`MouseSynth.warp`(`.mouseMoved` 合成)把光标挪过去但不点击,把 hint 当成光标传送锚点。OP 源的 `.move` 同样先 OCR-refine 再 warp。
+**The single universal commit mechanism = synthesize a mouse event to the rect center**. Simple, predictable, and consistent with the user's mental model ("press hint = click the mouse here"). `.move` is the exception: `MouseSynth.warp` (a synthesized `.mouseMoved`) moves the cursor over without clicking, treating the hint as a cursor-teleport anchor. A `.move` from an OP source likewise OCR-refines first, then warps.
 
-### 3.1 为什么不用 AX 动作
+### 3.1 Why not AX actions
 
-早期实现是"AXPress 优先 / 合成兜底"。**已弃**——AX 动作不可靠到不值得放在主路径：
+The early implementation was "AXPress first / synth fallback." **Abandoned** — AX actions are unreliable enough that they don't belong on the main path:
 
-- **AX metadata 可靠**（元素存在、rect、role、label 这些是怎么找到 hint target 的根基）。
-- **AX actions 不可靠**：很多 control 把 `AXPress` 暴露在 actions list 里但 handler 是 no-op 或语义不符——NSBrowser cell、NSTableRowView、自定义 NSView、Electron 的 AX bridge 都属于这一类。**实测足够多次"hint 出来按了没反应"的 case 才决定砍掉**。
-- `AXShowMenu` 同样问题——某些元素暴露但调用不弹菜单。
-- `AXOpen`（Finder desktop icon 用）同样问题——合成单击 + Finder 双击习惯就够了，不需要它。
+- **AX metadata is reliable** (element existence, rect, role, label — these are the bedrock of how a hint target is found in the first place).
+- **AX actions are unreliable**: many controls expose `AXPress` in their actions list but the handler is a no-op or has the wrong semantics — NSBrowser cells, NSTableRowView, custom NSViews, Electron's AX bridge all fall into this category. **Only after enough observed "hint appeared, pressed it, nothing happened" cases was the decision made to cut it.**
+- `AXShowMenu` has the same problem — some elements expose it but calling it doesn't pop a menu.
+- `AXOpen` (used by Finder desktop icons) has the same problem — a synthesized single click + Finder's double-click habit is enough, it isn't needed.
 
-### 3.2 砍掉 AX action 的 trade-offs
+### 3.2 Trade-offs of cutting AX actions
 
-| 维度 | 老 AX-first 路径 | 新 synth-only 路径 |
+| Dimension | Old AX-first path | New synth-only path |
 | --- | --- | --- |
-| 标准 control（Button / Link） | AXPress 命中 | synth 单击命中（鼠标实际点确实生效） |
-| 自定义 / 复杂 control | AXPress 静默失败 → 不可预测的 fallback | synth 单击，跟真鼠标点同样的效果 |
-| 被遮挡 / off-screen 的元素 | AX 能点 | 点不到 |
-| 鼠标光标 | AX 路径不动；synth 路径会动 | **总是动到 click 点** |
-| 失败模式 | 两种（AX 命中无效果 / synth 命中无效果），不好排查 | 一种（synth 命中无效果，element 本身的 hit-test 问题） |
+| Standard control (Button / Link) | AXPress hits | synth single click hits (a real mouse click does work) |
+| Custom / complex control | AXPress fails silently → unpredictable fallback | synth single click, same effect as a real mouse click |
+| Occluded / off-screen element | AX can click it | can't be clicked |
+| Mouse cursor | AX path doesn't move it; synth path does | **always moves to the click point** |
+| Failure mode | two of them (AX hit no effect / synth hit no effect), hard to diagnose | one (synth hit no effect, a hit-test problem in the element itself) |
 
-被遮挡的元素丢了——但我们 `onScreen` 过滤本来就已经只保留可见元素。这个理论收益用不上。
+Occluded elements are lost — but our `onScreen` filter already keeps only visible elements to begin with. That theoretical benefit doesn't apply.
 
-光标会动——是个**好事**而不是坏事，符合"按 hint = 把鼠标放到那里点一下"的用户心智。
+The cursor moving — is a **good thing**, not a downside, consistent with "press hint = put the mouse there and click once."
 
-`.double` 跟之前一样——AX 就没有双击动作，永远走合成路径。
+`.double` is the same as before — AX has no double-click action, so it has always gone through the synthesis path.
 
 ---
 
-## 4. 合成点击实现
+## 4. Synthesized-click implementation
 
 ```swift
 private static func synthesizeClick(at point: CGPoint,
@@ -149,19 +150,19 @@ private static func synthesizeClick(at point: CGPoint,
 }
 ```
 
-要点：
-- `.mouseEventClickState` —— 双击的关键字段。第一对 down/up 设 1，第二对设 2。系统据此识别双击。
-- `eventSourceUserData = "MOUS"` —— 让 HotkeyTap callback 放行（见 `event-pipeline.md`）。
-- `CGEventSource(stateID: .privateState)` —— 隔离的事件源，不污染全局 modifier flags。
+Key points:
+- `.mouseEventClickState` — the critical field for double-click. The first down/up pair sets 1, the second sets 2. The system recognizes the double-click from this.
+- `eventSourceUserData = "MOUS"` — lets the HotkeyTap callback pass it through (see `event-pipeline.md`).
+- `CGEventSource(stateID: .privateState)` — an isolated event source that doesn't pollute the global modifier flags.
 
 ---
 
-## 5. HintOverlay 窗口
+## 5. HintOverlay window
 
 ```swift
 for screen in NSScreen.screens {
     let w = NSWindow(contentRect: screen.frame, styleMask: .borderless, ...)
-    w.level = NSWindow.Level(rawValue: 102)   // CGOverlayWindowLevel, 高于 .popUpMenu = 101
+    w.level = NSWindow.Level(rawValue: 102)   // CGOverlayWindowLevel, above .popUpMenu = 101
     w.isOpaque = false
     w.backgroundColor = .clear
     w.hasShadow = false
@@ -171,136 +172,136 @@ for screen in NSScreen.screens {
 }
 ```
 
-**每屏一个独立窗口**。曾经试过单窗口跨屏 union frame —— 在非主屏上会丢帧 / 不渲染。多窗口稳定。
+**One independent window per screen**. A single window with a cross-screen union frame was tried — it dropped frames / didn't render on non-primary screens. Multiple windows are stable.
 
-**换屏重建**：这些 per-screen 窗口按建立时的屏幕 frame 定尺寸/定位,且只建一次缓存。显示器配置一变(合盖、插拔外显、改分辨率),旧窗口就盖不住新屏、`draw` 里基于 `NSScreen.screens.first` + 窗口 origin 的坐标换算也错位 → hint 渲染被裁/偏移,直到重启。`ensureWindows` 每次 `show` 拿当前 `NSScreen.screens.map(\.frame)` 和"上次建窗用的"(`builtForScreens`)比一下,变了就拆旧窗重建——开销可忽略(1–3 个 CGRect 的相等比较,远小于前面那次 AX 扫描)。HUD 不需要,它每次 `show` 都按 `NSScreen.main` 重新定位、自我纠正。
+**Rebuild on display change**: these per-screen windows are sized/positioned by the screen frame at build time, and built once then cached. The moment the display configuration changes (lid closed, external display plugged/unplugged, resolution changed), the old windows no longer cover the new screens, and the coordinate conversion in `draw` based on `NSScreen.screens.first` + window origin is also misaligned → hint rendering is clipped/offset until restart. On each `show`, `ensureWindows` compares the current `NSScreen.screens.map(\.frame)` against "the screens the windows were last built for" (`builtForScreens`); if they differ, it tears down the old windows and rebuilds — negligible cost (an equality comparison of 1–3 CGRects, far smaller than the preceding AX scan). The HUD doesn't need this; it re-positions against `NSScreen.main` on every `show` and self-corrects.
 
-### 窗口层级
+### Window level
 
-| level | 数值 | 谁在这里 |
+| level | value | who's here |
 | --- | --- | --- |
-| `.normal` | 0 | 普通 app 窗口 |
-| `.modalPanel` | 8 | modal 弹窗 |
-| `.mainMenu` | 24 | 顶部菜单栏 |
-| `.statusBar` | 25 | 早期 overlay 用过这里 |
-| `.popUpMenu` | 101 | 下拉菜单 / popover |
-| `CGOverlayWindowLevel` | **102** | **我们的 overlay** + HUD |
-| Assistive tech | 1500 | VoiceOver 等无障碍叠加 |
+| `.normal` | 0 | ordinary app windows |
+| `.modalPanel` | 8 | modal dialogs |
+| `.mainMenu` | 24 | top menu bar |
+| `.statusBar` | 25 | early overlay used this |
+| `.popUpMenu` | 101 | dropdown menus / popovers |
+| `CGOverlayWindowLevel` | **102** | **our overlay** + HUD |
+| Assistive tech | 1500 | VoiceOver and other accessibility overlays |
 
-选 **102** 的语义：高于一切普通 UI 层（菜单栏、modal、`.popUpMenu` 下拉菜单），但低于 assistive tech，让 hint label 在打开的下拉菜单上也能可见——之前用 `.statusBar` (25) 时 AXMenuItem 的 inside-top-left label 会被菜单容器的背景填充盖掉（菜单容器在 101，label 画在 25 → 被覆盖）。代价是 hint label 也会画在 modal alert 之上，TAP mode 下这是想要的（hint-click alert 的按钮）。详见 §7.2。
+The semantics of choosing **102**: above every ordinary UI layer (menu bar, modal, `.popUpMenu` dropdown menus), but below assistive tech, so hint labels are also visible on top of an open dropdown menu — previously when using `.statusBar` (25) the inside-top-left label of an AXMenuItem would be covered by the menu container's background fill (the menu container is at 101, the label is drawn at 25 → overwritten). The cost is that hint labels also draw on top of a modal alert, which is what's wanted in TAP mode (the buttons of a hint-click alert). See §7.2 for details.
 
-`ignoresMouseEvents = true`：overlay 不消费鼠标，鼠标点击穿透到底层 app。
+`ignoresMouseEvents = true`: the overlay doesn't consume mouse input, so clicks pass through to the underlying app.
 
-`canJoinAllSpaces + stationary + ignoresCycle`：跟随 Space 切换、不出现在 Mission Control 缩略图、不参与 Cmd+Tab。
+`canJoinAllSpaces + stationary + ignoresCycle`: follows Space switches, doesn't appear in Mission Control thumbnails, doesn't participate in Cmd+Tab.
 
 ---
 
-## 6. 坐标系转换
+## 6. Coordinate-system conversion
 
-三套坐标系打架：
+Three coordinate systems clash:
 
-| 系统 | 原点 | Y 方向 |
+| System | Origin | Y direction |
 | --- | --- | --- |
-| AX | 主屏左上角 | 向下 |
-| NSScreen 全局 | 主屏左下角 | 向上 |
-| NSView 局部 | 视图左下角 | 向上 |
+| AX | top-left of primary screen | downward |
+| NSScreen global | bottom-left of primary screen | upward |
+| NSView local | bottom-left of the view | upward |
 
-`HintOverlayView.draw` 每个 target 都要转：
+`HintOverlayView.draw` has to convert every target:
 
 ```swift
 let primaryH = primary.frame.height
-let winOrigin = win.frame.origin         // 当前屏的 NSScreen origin
-let r = target.rect                      // AX 坐标
-let nsGlobalY = primaryH - (r.origin.y + r.size.height)  // AX → NSScreen 全局 Y
-let viewX = r.origin.x - winOrigin.x     // NSScreen 全局 → view 局部 X
-let viewY = nsGlobalY - winOrigin.y      // NSScreen 全局 → view 局部 Y
+let winOrigin = win.frame.origin         // this screen's NSScreen origin
+let r = target.rect                      // AX coordinates
+let nsGlobalY = primaryH - (r.origin.y + r.size.height)  // AX → NSScreen global Y
+let viewX = r.origin.x - winOrigin.x     // NSScreen global → view local X
+let viewY = nsGlobalY - winOrigin.y      // NSScreen global → view local Y
 ```
 
-`winOrigin` 是**这块**屏幕的 NSScreen origin —— 必须减掉才能落到本视图的局部坐标。
+`winOrigin` is **this** screen's NSScreen origin — it must be subtracted to land in this view's local coordinates.
 
 ---
 
-## 7. 四种 badge 排版
+## 7. Four badge layouts
 
-`HintOverlayView.draw` 按优先级分流：Dock（数字标签）→ AXMenuItem → **足够大的 rect 用 inside 放置** → 其余 speech bubble。算完位置后还有一趟 **de-collision**（§7.5）把叠在一起的 label 挪开。
+`HintOverlayView.draw` routes by priority: Dock (numeric labels) → AXMenuItem → **rects big enough use inside placement** → everything else a speech bubble. After positions are computed there's one more **de-collision** pass (§7.5) that moves overlapping labels apart.
 
-### 7.1 Dock items（label 首字符是数字）
+### 7.1 Dock items (label's first character is a digit)
 
-Badge 是带尾巴的方块（20×20），画在图标**外侧**，尾巴指回图标。位置取决于 Dock 朝向：
+The badge is a tailed square (20×20), drawn **outside** the icon with the tail pointing back at it. The position depends on the Dock orientation:
 
 ```swift
 let dockOrientation = UserDefaults(suiteName: "com.apple.dock")?
     .string(forKey: "orientation") ?? "bottom"
 ```
 
-| orientation | badge 位置 | 尾巴方向 |
+| orientation | badge position | tail direction |
 | --- | --- | --- |
-| `bottom` | 图标上方 | 向下指 |
-| `left` | 图标右侧 | 向左指 |
-| `right` | 图标左侧 | 向右指 |
+| `bottom` | above the icon | points down |
+| `left` | right of the icon | points left |
+| `right` | left of the icon | points right |
 
-Badge 居中对齐文字（其他几种是左对齐）。
+The badge centers its text (the others are left-aligned).
 
-### 7.2 `AXMenuItem`（下拉菜单项）—— inside top-left
+### 7.2 `AXMenuItem` (dropdown menu item) — inside top-left
 
-跟下面 §7.3 的大 rect 走**同一套 inside-top-left 放置**（rect 内部左上角、4pt 水平 inset、垂直贴顶、无尾巴）。早期版本另外做了一套"默认左、回退右、级联菜单特殊处理"的逻辑，统一到 inside 后那一堆"级联探测左右同伴列"代码全删掉。
+Goes through the **same inside-top-left placement** as the large rects in §7.3 below (top-left corner inside the rect, 4pt horizontal inset, vertically flush to the top, no tail). An earlier version had a separate "default left, fall back to right, special handling for cascade menus" logic; after unifying on inside, that whole pile of "cascade-probe the left/right sibling columns" code was deleted.
 
-**前提是 overlay 必须位于 `.popUpMenu` 之上**（level 102，见 §6）。原因：菜单项的视觉背景是**菜单容器**那个 `.popUpMenu` (level 101) 窗口画的，里面包括菜单项之间的描边、selected highlight 高亮。我们的 label 画在菜单项 rect 内部，如果 overlay 在 `.statusBar` (25) 层、低于菜单容器，菜单容器的背景填充就盖在 label 上面只剩空白；overlay 升到 102 后，label 那一小方块的黄底浮在菜单容器之上，其余区域（菜单文字 / icon / selected 高亮）由菜单容器自己画、透过 overlay 透明区显出来，互不打架。
+**The premise is that the overlay must be above `.popUpMenu`** (level 102, see §6). The reason: a menu item's visual background is drawn by the **menu container**, that `.popUpMenu` (level 101) window, which includes the strokes between menu items and the selected highlight. Our label is drawn inside the menu item's rect; if the overlay is at the `.statusBar` (25) level, below the menu container, the menu container's background fill covers the label leaving only blank space; once the overlay is raised to 102, the small yellow-backed square of the label floats above the menu container, while the rest of the area (menu text / icon / selected highlight) is drawn by the menu container itself and shows through the overlay's transparent regions, with no conflict.
 
-**`contains` vs `intersects`**：用 `viewBounds.contains(rect)` 严格判断"badge 完整在屏幕内"，不用 `intersects`。部分超出会被裁剪不可读。
+**`contains` vs `intersects`**: use `viewBounds.contains(rect)` to strictly judge "the badge is fully on screen," not `intersects`. Partially out-of-bounds would be clipped and unreadable.
 
-### 7.3 Inside 放置（足够大的 rect —— AX 和 OP 都适用）
+### 7.3 Inside placement (rect big enough — applies to both AX and OP)
 
-非 Dock 的 target，只要 rect ≥ **30pt 宽 × 16pt 高**，badge 画在 rect **内部左上角**（水平 4pt inset，垂直贴顶，无尾巴）。AXMenuItem 也走这里（见 §7.2 的特殊说明）。
+For a non-Dock target, as long as the rect is ≥ **30pt wide × 16pt tall**, the badge is drawn at the rect's **top-left corner inside** (4pt horizontal inset, flush to the top, no tail). AXMenuItem also goes through here (see the special note in §7.2).
 
-为什么：speech bubble（§7.4）+ 尾巴在密集列表（Finder 文件行、OP 聊天气泡）上会浮在相邻 rect 的间隙里，归属不清——badge 到底属于上面那行还是下面那行看不出来。放进 rect 内部，归属一目了然，那个又小又难看的尾巴也省了。
+Why: the speech bubble (§7.4) + tail, on dense lists (Finder file rows, OP chat bubbles), floats in the gap between adjacent rects with unclear ownership — you can't tell whether the badge belongs to the row above or the row below. Placing it inside the rect makes ownership obvious at a glance, and that small, ugly tail is saved too.
 
-阈值由来：水平要 4pt×2 + 22pt 标签宽 = 30pt；垂直贴顶（0 inset），因为 Finder 日期/大小列的 AX rect 高仅 ~14-16pt，任何正垂直 padding 都会把它们踢回 speech bubble（恰是 inside 要解决的"浮在行间"老问题）。小于阈值的（工具栏小图标）落到 §7.4。
+Origin of the threshold: horizontally needs 4pt×2 + 22pt label width = 30pt; vertically flush to the top (0 inset), because the AX rect for Finder's date/size columns is only ~14-16pt tall, and any positive vertical padding would kick them back to a speech bubble (exactly the "floating between rows" problem inside placement is meant to solve). Anything below the threshold (small toolbar icons) falls to §7.4.
 
-### 7.4 Speech bubble（rect 太小，放不下 inside）
+### 7.4 Speech bubble (rect too small to fit inside)
 
-Badge 22×16 矩形 + 尾巴三角。默认**下方**（尾巴指上），不 fit 翻**上方**（尾巴指下）。同样用 `contains` 判断 fit。只有小于 §7.3 阈值的 target 才走这里。
+A 22×16 badge rectangle + a tail triangle. By default **below** (tail points up); if it doesn't fit, flip **above** (tail points down). Fit is again judged with `contains`. Only targets below the §7.3 threshold go through here.
 
-### 7.5 De-collision（去重叠）
+### 7.5 De-collision
 
-§7.1-7.4 每个 label 的位置是**独立算的、不看别的 label**，所以 dense 页面（web 工具栏 / icon 网格 / 导航栏，Chrome 上最明显）label 会叠在一起、读不清。用户是**读 label 文字再敲**，被盖住的 label 等于废了 —— 所以"可读"优先于"精确贴着元素"。
+In §7.1-7.4 each label's position is **computed independently, without looking at other labels**, so on a dense page (web toolbars / icon grids / nav bars, most pronounced on Chrome) labels stack on top of each other and become unreadable. The user **reads the label text and then types it**, so a covered label is effectively useless — therefore "readable" takes priority over "precisely hugging the element."
 
-`draw` 因此分**三趟**：
+`draw` is therefore split into **three passes**:
 
-1. **算位置**：按 §7.1-7.4 算每个可见 label 的 `fillRect`（逻辑不变），收集成 `[Placed]`（不立即画）。
-2. **去重叠**：贪心。维护 `occupied: [NSRect]`，逐个 label 检查跟"已放下的"撞不撞（相交，1pt gap 防贴边）；撞了就在附近找最近的空位挪过去（`nudgeToFree`：radius 3 × (labelW, labelH) 的偏移网格，按离原位距离近→远排序，第一个空且在屏内的胜出；半径内找不到 → 放弃、接受重叠，好过把 label 甩远）。挪过的 label **丢掉尾巴**（连接线会指错）。把最终位置 append 进 `occupied` —— 后面的 label 比的是前面**挪后**的位置（贪心滚动、不回头）。
-3. **画**。
+1. **Compute positions**: per §7.1-7.4, compute each visible label's `fillRect` (logic unchanged), collected into `[Placed]` (not drawn immediately).
+2. **De-collision**: greedy. Maintain `occupied: [NSRect]`, and for each label check whether it collides with "those already placed" (intersection, with a 1pt gap to prevent edge-touching); on a collision, find the nearest free spot nearby and move it there (`nudgeToFree`: an offset grid of radius 3 × (labelW, labelH), sorted by distance from the original position near→far, the first one that's free and on-screen wins; if nothing's found within the radius → give up, accept the overlap, better than flinging the label far away). A moved label **drops its tail** (the connector would point wrong). Append the final position into `occupied` — later labels compare against the **post-move** positions of the earlier ones (greedy rolling, no backtracking).
+3. **Draw**.
 
-**Dock label 不参与去重叠**（它们在 icon 网格外、极少撞，挪开会脱离尾巴更难看）。
+**Dock labels don't participate in de-collision** (they're outside the icon grid, rarely collide, and moving them away would detach them from their tail, looking worse).
 
-**性能**：O(n²)（每个比前面所有），但 n≤`maxTargets`(169)、一次性渲染（非每帧）、操作是 cheap 的 rect 相交（几个 float 比较）。实测亚毫秒；病态全撞满也才 ~10ms。真嫌慢有空间分桶（broad-phase）可降到 ~O(n)，但 n 这量级用不上。
+**Performance**: O(n²) (each compares against all before it), but n≤`maxTargets`(169), rendered once (not per frame), and the operation is a cheap rect intersection (a few float comparisons). Measured sub-millisecond; a pathological all-collide case is only ~10ms. If it were ever genuinely slow, spatial bucketing (broad-phase) could bring it down to ~O(n), but at this n that's unnecessary.
 
 ---
 
-## 8. 视觉细节
+## 8. Visual details
 
 ```swift
-let bg = NSColor(red: 1.0, green: 0.84, blue: 0.0, alpha: 0.95)   // 黄底
-let attrsBlack: ... = [NSColor.black, monospaced 11pt bold]        // 未输入部分
-let attrsDim: ...   = [NSColor.black.withAlphaComponent(0.30), ...] // 已输入前缀
+let bg = NSColor(red: 1.0, green: 0.84, blue: 0.0, alpha: 0.95)   // yellow background
+let attrsBlack: ... = [NSColor.black, monospaced 11pt bold]        // not-yet-typed part
+let attrsDim: ...   = [NSColor.black.withAlphaComponent(0.30), ...] // already-typed prefix
 ```
 
-- **背景**：黄 α=0.95（高可见度，与多数 macOS UI 颜色冲突小）
-- **字体**：monospaced 11pt bold，等宽确保两字符 label 宽度可预测
-- **已输入前缀**：30% 黑（视觉淡化"已确认"的字符），未输入部分纯黑
-- **圆角**：badge 矩形 xRadius/yRadius = 3
-- **尾巴**：三角形，base ~8px，tip ~5px，跟 badge 用同一个黄色 fill
+- **Background**: yellow α=0.95 (high visibility, low conflict with most macOS UI colors)
+- **Font**: monospaced 11pt bold, monospacing ensures a two-character label's width is predictable
+- **Already-typed prefix**: 30% black (visually dims the "confirmed" characters), the not-yet-typed part is pure black
+- **Corner radius**: badge rectangle xRadius/yRadius = 3
+- **Tail**: a triangle, base ~8px, tip ~5px, filled with the same yellow as the badge
 
-绘制 typed 部分 + rest 部分的对齐方式：
+How the typed part + rest part are aligned when drawing:
 ```swift
 let typedSize = (typedPart as NSString).size(withAttributes: attrsDim)
 let restSize = (restPart as NSString).size(withAttributes: attrsBlack)
 let totalW = typedSize.width + restSize.width
 
 if isDockLabel {
-    textX = fillRect.midX - totalW / 2   // 居中
+    textX = fillRect.midX - totalW / 2   // centered
 } else {
-    textX = fillRect.minX + 3            // 左对齐 + 3px padding
+    textX = fillRect.minX + 3            // left-aligned + 3px padding
 }
 ```
 
@@ -308,34 +309,34 @@ if isDockLabel {
 
 ## 9. HUD
 
-独立的右下角 mode 提示窗口（不是 overlay 的一部分）。
+A standalone bottom-right mode-indicator window (not part of the overlay).
 
 ```swift
 let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 160, height: 44), ...)
-w.level = .statusBar       // 同 overlay
-w.hasShadow = true         // overlay 没影子，HUD 有
+w.level = .statusBar       // same as overlay
+w.hasShadow = true         // overlay has no shadow, HUD does
 w.ignoresMouseEvents = true
-// 位置：主屏 visibleFrame 底部居中
+// position: bottom-center of the primary screen's visibleFrame
 w.setFrameOrigin(NSPoint(x: f.midX - 80, y: f.minY + 80))
 ```
 
-文案在 `VimSession.renderModeHUD()` 统一计算：
-- TAP mode → `"TAP"` 或 `"TAP · sticky"`
-- 命令面板 → `":"`, `":q"`, `":xx"`
+The text is computed centrally in `VimSession.renderModeHUD()`:
+- TAP mode → `"TAP"` or `"TAP · sticky"`
+- Command palette → `":"`, `":q"`, `":xx"`
 
-样式：半透明黑底（alpha 0.78），白字 14pt monospaced semibold，圆角 10px。
+Style: semi-transparent black background (alpha 0.78), white text 14pt monospaced semibold, corner radius 10px.
 
-`orderFrontRegardless()`，**不**用 `makeKeyAndOrderFront`（后者会偷焦点 → 当前焦点 app 失焦 → AX 拿不到目标元素了）。
+`orderFrontRegardless()`, **not** `makeKeyAndOrderFront` (the latter would steal focus → the currently focused app loses focus → AX can no longer get the target element).
 
 ---
 
-## 10. 跨屏元素
+## 10. Cross-screen elements
 
-如果某个 target 的矩形不在当前 view 的 bounds 上（比如焦点 app 在另一块屏），各分支都会 `continue` 跳过绘制。
-这就是为什么每屏一个独立的 HintOverlayView：每个 view 只画落在自己屏幕上的 hints，自动分流。
+If a target's rectangle isn't within the current view's bounds (e.g., the focused app is on another screen), each branch will `continue` and skip drawing.
+This is exactly why there's one independent HintOverlayView per screen: each view only draws the hints that land on its own screen, routing automatically.
 
-判断：
+The check:
 ```swift
 if !self.bounds.intersects(fillRect) { continue }
 ```
-注意是 `intersects` 不是 `contains` —— 跨屏边界的元素在两块屏上各画一半也比都不画好。
+Note it's `intersects`, not `contains` — an element straddling the screen boundary, drawn as half on each of two screens, is better than not drawn at all.

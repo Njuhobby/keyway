@@ -1,22 +1,22 @@
-# Settings / 用户配置设计
+# Settings / User Configuration Design
 
-> **状态：设计草稿，未实现**。上线前要让用户至少能调最痛的几项（速度、颜色、trigger）。本文固化配置项分档 + 存储 + 让硬编码常量变可配的改法 + v1 scope。
-
----
-
-## 0. TL;DR + 原则
-
-```
-菜单栏加 "Settings…"（Cmd+,）→ 配置面板 → 存 UserDefaults → 控制器读它（带默认值，live-apply）
-```
-
-**配置是双刃剑**：太多配置 = 维护负担 + 测试矩阵爆炸 + 新用户被淹没。所以**分档**，只把"因人而异很大、自己 daily-drive 都反复调过"的项放进 v1，复杂的（自定义键位）推后。Homerow 有配置面板是对的，但别一上来堆满。
+> **Status: design draft, not implemented**. Before shipping, users need to be able to adjust at least the most painful few items (speed, colors, trigger). This doc locks down the configuration-item tiers + storage + the approach for making hardcoded constants configurable + v1 scope.
 
 ---
 
-## 1. 存储：UserDefaults + 中央 Settings
+## 0. TL;DR + Principles
 
-一个 `Settings.shared` 薄封装 `UserDefaults`，**每个键带默认值**（没配过 = 当前硬编码值，行为不变）：
+```
+Add "Settings…" to the menu bar (Cmd+,) → config panel → store in UserDefaults → controllers read it (with defaults, live-apply)
+```
+
+**Configuration is a double-edged sword**: too much config = maintenance burden + test-matrix explosion + new users drowning. So **tier it**, putting only items that "vary a lot between people and that I've repeatedly tweaked while daily-driving" into v1, and defer the complex ones (custom key mappings). Homerow having a config panel is the right call, but don't pile it full from day one.
+
+---
+
+## 1. Storage: UserDefaults + Central Settings
+
+A `Settings.shared` thin wrapper around `UserDefaults`, **with a default for every key** (never configured = current hardcoded value, behavior unchanged):
 
 ```swift
 @MainActor final class Settings {
@@ -25,97 +25,97 @@
 
     var cursorNormalStep: CGFloat { d.object(forKey: "cursorNormalStep") as? CGFloat ?? 6 }
     var cursorFastStep:   CGFloat { d.object(forKey: "cursorFastStep")   as? CGFloat ?? 18 }
-    // ... 其余同理
-    func reset() { /* 清掉所有 mouseless.* key */ }
+    // ... the rest follow the same pattern
+    func reset() { /* clear all mouseless.* keys */ }
 }
 ```
 
-**live-apply**：控制器在 `start()` 或每 tick 读 `Settings.shared.xxx`（60fps 读缓存值无成本）→ 改了设置立即生效，不用重启。主题色类（影响渲染）发一个 `Settings.didChange` 通知让 overlay 重画。
+**live-apply**: controllers read `Settings.shared.xxx` in `start()` or each tick (reading a cached value at 60fps is free) → changing a setting takes effect immediately, no restart needed. Theme-color-type settings (which affect rendering) post a `Settings.didChange` notification to make the overlay repaint.
 
 ---
 
-## 2. 配置面板
+## 2. Config Panel
 
-- 菜单栏 "Settings…"（macOS 惯例，**不叫 Configure**；绑 Cmd+,）
-- 一个 NSWindow（或 SwiftUI `Settings` scene），分 tab：**General / Speed / Appearance / Trigger**
-- 每项即时写 UserDefaults
-- "Reset to Defaults" 按钮
+- Menu bar "Settings…" (macOS convention, **not called Configure**; bound to Cmd+,)
+- One NSWindow (or SwiftUI `Settings` scene), split into tabs: **General / Speed / Appearance / Trigger**
+- Each item writes to UserDefaults immediately
+- "Reset to Defaults" button
 
 ---
 
-## 3. 配置项分档
+## 3. Configuration-Item Tiers
 
-| 项 | 当前硬编码 | 档 |
+| Item | Current hardcoded value | Tier |
 |---|---|---|
-| **光标移动速度** slow/normal/fast | MouseMover 2 / 6 / 18 px/tick | **v1 必须** |
-| **滚动速度** normal/fast | ScrollController 30 / 90 px/tick | **v1 必须** |
-| **窗口 resize/move 速度** slow/normal/fast | Window(Move)Controller 5 / 20 / 80 px/tick | **v1 必须** |
-| **双击阈值** | hjkl 跳屏 `hjklJumpTapWindow` 0.10s；WINDOW 反向 + Shift 双击 `windowReverseTapWindow` 0.15s | **v1 必须**（手速因人而异大）|
-| **跳屏距离** | jumpCursor 0.25 / 0.5 屏 | v1 必须 |
-| **hint label 主题色** | 黄 `1.0,0.84,0` / move-armed `1.0,0.95,0.70` | **v1 该有** |
-| **label 字号** | 11pt | v1 该有 |
-| **trigger 键** | Caps Lock→F19（hidutil 硬定）| **v1 该有**（不是人人接受 Caps Lock）|
-| **开机自启** | 无 | v1 该有（LaunchAgent / SMAppService）|
-| **sticky 默认开关** | 默认 off | v1 该有 |
-| **完全自定义键位映射**（hjkl 改键、hint 字母池、chord 键）| 硬编码 | **v2**（见 §6）|
+| **Cursor move speed** slow/normal/fast | MouseMover 2 / 6 / 18 px/tick | **v1 must-have** |
+| **Scroll speed** normal/fast | ScrollController 30 / 90 px/tick | **v1 must-have** |
+| **Window resize/move speed** slow/normal/fast | Window(Move)Controller 5 / 20 / 80 px/tick | **v1 must-have** |
+| **Double-click threshold** | hjkl jump `hjklJumpTapWindow` 0.10s; WINDOW reverse + Shift double-click `windowReverseTapWindow` 0.15s | **v1 must-have** (typing speed varies a lot between people) |
+| **Jump distance** | jumpCursor 0.25 / 0.5 screen | v1 must-have |
+| **hint label theme color** | yellow `1.0,0.84,0` / move-armed `1.0,0.95,0.70` | **v1 should-have** |
+| **label font size** | 11pt | v1 should-have |
+| **trigger key** | Caps Lock→F19 (hardwired via hidutil) | **v1 should-have** (not everyone accepts Caps Lock) |
+| **launch-at-login** | none | v1 should-have (LaunchAgent / SMAppService) |
+| **sticky default toggle** | default off | v1 should-have |
+| **fully custom key mapping** (rebind hjkl, hint letter pool, chord keys) | hardcoded | **v2** (see §6) |
 
-> 提供"慢/中/快"三档预设比裸数值更友好；高级用户可展开填精确值。
-
----
-
-## 4. 让硬编码常量变可配
-
-现状是各控制器里 `private let normalStep: CGFloat = 6`。改法：
-
-1. 控制器构造时或 `start()` 时从 `Settings.shared` 取值（替掉 `let` 常量）
-2. 速度类每 tick 读（已经在跑 timer，读缓存值无成本）→ live-apply
-3. 主题色：`HintOverlay` 渲染时读 `Settings.shared.hintColor`；`Settings.didChange` 通知触发 `needsDisplay`
-4. 双击阈值（VimSession）→ 读 Settings：`hjklJumpTapWindow`（hjkl 跳屏，0.10s）和 `windowReverseTapWindow`（WINDOW 反向 + Shift 双击，0.15s）现在是两个常量。hjkl 跳屏比其它紧，因为它和"正常单步移动"共享同一个键、最容易把快速连点误判成跳屏；WINDOW/Shift 没有这种单步歧义，留 0.15s。可各自暴露，或合成一个"双击灵敏度"滑块按比例缩放两者。
-
-零风险迁移：每个键的默认值 = 当前硬编码值，没配过的用户行为完全不变。
+> Offering "slow/medium/fast" presets is friendlier than raw numbers; advanced users can expand to fill in exact values.
 
 ---
 
-## 5. Trigger 键（比值型配置重）
+## 4. Making Hardcoded Constants Configurable
 
-当前 `TriggerRemap` 用 hidutil 把 Caps Lock → F19 全局重映射。让 trigger 可配不是改个数：
+The current state is `private let normalStep: CGFloat = 6` inside each controller. The fix:
 
-- **简单版（v1 该有）**：给**几个预设**（Caps Lock / Right Cmd / Right Option / F19 直连），不做任意键。换预设 = 改 hidutil 映射目标 + 更新 arm 逻辑认的 keycode。
-- **任意键**：复杂（修饰键不能当 trigger、要处理冲突），v2 再说。
+1. Read values from `Settings.shared` at controller construction or in `start()` (replacing the `let` constants)
+2. Speed-type values are read each tick (a timer is already running, reading a cached value is free) → live-apply
+3. Theme color: `HintOverlay` reads `Settings.shared.hintColor` when rendering; the `Settings.didChange` notification triggers `needsDisplay`
+4. Double-click thresholds (VimSession) → read from Settings: `hjklJumpTapWindow` (hjkl jump, 0.10s) and `windowReverseTapWindow` (WINDOW reverse + Shift double-click, 0.15s) are currently two constants. The hjkl jump is tighter than the others because it shares the same key as "normal single-step movement" and is the easiest to misjudge a fast double-tap as a jump; WINDOW/Shift has no such single-step ambiguity, so it keeps 0.15s. These can each be exposed separately, or combined into a single "double-click sensitivity" slider that scales both proportionally.
+
+Zero-risk migration: each key's default = the current hardcoded value, so behavior is completely unchanged for users who never configured it.
 
 ---
 
-## 6. 自定义键位映射 —— 推到 v2（can of worms）
+## 5. Trigger Key (heavier than value-type config)
 
-让用户把 hjkl 改成别的、改 hint 字母池、改 chord 键，是个大坑，跟 `SPECS.md` Future-work #1 的**非 QWERTY 键盘布局**老问题绑在一起：
+Currently `TriggerRemap` uses hidutil to globally remap Caps Lock → F19. Making the trigger configurable isn't just changing a number:
 
-- 现在 `KeyCode.swift` 是 ANSI 物理键位，Dvorak/国际键盘已经会错
-- 自定义键位要先把 keyCode↔字符映射重构（`UCKeyTranslate`）
-- 还要处理"用户把 hint 字母改成 hjkl 之类"的冲突校验
+- **Simple version (v1 should-have)**: offer **a few presets** (Caps Lock / Right Cmd / Right Option / F19 direct), no arbitrary keys. Switching presets = changing the hidutil mapping target + updating the keycode the arm logic recognizes.
+- **Arbitrary key**: complex (modifier keys can't serve as the trigger, conflicts need handling), defer to v2.
 
-**所以 v1 只做值型 + 主题 + trigger 预设；键位映射等键盘布局重构一起做。**
+---
+
+## 6. Custom Key Mapping — Pushed to v2 (can of worms)
+
+Letting users remap hjkl to something else, change the hint letter pool, or change the chord keys is a big pit, tied to the longstanding **non-QWERTY keyboard layout** problem from `SPECS.md` Future-work #1:
+
+- Currently `KeyCode.swift` assumes ANSI physical key positions, which already breaks on Dvorak/international keyboards
+- Custom key mapping first requires refactoring the keyCode↔character mapping (`UCKeyTranslate`)
+- It also requires handling conflict validation for cases like "the user changes the hint letters to something like hjkl"
+
+**So v1 only does value-type + theme + trigger presets; key mapping waits to be done together with the keyboard-layout refactor.**
 
 ---
 
 ## 7. v1 scope
 
-做：
-- `Settings.shared`（UserDefaults 封装，全键带默认值 = 当前硬编码值）
-- 控制器改读 Settings（速度类 live-apply）
-- Settings 窗口（Cmd+,）：Speed（光标/滚动/窗口，慢中快预设 + 精确值）、Appearance（主题色 + label 字号）、Trigger（预设列表）、General（开机自启、sticky 默认）
+Do:
+- `Settings.shared` (UserDefaults wrapper, every key has a default = current hardcoded value)
+- Controllers switched to read Settings (speed-type values live-apply)
+- Settings window (Cmd+,): Speed (cursor/scroll/window, slow-medium-fast presets + exact values), Appearance (theme color + label font size), Trigger (preset list), General (launch-at-login, sticky default)
 - Reset to Defaults
 
-之后（v2）：
-- 完全自定义键位映射（配键盘布局重构）
-- trigger 任意键
-- 配置导入/导出、跨设备同步（iCloud）
+Later (v2):
+- Fully custom key mapping (paired with the keyboard-layout refactor)
+- Arbitrary trigger key
+- Config import/export, cross-device sync (iCloud)
 
 ---
 
-## 8. 决策记录
+## 8. Decision Record
 
-1. **分档，不堆满** —— config 是双刃剑；v1 只放因人而异大的（速度/阈值/色/trigger 预设）
-2. **UserDefaults + 默认值 = 当前硬编码值** —— 零风险迁移，没配过行为不变
-3. **菜单叫 "Settings…" + Cmd+,** —— macOS 惯例（不叫 Configure）
-4. **trigger 给预设不给任意键**（v1）；**自定义键位推 v2**（绑非 QWERTY 重构）
-5. **live-apply** —— 改了即时生效，不重启
+1. **Tier it, don't pile it full** — config is a double-edged sword; v1 only includes items that vary a lot between people (speed/threshold/color/trigger presets)
+2. **UserDefaults + default = current hardcoded value** — zero-risk migration, behavior unchanged when never configured
+3. **Menu called "Settings…" + Cmd+,** — macOS convention (not called Configure)
+4. **Trigger offers presets, not arbitrary keys** (v1); **custom key mapping pushed to v2** (tied to the non-QWERTY refactor)
+5. **live-apply** — changes take effect immediately, no restart
