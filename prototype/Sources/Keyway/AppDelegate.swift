@@ -107,7 +107,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 ])
             }
         } else {
-            statusItem.button?.title = "K⚠"
+            setWarningBadge(true)
             Log.error("[keyway] Required permissions not granted:")
             if !axOK {
                 Log.error("  • Accessibility — System Settings → Privacy & Security → Accessibility")
@@ -130,7 +130,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func setupMenuBar() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.title = "K"
+        statusItem.button?.image = MenuBarIcon.statusImage()
+        statusItem.button?.imagePosition = .imageLeading
 
         let menu = NSMenu()
         let header = NSMenuItem(title: "Keyway prototype · Caps Lock to enter vim", action: nil, keyEquivalent: "")
@@ -146,6 +147,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(quit)
 
         statusItem.menu = menu
+    }
+
+    /// Append (or clear) a red warning badge beside the brand icon. Used
+    /// when a hard requirement is missing — permissions or the event tap.
+    private func setWarningBadge(_ on: Bool) {
+        guard let button = statusItem.button else { return }
+        if on {
+            button.attributedTitle = NSAttributedString(
+                string: " !",
+                attributes: [.foregroundColor: NSColor.systemRed,
+                             .font: NSFont.systemFont(ofSize: 11, weight: .bold)])
+        } else {
+            button.title = ""
+        }
     }
 
     @discardableResult
@@ -173,10 +188,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if newTap.start() {
             session = newSession
             tap = newTap
-            statusItem.button?.title = "K●"
+            setWarningBadge(false)
             Log.info("[keyway] running. Press Caps Lock to enter vim mode.")
         } else {
-            statusItem.button?.title = "K⚠"
+            setWarningBadge(true)
         }
     }
 

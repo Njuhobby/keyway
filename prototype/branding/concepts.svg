@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="940" height="1048" viewBox="0 0 940 1048" font-family="Helvetica Neue, Helvetica, Arial, sans-serif">
+<rect width="940" height="1048" fill="#f4f5f7"/>
+<defs><linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3D7BFF"/><stop offset="1" stop-color="#0E48C8"/></linearGradient></defs>
+<text x="40" y="50" font-size="30" font-weight="700" fill="#111">Keyway — logo concepts</text>
+<text x="271.0" y="84" font-size="15" fill="#666" text-anchor="middle">App icon</text>
+<text x="530.0" y="84" font-size="15" fill="#666" text-anchor="middle">Menu bar (dark)</text>
+<text x="774.0" y="84" font-size="15" fill="#666" text-anchor="middle">Menu bar (light)</text>
+<text x="40" y="206" font-size="20" font-weight="700" fill="#111">A. Keyhole</text>
+<text x="40" y="228" font-size="13" fill="#888">access · classic</text>
+<rect x="196" y="137" width="150" height="150" rx="34" fill="url(#bg)"/>
+<g transform="translate(221.5 162.5) scale(0.9900)" fill="#ffffff" stroke="#ffffff" ><circle cx="50" cy="40" r="15"/><path d="M44 52 L56 52 L59 78 L41 78 Z"/></g>
+<rect x="432" y="189" width="196" height="46" rx="9" fill="#2b2b2e"/>
+<g transform="translate(513.0 195.0) scale(0.3400)" fill="#ffffff" stroke="#ffffff" ><circle cx="50" cy="40" r="15"/><path d="M44 52 L56 52 L59 78 L41 78 Z"/></g>
+<rect x="676" y="189" width="196" height="46" rx="9" fill="#e9e9ec"/>
+<g transform="translate(757.0 195.0) scale(0.3400)" fill="#1a1a1a" stroke="#1a1a1a" ><circle cx="50" cy="40" r="15"/><path d="M44 52 L56 52 L59 78 L41 78 Z"/></g>
+<text x="40" y="438" font-size="20" font-weight="700" fill="#111">B. Keycap K</text>
+<text x="40" y="460" font-size="13" fill="#888">keyboard-native</text>
+<rect x="196" y="369" width="150" height="150" rx="34" fill="url(#bg)"/>
+<g transform="translate(221.5 394.5) scale(0.9900)" fill="#ffffff" stroke="#ffffff" ><rect x="20" y="20" width="60" height="60" rx="13" fill="none" stroke-width="7"/><path d="M34 32 L42 32 L42 46 L56 32 L66 32 L50 50 L66 68 L56 68 L42 54 L42 68 L34 68 Z"/></g>
+<rect x="432" y="421" width="196" height="46" rx="9" fill="#2b2b2e"/>
+<g transform="translate(513.0 427.0) scale(0.3400)" fill="#ffffff" stroke="#ffffff" ><rect x="20" y="20" width="60" height="60" rx="13" fill="none" stroke-width="7"/><path d="M34 32 L42 32 L42 46 L56 32 L66 32 L50 50 L66 68 L56 68 L42 54 L42 68 L34 68 Z"/></g>
+<rect x="676" y="421" width="196" height="46" rx="9" fill="#e9e9ec"/>
+<g transform="translate(757.0 427.0) scale(0.3400)" fill="#1a1a1a" stroke="#1a1a1a" ><rect x="20" y="20" width="60" height="60" rx="13" fill="none" stroke-width="7"/><path d="M34 32 L42 32 L42 46 L56 32 L66 32 L50 50 L66 68 L56 68 L42 54 L42 68 L34 68 Z"/></g>
+<text x="40" y="670" font-size="20" font-weight="700" fill="#111">C. Keyway profile</text>
+<text x="40" y="692" font-size="13" fill="#888">literal · abstract</text>
+<rect x="196" y="601" width="150" height="150" rx="34" fill="url(#bg)"/>
+<g transform="translate(221.5 626.5) scale(0.9900)" fill="#ffffff" stroke="#ffffff" ><path fill-rule="evenodd" d="M42 24 H58 V76 H42 Z M58 40 H49 V48 H58 Z M58 54 H49 V62 H58 Z"/></g>
+<rect x="432" y="653" width="196" height="46" rx="9" fill="#2b2b2e"/>
+<g transform="translate(513.0 659.0) scale(0.3400)" fill="#ffffff" stroke="#ffffff" ><path fill-rule="evenodd" d="M42 24 H58 V76 H42 Z M58 40 H49 V48 H58 Z M58 54 H49 V62 H58 Z"/></g>
+<rect x="676" y="653" width="196" height="46" rx="9" fill="#e9e9ec"/>
+<g transform="translate(757.0 659.0) scale(0.3400)" fill="#1a1a1a" stroke="#1a1a1a" ><path fill-rule="evenodd" d="M42 24 H58 V76 H42 Z M58 40 H49 V48 H58 Z M58 54 H49 V62 H58 Z"/></g>
+<text x="40" y="902" font-size="20" font-weight="700" fill="#111">D. Key + way</text>
+<text x="40" y="924" font-size="13" fill="#888">name pun · dynamic</text>
+<rect x="196" y="833" width="150" height="150" rx="34" fill="url(#bg)"/>
+<g transform="translate(221.5 858.5) scale(0.9900)" fill="#ffffff" stroke="#ffffff" ><path fill-rule="evenodd" d="M21 42 a13 13 0 1 0 26 0 a13 13 0 1 0 -26 0 Z M28 42 a6 6 0 1 1 12 0 a6 6 0 1 1 -12 0 Z"/><path d="M46 39 H68 V33 L85 42 L68 51 V45 H46 Z"/></g>
+<rect x="432" y="885" width="196" height="46" rx="9" fill="#2b2b2e"/>
+<g transform="translate(513.0 891.0) scale(0.3400)" fill="#ffffff" stroke="#ffffff" ><path fill-rule="evenodd" d="M21 42 a13 13 0 1 0 26 0 a13 13 0 1 0 -26 0 Z M28 42 a6 6 0 1 1 12 0 a6 6 0 1 1 -12 0 Z"/><path d="M46 39 H68 V33 L85 42 L68 51 V45 H46 Z"/></g>
+<rect x="676" y="885" width="196" height="46" rx="9" fill="#e9e9ec"/>
+<g transform="translate(757.0 891.0) scale(0.3400)" fill="#1a1a1a" stroke="#1a1a1a" ><path fill-rule="evenodd" d="M21 42 a13 13 0 1 0 26 0 a13 13 0 1 0 -26 0 Z M28 42 a6 6 0 1 1 12 0 a6 6 0 1 1 -12 0 Z"/><path d="M46 39 H68 V33 L85 42 L68 51 V45 H46 Z"/></g>
+</svg>
