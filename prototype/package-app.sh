@@ -4,7 +4,9 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-CONFIG="${1:-release}"          # release | debug
+CONFIG="${1:-release}"               # release | debug
+VERSION="${KEYWAY_VERSION:-0.1.0}"   # CI injects this from the git tag
+BUILD="${KEYWAY_BUILD:-1}"
 APP="build/Keyway.app"
 ICNS="branding/Keyway.icns"
 
@@ -27,7 +29,7 @@ cp "$ICNS" "$APP/Contents/Resources/Keyway.icns"
 # Bundle.module resolves against Contents/Resources in a packaged app.
 [ -d "$RESBUNDLE" ] && cp -R "$RESBUNDLE" "$APP/Contents/Resources/"
 
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -37,8 +39,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleExecutable</key>      <string>Keyway</string>
     <key>CFBundleIdentifier</key>      <string>com.keyway.app</string>
     <key>CFBundlePackageType</key>     <string>APPL</string>
-    <key>CFBundleShortVersionString</key> <string>0.1.0</string>
-    <key>CFBundleVersion</key>         <string>1</string>
+    <key>CFBundleShortVersionString</key> <string>$VERSION</string>
+    <key>CFBundleVersion</key>         <string>$BUILD</string>
     <key>CFBundleIconFile</key>        <string>Keyway</string>
     <key>LSMinimumSystemVersion</key>  <string>13.0</string>
     <key>LSUIElement</key>             <true/>

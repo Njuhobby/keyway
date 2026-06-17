@@ -1,0 +1,42 @@
+name: Release
+
+# Tag a commit and push the tag to cut a release:
+#   git tag v0.1.0 && git push origin v0.1.0
+# This builds Keyway.app on a macOS runner, zips it (bundle-safe), and
+# attaches it to a GitHub Release named after the tag.
+on:
+  push:
+    tags: ['v*']
+
+# Needed for `gh release create` to write the Release.
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & publish (macOS)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      # Package.swift is swift-tools 6.0, so it needs Swift 6 / Xcode 16+.
+      - name: Use latest Xcode
+        run: sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -n1)"
+
+      # Strip the leading "v" so the tag is the single source of the version
+      # (CFBundleShortVersionString + the zip name both derive from it).
+      - name: Derive version from tag
+        run: echo "KEYWAY_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - name: Build & zip
+        working-directory: prototype
+        run: ./release.sh
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            prototype/build/Keyway-v"$KEYWAY_VERSION".zip \
+            --title "Keyway $GITHUB_REF_NAME" \
+            --generate-notes
