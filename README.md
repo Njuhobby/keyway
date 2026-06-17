@@ -67,6 +67,30 @@ A couple of pieces that were interesting to build (see `prototype/specs/`):
   - **Accessibility** — to read the AX tree and synthesize clicks/keys
   - **Screen Recording** — for the vision fallback and the settle detection
 
+## Download (pre-built)
+
+Grab the latest `Keyway-vX.Y.Z.zip` from the
+[Releases](https://github.com/Njuhobby/keyway/releases) page, unzip it, and
+drag **Keyway.app** into `/Applications`.
+
+The build is ad-hoc signed, **not notarized by Apple**, so Gatekeeper blocks
+it the first time. Bypass it once:
+
+- **Right-click** `Keyway.app` → **Open** → click **Open** in the dialog.
+
+  …or from Terminal:
+
+  ```sh
+  xattr -dr com.apple.quarantine /Applications/Keyway.app
+  ```
+
+Then launch it and grant the two permissions (see [Requirements](#requirements)).
+Because the build isn't signed with a stable Developer ID, a future version
+may ask you to re-grant those permissions.
+
+Prefer to build it yourself? See [Build & run](#build--run) — a self-built
+app avoids the Gatekeeper prompt entirely.
+
 ## Build & run
 
 ```sh
@@ -74,8 +98,17 @@ cd prototype
 ./run.sh        # swift build + ad-hoc re-sign + (re)launch
 ```
 
-A `M` icon appears in the menu bar: `M●` ready, `M⚠` a permission is
-missing. Press **Caps Lock** to enter hint mode.
+To produce a distributable `.app` (icon, Info.plist, signed) and a zip for a
+release:
+
+```sh
+cd prototype
+./package-app.sh    # → build/Keyway.app
+./release.sh        # → build/Keyway-v<version>.zip (bundle-safe, with sha256)
+```
+
+A key icon appears in the menu bar (a red `!` badge next to it means a
+required permission is missing). Press **Caps Lock** to enter hint mode.
 
 On first launch macOS prompts for the two permissions. Enable Keyway in
 **System Settings → Privacy & Security** for both, fully quit, and rerun.
