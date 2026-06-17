@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel an in-progress run when a new commit is pushed to the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build (macOS)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      # prototype/Package.swift is swift-tools 6.0 (.macOS(.v14)), so it
+      # needs Swift 6 / Xcode 16+. Pick the newest Xcode on the runner.
+      - name: Use latest Xcode
+        run: sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -n1)"
+
+      - name: Swift version
+        run: swift --version
+
+      - name: Build the app (prototype)
+        working-directory: prototype
+        run: swift build
+
+      - name: Build the AX inspector (axdump)
+        working-directory: axdump
+        run: swift build
+
+  extension:
+    name: Extension JS syntax (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: node --check the extension scripts
+        run: |
+          for f in prototype/extension/*.js; do
+            echo "checking $f"
+            node --check "$f"
+          done
