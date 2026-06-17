@@ -14,6 +14,11 @@ jobs:
   build:
     name: Build (macOS)
     runs-on: macos-15
+    # macOS runners bill at 10x and private repos have a limited free
+    # monthly quota, so skip this job while the repo is private. It
+    # auto-activates once the repo is public (where standard runners are
+    # free). The cheap Linux JS check below always runs.
+    if: github.event.repository.visibility == 'public'
     steps:
       - uses: actions/checkout@v4
 
