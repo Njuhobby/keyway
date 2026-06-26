@@ -218,11 +218,41 @@ cd prototype
 
 #### Browser extension (optional, for web-page hints)
 
-Load `prototype/extension/` as an unpacked extension (Chrome:
-`chrome://extensions` → Developer mode → Load unpacked; Firefox: build with
-`build-firefox.sh`, then load via `about:debugging`) and install the
-native-messaging host with the provided script. Without it, web pages still
-work through the vision fallback, just less precisely.
+Web pages already work through the vision fallback. The extension adds
+**precise, DOM-based hints** on real pages (and Vimium-style modeless
+scrolling). It talks to the running Keyway app through a native-messaging
+bridge, so this is a **build-from-source** feature — the host manifest points
+at the `keyway-bridge` binary in your checkout's `.build/`.
+
+Build and run Keyway first (`./run.sh`), then:
+
+**Chrome**
+
+1. Open `chrome://extensions`, turn on **Developer mode** (top-right).
+2. Click **Load unpacked** and select `prototype/extension/`.
+3. On the new **Keyway (dev)** card, copy its **ID** (a 32-character string).
+4. Register the native-messaging host with that ID:
+   ```sh
+   cd prototype/extension
+   ./install_dev_host.sh <extension-id>
+   ```
+5. Reload the extension (the ↻ icon on its card). Done — open any page and
+   press **Caps Lock**.
+
+**Firefox**
+
+1. Build the Firefox variant:
+   ```sh
+   cd prototype/extension
+   ./build-firefox.sh                 # → dist-firefox/
+   ./install_dev_host_firefox.sh      # no ID needed (gecko id is fixed)
+   ```
+2. Open `about:debugging#/runtime/this-firefox` → **Load Temporary Add-on…**
+   → pick `dist-firefox/manifest.json`.
+
+> Unpacked (Chrome) and temporary (Firefox) extensions are dropped when the
+> browser restarts — reload them each session. A signed Web Store / AMO build
+> isn't published yet.
 
 ### Uninstall
 
