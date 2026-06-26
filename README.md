@@ -72,8 +72,9 @@ right click. The fallback hint-only tools don't have.
 ### 4 · Drag mode ⭐
 <img src="docs/demos/drag.gif" width="760" alt="Drag mode">
 
-`v` grabs at the cursor, `hjkl` drags, drop — a full press-move-release with no
-mouse (here, dragging out a text selection).
+From TAP (or TAP sticky), press `v` to start a drag — `mouseDown` at the cursor,
+`hjkl` to move, drop to release. In the clip the drag selects a paragraph of
+text so it can be copied and pasted — a real press-drag-release, no mouse.
 
 ### 5 · Search mode ⭐
 <img src="docs/demos/search.gif" width="760" alt="Search mode">
