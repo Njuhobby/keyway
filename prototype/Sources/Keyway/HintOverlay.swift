@@ -24,28 +24,28 @@ final class HintOverlay {
             (w.contentView as? HintOverlayView)?.update(targets: targets, typed: typed,
                                                         moveArmed: moveArmed)
             w.orderFrontRegardless()
-            // Usually the window (canJoinAllSpaces, set at creation) is
-            // already on the active Space, so the order-front above is all
-            // it takes. But after an `orderOut` (we hide on every app/Space
-            // switch — see VimSession.reapplyOnCurrentFrontmost) macOS can
-            // leave it stuck on the Space it was last shown on, so it
-            // doesn't follow you to a newly-activated Space (symptom caught
-            // by the debug trap: vis=true, placed=N/N, but activeSpace=false;
-            // happens when consecutive activations are on different Spaces).
-            // ONLY in that case, force re-registration by toggling
-            // canJoinAllSpaces off/on and re-ordering. Gating on the actual
-            // stuck state keeps the common path fast — doing the toggle
-            // unconditionally added a visible delay to every show().
-            if !w.isOnActiveSpace {
-                w.collectionBehavior = [.stationary, .ignoresCycle]
-                w.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
-                w.orderFrontRegardless()
-            }
         }
     }
 
+    /// Hide by clearing the labels, NOT by ordering the window out.
+    ///
+    /// `orderOut` drops the window's all-spaces registration in the window
+    /// server. The next `orderFront` can then re-attach it to whichever
+    /// Space it was last shown on rather than the one you're now on, so
+    /// hints render on the wrong Space. Whether that happens is a race
+    /// (intermittent to trigger); once it does, the window is stuck there —
+    /// the old `isOnActiveSpace`-gated self-heal couldn't reliably detect
+    /// the stuck state (`isOnActiveSpace` is unreliable for a
+    /// canJoinAllSpaces window), so re-entering hint mode never recovered.
+    ///
+    /// Keeping the window resident (transparent, click-through, just
+    /// emptied) means it never loses all-spaces membership, so it always
+    /// follows you. An empty overlay draws nothing — no visual or
+    /// screen-capture effect between sessions.
     func hide() {
-        for w in windows { w.orderOut(nil) }
+        for w in windows {
+            (w.contentView as? HintOverlayView)?.update(targets: [], typed: "", moveArmed: false)
+        }
     }
 
     private func ensureWindows() {

@@ -194,6 +194,14 @@ The semantics of choosing **102**: above every ordinary UI layer (menu bar, moda
 
 `canJoinAllSpaces + stationary + ignoresCycle`: follows Space switches, doesn't appear in Mission Control thumbnails, doesn't participate in Cmd+Tab.
 
+### Show / hide: never `orderOut`
+
+`hide()` does **not** `orderOut` the window — it clears the content (`update(targets: [])`) and leaves the window resident (transparent, click-through, drawing nothing).
+
+This is load-bearing. `orderOut` drops the window's all-spaces registration in the window server; the next `orderFront` can then re-attach it to whichever Space it was *last shown on* rather than the active one, so hints render on the **wrong Space**. Whether that happens is a race against the Space-switch animation (intermittent to trigger). Once it happens the window is stuck there, and it stays stuck: the obvious self-heal — "after `orderFront`, if `!isOnActiveSpace` force re-registration" — never fires, because `isOnActiveSpace` reports `true` for a `canJoinAllSpaces` window even when the server has it pinned to one Space. So re-entering hint mode never recovered; only an app restart did.
+
+Keeping the window resident means the all-spaces registration is never dropped, so it always follows you. An empty overlay draws nothing — no visual or screen-capture effect between sessions. The same "resident, hide by clearing" rule applies to `ScrollOverlay`, `SearchOverlay`, `WindowOpOverlay`, and `HUD` (all previously used `orderOut`; `HUD` also had a no-op `collectionBehavior`-reassert "guard" that never re-registered anything).
+
 ---
 
 ## 6. Coordinate-system conversion

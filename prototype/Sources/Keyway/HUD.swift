@@ -15,17 +15,18 @@ final class HUD {
         ensureWindow()
         (window?.contentView as? HUDView)?.text = text
         repositionAndResize(forText: text)
-        // Re-assert all-spaces membership before ordering front — after an
-        // orderOut (hidden on every app/Space switch) macOS drops the
-        // all-spaces registration, so a plain orderFront reattaches the
-        // HUD to the OLD Space instead of following to the active one.
-        // Same fix as HintOverlay.show.
-        window?.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         window?.orderFrontRegardless()  // never makeKeyAndOrderFront — that steals focus
     }
 
+    /// Hide by clearing the text (HUDView draws nothing when empty), NOT by
+    /// ordering the window out. `orderOut` drops the window's all-spaces
+    /// registration, so the next show could reattach the HUD to the Space it
+    /// was last on instead of the active one (the earlier "re-assert
+    /// collectionBehavior" guard here was a no-op — re-setting it to the same
+    /// value doesn't re-register). Keeping the window resident keeps it
+    /// following you across Spaces. See `HintOverlay.hide` for the full story.
     func hide() {
-        window?.orderOut(nil)
+        (window?.contentView as? HUDView)?.text = ""
     }
 
     private func ensureWindow() {
@@ -77,6 +78,7 @@ final class HUDView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        guard !text.isEmpty else { return }   // empty = hidden: draw nothing
         let path = NSBezierPath(roundedRect: bounds, xRadius: 10, yRadius: 10)
         NSColor(white: 0, alpha: 0.78).setFill()
         path.fill()

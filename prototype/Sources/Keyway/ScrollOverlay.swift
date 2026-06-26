@@ -21,8 +21,14 @@ final class ScrollOverlay {
         }
     }
 
+    /// Hide by clearing the areas (the view draws nothing when empty), NOT
+    /// by ordering the window out. `orderOut` drops the window's all-spaces
+    /// registration, so the next show can land on the Space it was last on
+    /// instead of the active one. See `HintOverlay.hide` for the full story.
     func hide() {
-        for w in windows { w.orderOut(nil) }
+        for w in windows {
+            (w.contentView as? ScrollOverlayView)?.update(areas: [], selected: 0)
+        }
     }
 
     private func ensureWindows() {
