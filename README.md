@@ -22,7 +22,7 @@ can't see.
 
 ---
 
-Press a trigger key. Every clickable thing on screen sprouts a short letter
+Press **Caps Lock**. Every clickable thing on screen sprouts a short letter
 label. Type the label — it clicks. That part isn't new. Three things make
 Keyway different from other keyboard-clickers:
 
@@ -42,7 +42,7 @@ Keyway different from other keyboard-clickers:
   it). Most hint tools can only click what they can label. Keyway can also
   just take the wheel.
 
-- **Sticky, on demand.** Tap the trigger again to keep hinting click after
+- **Sticky, on demand.** Tap **Caps Lock** again to keep hinting click after
   click; tap once more to stop. No preconfigured "chain" mode to set up
   (Homerow needs one) — you flip it on or off live, whenever you want it.
 
@@ -80,7 +80,7 @@ labels the hits so you jump straight there.
 
 ### 6 · Sticky, on demand ⭐
 <!-- <img src="docs/demos/sticky.gif" width="760" alt="Sticky mode"> -->
-Tap the trigger again to keep hinting click after click; it re-hints on its own
+Tap **Caps Lock** again to keep hinting click after click; it re-hints on its own
 as content loads or you switch apps / Spaces. Tap once more to stop. No "chain"
 mode to preconfigure the way Homerow needs — you flip it live.
 
@@ -109,7 +109,8 @@ fine steps — all from the keyboard, no mouse.
 With the companion extension, hints come straight from the DOM — pixel-perfect
 and iframe-aware on any real page. And in **sticky mode they refresh themselves
 as the page changes**: scroll, open a menu, navigate to a new page — the labels
-re-scan to match what's on screen, so you keep clicking without re-triggering.
+re-scan to match what's on screen, so you keep clicking without pressing Caps
+Lock again.
 
 ## What it can do
 
@@ -122,7 +123,7 @@ re-scan to match what's on screen, so you keep clicking without re-triggering.
 | 🔎 **Search mode** | Type any visible text to jump to it (OCR + character match), then pick the match with a hint label. |
 | 🌐 **Real web pages** | A browser extension reads the DOM directly for precise, iframe-aware hints. |
 | 📜 **Scroll & windows** | Keyboard scrolling (multi-area picker) and window move/resize, plus Vimium-style modeless scrolling on web pages. |
-| 🧲 **Sticky, on demand** | Tap the trigger again to keep hinting click after click — and it auto re-hints as content loads or you switch apps/Spaces; tap once more to stop. No "chain" mode to preconfigure (Homerow needs one). |
+| 🧲 **Sticky, on demand** | Tap **Caps Lock** again to keep hinting click after click — and it auto re-hints as content loads or you switch apps/Spaces; tap once more to stop. No "chain" mode to preconfigure (Homerow needs one). |
 | 🔒 **Local-only** | Runs entirely on-device. No telemetry, no network calls beyond the local app↔extension socket. |
 
 ## How it works
