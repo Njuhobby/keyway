@@ -53,9 +53,6 @@ label. Type the label — it clicks. That part isn't new. What sets Keyway apart
 
 ## See it in action
 
-> 🎬 _More clips are being added. The first two are already shown in the demo
-> at the top of this page._
-
 ### 1 · Hint mode — the core loop
 Caps Lock in a native app → labels bloom on every clickable thing → type the
 label → it clicks (left, or right-click with a modifier). _(See the demo at the
