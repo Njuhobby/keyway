@@ -24,14 +24,28 @@ can't see.
 ---
 
 Press a trigger key. Every clickable thing on screen sprouts a short letter
-label. Type the label — it clicks. That part isn't new. The twist is
-**coverage**: Keyway finds targets not only in native Cocoa apps (via the
-Accessibility API) but also inside **Electron apps, web views, and arbitrary
-pixels** — by falling back to an on-device vision model — and inside **web
-pages** via a companion browser extension that reads the DOM directly.
+label. Type the label — it clicks. That part isn't new. Three things make
+Keyway different from other keyboard-clickers:
 
-That "AX black hole" — Slack, VS Code, Discord, anything Electron — is where
-keyboard-driven clicking usually falls apart. Keyway is built to cover it.
+- **Coverage.** It finds targets not only in native Cocoa apps (via the
+  Accessibility API) but also inside **Electron apps, web views, and arbitrary
+  pixels** — by falling back to an on-device vision model — and inside **web
+  pages** via a companion browser extension that reads the DOM directly. That
+  "AX black hole" (Slack, VS Code, Discord, anything Electron) is exactly
+  where keyboard-driven clicking usually falls apart. Keyway covers it.
+
+- **It drives the real cursor, not just clicks.** Labels are the fast path;
+  when nothing is labeled exactly where you want, you fall back to *moving the
+  pointer itself* — `hjkl` to nudge it (Shift to fly, Option for
+  pixel-precision), `'`+label to warp it onto a target without clicking, then
+  `c` / `cc` / `Shift+c` for left / double / right click. Plus a **drag** mode
+  (grab, move, drop) and a **search** mode (jump to any visible text by typing
+  it). Most hint tools can only click what they can label. Keyway can also
+  just take the wheel.
+
+- **Sticky, on demand.** Tap the trigger again to keep hinting click after
+  click; tap once more to stop. No preconfigured "chain" mode to set up
+  (Homerow needs one) — you flip it on or off live, whenever you want it.
 
 ## See it in action
 
@@ -87,7 +101,10 @@ page, including links inside an iframe._
 </td>
 <td width="50%" valign="top">
 
-
+**6 · Drive the cursor & drag** ⭐
+<!-- <img src="docs/demos/cursor-drag.gif" alt="Cursor control and drag"> -->
+_Warp the pointer onto a target with `'`, fine-tune with `hjkl`, then `v` to
+grab and drag-and-drop — the fallback hint-only tools don't have._
 
 </td>
 </tr>
@@ -97,11 +114,14 @@ page, including links inside an iframe._
 
 | | |
 |---|---|
-| 🎯 **Hint mode** | Label every clickable element, type the label to click (left, or right-click with a modifier). The core interaction. |
+| 🎯 **Hint mode** | Label every clickable element, type the label to click. The fast path. |
 | 🕳️ **Beyond native AX** | Electron (Slack, VS Code, Discord), WebViews and Catalyst apps expose almost nothing to the Accessibility API. Keyway fills that black hole with an on-device [OmniParser](https://github.com/microsoft/OmniParser) vision model. |
+| 🖱️ **Drive the real cursor** | When no label sits where you need it, move the pointer yourself: `hjkl` to nudge (Shift to fly, Option for pixel-precision), `'`+label to warp onto a target without clicking, then `c` / `cc` / `Shift+c` for left / double / right click. The fallback hint-only tools don't have. |
+| ✊ **Drag mode** | Grab at the cursor, move with `hjkl`, drop — full drag-and-drop without the mouse. |
+| 🔎 **Search mode** | Type any visible text to jump to it (OCR + character match), then pick the match with a hint label. |
 | 🌐 **Real web pages** | A browser extension reads the DOM directly for precise, iframe-aware hints. |
-| 📜 **Scroll · windows · drag** | Separate keyboard modes for scrolling, window move/resize, and dragging — plus Vimium-style modeless scrolling on web pages. |
-| 🧲 **Sticky** | Re-hints as content loads, you switch apps, or you change Spaces — by watching for the screen to settle. |
+| 📜 **Scroll & windows** | Keyboard scrolling (multi-area picker) and window move/resize, plus Vimium-style modeless scrolling on web pages. |
+| 🧲 **Sticky, on demand** | Tap the trigger again to keep hinting click after click — and it auto re-hints as content loads or you switch apps/Spaces; tap once more to stop. No "chain" mode to preconfigure (Homerow needs one). |
 | 🔒 **Local-only** | Runs entirely on-device. No telemetry, no network calls beyond the local app↔extension socket. |
 
 ## How it works
