@@ -68,7 +68,7 @@ mode to preconfigure the way Homerow needs — you flip it live. _(Also in the
 demo at the top.)_
 
 ### 3 · Drive the real cursor
-<!-- <img src="docs/demos/cursor.gif" width="760" alt="Cursor control"> -->
+<img src="docs/demos/cursor.gif" width="760" alt="Cursor control">
 No label exactly where you need it? Move the pointer yourself: `'`+label warps
 it onto a target without clicking, `hjkl` nudges it (**Shift** to fly,
 **Option** for pixel-precision), then `c` / `cc` / `Shift+c` for left / double /
