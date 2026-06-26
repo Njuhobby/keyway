@@ -85,7 +85,7 @@ as content loads or you switch apps / Spaces. Tap once more to stop. No "chain"
 mode to preconfigure the way Homerow needs — you flip it live.
 
 ### 7 · Scroll mode
-<!-- <img src="docs/demos/scroll.gif" width="760" alt="Scroll mode"> -->
+<img src="docs/demos/scroll.gif" width="760" alt="Scroll mode">
 Pick a scroll area by number, then scroll it from the keyboard — plus modeless
 `d` / `u` / `gg` / `G` scrolling on real web pages.
 
