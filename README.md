@@ -120,7 +120,7 @@ _Pick a scroll area by number, then scroll it from the keyboard — plus modeles
 <td width="50%" valign="top">
 
 **8 · Move & resize windows**
-<!-- <img src="docs/demos/window.gif" alt="Window move and resize"> -->
+<img src="docs/demos/window.gif" alt="Window move and resize">
 _Resize the window edge by edge with `hjkl` (double-tap to pull the opposite
 edge), or pan the whole window — all from the keyboard._
 
