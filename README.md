@@ -14,10 +14,9 @@ can't see.
 ![Platform](https://img.shields.io/badge/macOS-13%2B%20·%20Apple%20Silicon-1a1a1a?logo=apple)
 ![Status](https://img.shields.io/badge/status-early%20prototype-f59e0b)
 
-<!-- HERO DEMO — replace with docs/demos/hero.gif once recorded -->
-<!-- <img src="docs/demos/hero.gif" width="720" alt="Keyway in action"> -->
+<img src="docs/demos/hero.gif" width="720" alt="Keyway in action — hint labels across the whole screen, including an Electron app, the Dock, and the menu bar">
 
-> ⚠️ _Hero demo coming soon — the single most important thing to record._
+<sub>Hint mode across a Discord window, the Dock, and the menu bar — type a label, it clicks.</sub>
 
 </div>
 
@@ -58,53 +57,85 @@ Keyway different from other keyboard-clickers:
 
 **1 · Hint mode — the core loop**
 <!-- <img src="docs/demos/hint-mode.gif" alt="Hint mode"> -->
-_Caps Lock in a native app → labels bloom on every button → type two keys →
-it clicks. Left-click, and right-click with a modifier._
+_Caps Lock in a native app → labels bloom on every clickable thing → type two
+keys → it clicks (left, or right-click with a modifier)._
 
 </td>
 <td width="50%" valign="top">
 
 **2 · The Electron black hole** ⭐
 <!-- <img src="docs/demos/electron.gif" alt="Electron coverage"> -->
-_Slack / VS Code, where the Accessibility API returns almost nothing — yet
-every clickable region still gets a label, from the on-device vision model.
-This is the wedge._
+_VS Code / Discord / Obsidian — Electron apps the Accessibility API can barely
+see, yet every clickable region still gets a label, from the on-device vision
+model. The wedge._
 
 </td>
 </tr>
 <tr>
 <td width="50%" valign="top">
 
-**3 · Scroll & window management**
-<!-- <img src="docs/demos/scroll-windows.gif" alt="Scroll and windows"> -->
-_Modeless `d`/`u`/`gg`/`G` scrolling, then move and half-snap a window —
-all without the mouse._
+**3 · Drive the real cursor** ⭐
+<!-- <img src="docs/demos/cursor.gif" alt="Cursor control"> -->
+_No label where you need it? Move the pointer yourself: `'`+label warps it onto
+a target, `hjkl` fine-tunes (Option for pixel-precision), then `c` / `cc` /
+`Shift+c` clicks. Hint-only tools can't do this._
 
 </td>
 <td width="50%" valign="top">
 
-**4 · It follows you**
-<!-- <img src="docs/demos/follow.gif" alt="Sticky re-hinting"> -->
-_Switch apps, switch Spaces, or wait for content to load — hints re-appear on
-their own the moment the screen settles._
+**4 · Drag mode** ⭐
+<!-- <img src="docs/demos/drag.gif" alt="Drag mode"> -->
+_`v` grabs at the cursor, `hjkl` drags, drop — a full drag-and-drop, no mouse._
 
 </td>
 </tr>
 <tr>
 <td width="50%" valign="top">
 
-**5 · Web pages, precisely**
+**5 · Search mode** ⭐
+<!-- <img src="docs/demos/search.gif" alt="Search mode"> -->
+_`/` then type any visible text — Keyway OCRs the window, matches it, and labels
+the hits so you jump straight there._
+
+</td>
+<td width="50%" valign="top">
+
+**6 · Sticky, on demand** ⭐
+<!-- <img src="docs/demos/sticky.gif" alt="Sticky mode"> -->
+_Tap the trigger again to keep hinting click after click; it re-hints on its own
+as content loads or you switch apps / Spaces. Tap once more to stop. No "chain"
+mode to preconfigure (Homerow needs one)._
+
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+
+**7 · Scroll mode**
+<!-- <img src="docs/demos/scroll.gif" alt="Scroll mode"> -->
+_Pick a scroll area by number, then scroll it from the keyboard — plus modeless
+`d` / `u` / `gg` / `G` scrolling on real web pages._
+
+</td>
+<td width="50%" valign="top">
+
+**8 · Move & resize windows**
+<!-- <img src="docs/demos/window.gif" alt="Window move and resize"> -->
+_Resize the window edge by edge with `hjkl` (double-tap to pull the opposite
+edge), or pan the whole window — all from the keyboard._
+
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+
+**9 · Web pages, precisely (Chrome / Firefox)**
 <!-- <img src="docs/demos/web.gif" alt="Browser extension hints"> -->
-_The browser extension reads the DOM directly — pixel-perfect hints on a real
-page, including links inside an iframe._
+_With the companion extension, hints come straight from the DOM — pixel-perfect,
+iframe-aware, on any real page._
 
 </td>
 <td width="50%" valign="top">
-
-**6 · Drive the cursor & drag** ⭐
-<!-- <img src="docs/demos/cursor-drag.gif" alt="Cursor control and drag"> -->
-_Warp the pointer onto a target with `'`, fine-tune with `hjkl`, then `v` to
-grab and drag-and-drop — the fallback hint-only tools don't have._
 
 </td>
 </tr>
