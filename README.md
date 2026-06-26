@@ -48,98 +48,59 @@ Keyway different from other keyboard-clickers:
 
 ## See it in action
 
-> 🎬 _Demos are being recorded. Each slot below describes exactly what its
-> clip will show — drop the GIF into `docs/demos/` and uncomment its line._
+> 🎬 _Demos are being added as they're recorded. Sections without a clip yet
+> describe exactly what it will show._
 
-<table>
-<tr>
-<td width="50%" valign="top">
+### 1 · Hint mode — the core loop
+<!-- <img src="docs/demos/hint-mode.gif" width="760" alt="Hint mode"> -->
+Caps Lock in a native app → labels bloom on every clickable thing → type two
+keys → it clicks (left, or right-click with a modifier).
 
-**1 · Hint mode — the core loop**
-<!-- <img src="docs/demos/hint-mode.gif" alt="Hint mode"> -->
-_Caps Lock in a native app → labels bloom on every clickable thing → type two
-keys → it clicks (left, or right-click with a modifier)._
-
-</td>
-<td width="50%" valign="top">
-
-**2 · The Electron black hole** ⭐
-<!-- <img src="docs/demos/electron.gif" alt="Electron coverage"> -->
-_VS Code / Discord / Obsidian — Electron apps the Accessibility API can barely
+### 2 · The Electron black hole ⭐
+<!-- <img src="docs/demos/electron.gif" width="760" alt="Electron coverage"> -->
+VS Code, Discord, Obsidian — Electron apps the Accessibility API can barely
 see, yet every clickable region still gets a label, from the on-device vision
-model. The wedge._
+model. This is the wedge.
 
-</td>
-</tr>
-<tr>
-<td width="50%" valign="top">
+### 3 · Drive the real cursor ⭐
+<!-- <img src="docs/demos/cursor.gif" width="760" alt="Cursor control"> -->
+No label exactly where you need it? Move the pointer yourself: `'`+label warps
+it onto a target without clicking, `hjkl` nudges it (**Shift** to fly,
+**Option** for pixel-precision), then `c` / `cc` / `Shift+c` for left / double /
+right click. The fallback hint-only tools don't have.
 
-**3 · Drive the real cursor** ⭐
-<!-- <img src="docs/demos/cursor.gif" alt="Cursor control"> -->
-_No label where you need it? Move the pointer yourself: `'`+label warps it onto
-a target, `hjkl` fine-tunes (Option for pixel-precision), then `c` / `cc` /
-`Shift+c` clicks. Hint-only tools can't do this._
+### 4 · Drag mode ⭐
+<!-- <img src="docs/demos/drag.gif" width="760" alt="Drag mode"> -->
+`v` grabs at the cursor, `hjkl` drags, drop — a full drag-and-drop, no mouse.
 
-</td>
-<td width="50%" valign="top">
+### 5 · Search mode ⭐
+<!-- <img src="docs/demos/search.gif" width="760" alt="Search mode"> -->
+`/` then type any visible text — Keyway OCRs the focused window, matches it, and
+labels the hits so you jump straight there.
 
-**4 · Drag mode** ⭐
-<!-- <img src="docs/demos/drag.gif" alt="Drag mode"> -->
-_`v` grabs at the cursor, `hjkl` drags, drop — a full drag-and-drop, no mouse._
-
-</td>
-</tr>
-<tr>
-<td width="50%" valign="top">
-
-**5 · Search mode** ⭐
-<!-- <img src="docs/demos/search.gif" alt="Search mode"> -->
-_`/` then type any visible text — Keyway OCRs the window, matches it, and labels
-the hits so you jump straight there._
-
-</td>
-<td width="50%" valign="top">
-
-**6 · Sticky, on demand** ⭐
-<!-- <img src="docs/demos/sticky.gif" alt="Sticky mode"> -->
-_Tap the trigger again to keep hinting click after click; it re-hints on its own
+### 6 · Sticky, on demand ⭐
+<!-- <img src="docs/demos/sticky.gif" width="760" alt="Sticky mode"> -->
+Tap the trigger again to keep hinting click after click; it re-hints on its own
 as content loads or you switch apps / Spaces. Tap once more to stop. No "chain"
-mode to preconfigure (Homerow needs one)._
+mode to preconfigure the way Homerow needs — you flip it live.
 
-</td>
-</tr>
-<tr>
-<td width="50%" valign="top">
+### 7 · Scroll mode
+<!-- <img src="docs/demos/scroll.gif" width="760" alt="Scroll mode"> -->
+Pick a scroll area by number, then scroll it from the keyboard — plus modeless
+`d` / `u` / `gg` / `G` scrolling on real web pages.
 
-**7 · Scroll mode**
-<!-- <img src="docs/demos/scroll.gif" alt="Scroll mode"> -->
-_Pick a scroll area by number, then scroll it from the keyboard — plus modeless
-`d` / `u` / `gg` / `G` scrolling on real web pages._
+### 8 · Move & resize windows
+<img src="docs/demos/window.gif" width="760" alt="Window move and resize">
 
-</td>
-<td width="50%" valign="top">
+**Caps Lock + w** enters resize, **Caps Lock + m** enters move. In resize, grow
+any edge with `hjkl` (double-tap an axis to pull the opposite edge inward); in
+move, pan the whole window with `hjkl`. Hold **Shift** to fly, **Option** for
+fine steps — all from the keyboard, no mouse.
 
-**8 · Move & resize windows**
-<img src="docs/demos/window.gif" alt="Window move and resize">
-_Resize the window edge by edge with `hjkl` (double-tap to pull the opposite
-edge), or pan the whole window — all from the keyboard._
-
-</td>
-</tr>
-<tr>
-<td width="50%" valign="top">
-
-**9 · Web pages, precisely (Chrome / Firefox)**
-<!-- <img src="docs/demos/web.gif" alt="Browser extension hints"> -->
-_With the companion extension, hints come straight from the DOM — pixel-perfect,
-iframe-aware, on any real page._
-
-</td>
-<td width="50%" valign="top">
-
-</td>
-</tr>
-</table>
+### 9 · Web pages, precisely (Chrome / Firefox)
+<!-- <img src="docs/demos/web.gif" width="760" alt="Browser extension hints"> -->
+With the companion extension, hints come straight from the DOM — pixel-perfect,
+iframe-aware, on any real page.
 
 ## What it can do
 
