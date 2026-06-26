@@ -74,7 +74,7 @@ right click. The fallback hint-only tools don't have.
 `v` grabs at the cursor, `hjkl` drags, drop — a full drag-and-drop, no mouse.
 
 ### 5 · Search mode ⭐
-<!-- <img src="docs/demos/search.gif" width="760" alt="Search mode"> -->
+<img src="docs/demos/search.gif" width="760" alt="Search mode">
 `/` then type any visible text — Keyway OCRs the focused window, matches it, and
 labels the hits so you jump straight there.
 
