@@ -75,8 +75,9 @@ right click. The fallback hint-only tools don't have.
 
 ### 5 · Search mode ⭐
 <img src="docs/demos/search.gif" width="760" alt="Search mode">
-`/` then type any visible text — Keyway OCRs the focused window, matches it, and
-labels the hits so you jump straight there.
+
+From TAP (or TAP sticky), press `/` and type any visible text — Keyway OCRs the
+focused window, matches it, and labels the hits so you jump straight to one.
 
 ### 6 · Sticky, on demand ⭐
 <!-- <img src="docs/demos/sticky.gif" width="760" alt="Sticky mode"> -->
