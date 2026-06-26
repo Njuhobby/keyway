@@ -346,10 +346,7 @@ By priority:
    constants in each controller switch to reading `Settings.shared`. Custom
    keymaps deferred to v2 (the non-QWERTY layout rebinding refactor).
    See [`specs/settings-design.md`](specs/settings-design.md).
-8. **Rename** — the name "Keyway" is already taken by another project; a
-    unique name should be settled before a wider release (repo / domain /
-    searchability, not drowned out by a generic word).
-9. **Packaging & distribution** — code signing + notarization (Developer ID,
+8. **Packaging & distribution** — code signing + notarization (Developer ID,
     to avoid Gatekeeper blocking an unsigned app), shipped as a `.dmg` or a
     Homebrew cask; optionally a simple landing page with a **demo video**.
     Notarization / Developer ID signing requires the Apple Developer Program
