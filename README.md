@@ -104,9 +104,12 @@ move, pan the whole window with `hjkl`. Hold **Shift** to fly, **Option** for
 fine steps — all from the keyboard, no mouse.
 
 ### 9 · Web pages, precisely (Chrome / Firefox)
-<!-- <img src="docs/demos/web.gif" width="760" alt="Browser extension hints"> -->
-With the companion extension, hints come straight from the DOM — pixel-perfect,
-iframe-aware, on any real page.
+<img src="docs/demos/web.gif" width="760" alt="Browser extension hints">
+
+With the companion extension, hints come straight from the DOM — pixel-perfect
+and iframe-aware on any real page. And in **sticky mode they refresh themselves
+as the page changes**: scroll, open a menu, navigate to a new page — the labels
+re-scan to match what's on screen, so you keep clicking without re-triggering.
 
 ## What it can do
 
