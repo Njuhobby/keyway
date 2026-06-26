@@ -222,11 +222,16 @@ cd prototype
 > See [`prototype/SPECS.md`](prototype/SPECS.md) for the full setup, the mode
 > reference, and the architecture deep-dives.
 
-### Browser extension (optional, for web-page hints)
+### Browser extension (recommended for web pages)
 
-Web pages already work through the vision fallback. The extension adds
-**precise, DOM-based hints** on real pages plus Vimium-style modeless
-scrolling. It talks to Keyway through a native-messaging bridge.
+Web pages are their own world: the controls live in the **DOM**, not the macOS
+accessibility tree, so the desktop app can only reach them through the vision
+fallback. The companion **Chrome / Firefox extension** reads the DOM directly
+and brings Keyway's full power to the web — pixel-precise hints on every link
+and control, iframe-aware, **sticky mode that re-hints itself as the page
+changes** (scroll, open a menu, navigate — the labels keep up), and
+Vimium-style modeless scrolling. **Strongly recommended** for the complete web
+experience. It talks to Keyway through a native-messaging bridge.
 
 **With the pre-built download** — no checkout needed:
 
@@ -238,10 +243,10 @@ scrolling. It talks to Keyway through a native-messaging bridge.
    ./install-browser-integration.sh
    ```
    It registers the native-messaging host against the bridge bundled **inside
-   Keyway.app** (covers Chrome, Edge, Brave, Chromium, and Firefox).
+   Keyway.app**, for Chrome and Firefox.
 3. Load the unpacked extension:
-   - **Chrome / Edge / Brave:** `chrome://extensions` → **Developer mode** →
-     **Load unpacked** → pick the `chrome-extension/` folder.
+   - **Chrome:** `chrome://extensions` → **Developer mode** → **Load unpacked**
+     → pick the `chrome-extension/` folder.
    - **Firefox:** `about:debugging#/runtime/this-firefox` → **Load Temporary
      Add-on…** → pick `firefox-extension/manifest.json`.
 

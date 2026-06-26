@@ -53,12 +53,10 @@ chromium() {             # $1 = browser support dir, $2 = label
 
 echo "==> Registering native-messaging host"
 echo "    bridge: $BRIDGE"
+# Supported browsers: Chrome (all channels) and Firefox.
 chromium "$HOME/Library/Application Support/Google/Chrome"                  "Chrome"
 chromium "$HOME/Library/Application Support/Google/Chrome Beta"             "Chrome Beta"
 chromium "$HOME/Library/Application Support/Google/Chrome Canary"           "Chrome Canary"
-chromium "$HOME/Library/Application Support/Chromium"                       "Chromium"
-chromium "$HOME/Library/Application Support/Microsoft Edge"                 "Edge"
-chromium "$HOME/Library/Application Support/BraveSoftware/Brave-Browser"    "Brave"
 if [ -d "$HOME/Library/Application Support/Mozilla" ] || command -v firefox >/dev/null 2>&1; then
   write_host "$HOME/Library/Application Support/Mozilla/NativeMessagingHosts" \
     "\"allowed_extensions\": [\"$FIREFOX_EXT_ID\"]" "Firefox"
@@ -68,8 +66,8 @@ cat <<EOF
 
 ==> Done. Now load the extension (one-time, per browser):
 
-  Chrome / Edge / Brave / Chromium
-    1. open  chrome://extensions   (edge://extensions, brave://extensions)
+  Chrome
+    1. open  chrome://extensions
     2. turn on  Developer mode  (top-right toggle)
     3. click  Load unpacked  and choose:
          $DIR/chrome-extension
