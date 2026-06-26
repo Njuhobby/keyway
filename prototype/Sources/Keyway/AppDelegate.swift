@@ -10,15 +10,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupMenuBar()
 
-        // Both are HARD requirements (prompt both so neither short-
-        // circuits the other). Accessibility: the event tap. Screen
-        // Recording: the OmniParser fallback AND the content-settle watch
-        // (low-res fingerprints) both capture the screen — without it
-        // OP-routed apps get no hints and rehints fall back to blind
-        // delays, so we gate startup on it rather than lazily prompting.
-        let axOK = ensureAccessibility()
-        let screenOK = ensureScreenRecording()
-        if axOK && screenOK {
+        // Two HARD requirements: Accessibility (the event tap + synthesized
+        // clicks/keys) and Screen Recording (the OmniParser fallback + the
+        // content-settle watch). These are NON-prompting status checks — the
+        // onboarding window drives the actual TCC prompts and the relaunch.
+        // Blind launch-time prompts were the confusing two-round dance (grant
+        // one, still red, quit, reopen, get the second prompt) we're removing.
+        guard OnboardingController.accessibilityGranted,
+              OnboardingController.screenRecordingGranted else {
+            setWarningBadge(true)
+            OnboardingController.shared.onReady = { [weak self] in self?.start() }
+            OnboardingController.shared.present()
+            return
+        }
+        start()
+    }
+
+    /// Apply the trigger remap, start the event tap, and bring up the
+    /// background services. Runs once both permissions are satisfied — at
+    /// launch, or after the onboarding "Restart Keyway".
+    private func start() {
+        OnboardingController.shared.dismiss()
+        do {
             // Caps Lock → F19 remap. The OS doesn't surface Caps Lock as
             // a normal keyDown (it's a modifier), so we rewrite it to F19
             // at the HID layer via hidutil. See TriggerRemap.swift.
@@ -106,17 +119,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     "from": "keyway-main"
                 ])
             }
-        } else {
-            setWarningBadge(true)
-            Log.error("[keyway] Required permissions not granted:")
-            if !axOK {
-                Log.error("  • Accessibility — System Settings → Privacy & Security → Accessibility")
-            }
-            if !screenOK {
-                Log.error("  • Screen Recording — System Settings → Privacy & Security → Screen Recording")
-            }
-            Log.error("  Enable 'Keyway' (or the swift binary path) for the above,")
-            Log.error("  then fully quit this process and rerun `swift run`.")
         }
     }
 
@@ -163,25 +165,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    @discardableResult
-    private func ensureAccessibility() -> Bool {
-        // The constant `kAXTrustedCheckOptionPrompt` is a non-Sendable global, so under
-        // Swift 6 strict concurrency we use the literal string value directly. It's a
-        // stable Apple API constant (defined in <HIServices/AXUIElement.h>).
-        return AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary)
-    }
-
-    @discardableResult
-    private func ensureScreenRecording() -> Bool {
-        if CGPreflightScreenCaptureAccess() { return true }
-        // Not granted — fire the system TCC prompt. The grant only takes
-        // effect after a restart (macOS caches screen-recording status per
-        // process), so this launch still returns false; the user enables
-        // it, quits, and reruns — same flow as Accessibility.
-        CGRequestScreenCaptureAccess()
-        return false
-    }
-
     private func startTap() {
         let newSession = VimSession()
         let newTap = HotkeyTap(session: newSession)
@@ -197,11 +180,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func recheckPermissions() {
         guard tap == nil else { return }
-        // Accessibility can flip live; Screen Recording is cached per
-        // process, so granting it needs a restart (see ensureScreenRecording).
-        // This re-check mainly recovers the Accessibility-only case.
-        if ensureAccessibility() && ensureScreenRecording() {
-            startTap()
+        // Accessibility flips live; Screen Recording is cached per process and
+        // needs a relaunch. If both already read granted, start for real;
+        // otherwise (re)open the onboarding window to guide + offer Restart.
+        if OnboardingController.accessibilityGranted && OnboardingController.screenRecordingGranted {
+            start()
+        } else {
+            OnboardingController.shared.present()
         }
     }
 }
