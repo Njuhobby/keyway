@@ -106,6 +106,11 @@ focused window, matches it, and labels the hits so you jump straight to one.
 number; press that number to pick one. Then `d` / `u` scroll it (hold for
 continuous, **Shift** to accelerate) and `gg` / `G` jump to top / bottom.
 
+Scrolling is simulated **at the cursor's current position** — it scrolls
+whatever sits under the pointer. So if something won't scroll, the cursor
+probably isn't over a scrollable area: nudge it there with `hjkl` (cursor moves
+work right inside scroll mode) and try again.
+
 Web pages are special: with the extension, `d` / `u` / `gg` / `G` scroll the
 page **directly, no mode to enter** — Vimium-style. (Caps Lock + d is disabled
 there, since modeless scrolling already covers it.)
