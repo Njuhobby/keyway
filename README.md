@@ -75,11 +75,17 @@ it onto a target without clicking, `hjkl` nudges it (**Shift** to fly,
 right click. The fallback hint-only tools don't have.
 
 ### 4 · Drag mode
-<img src="docs/demos/drag.gif" width="760" alt="Drag mode">
-
 From TAP (or TAP sticky), press `v` to start a drag — `mouseDown` at the cursor,
-`hjkl` to move, drop to release. In the clip the drag selects a paragraph of
-text so it can be copied and pasted — a real press-drag-release, no mouse.
+`hjkl` to move, drop to release. A real press-drag-release, entirely from the
+keyboard, on anything draggable.
+
+<img src="docs/demos/drag.gif" width="760" alt="Drag to select text">
+
+_Dragging out a text selection to copy and paste a passage._
+
+<img src="docs/demos/drag-file.gif" width="760" alt="Drag a file across the desktop">
+
+_And dragging a file across the desktop into a folder._
 
 ### 5 · Search mode
 <img src="docs/demos/search.gif" width="760" alt="Search mode">
