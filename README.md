@@ -70,8 +70,10 @@ it onto a target without clicking, `hjkl` nudges it (**Shift** to fly,
 right click. The fallback hint-only tools don't have.
 
 ### 4 · Drag mode ⭐
-<!-- <img src="docs/demos/drag.gif" width="760" alt="Drag mode"> -->
-`v` grabs at the cursor, `hjkl` drags, drop — a full drag-and-drop, no mouse.
+<img src="docs/demos/drag.gif" width="760" alt="Drag mode">
+
+`v` grabs at the cursor, `hjkl` drags, drop — a full press-move-release with no
+mouse (here, dragging out a text selection).
 
 ### 5 · Search mode ⭐
 <img src="docs/demos/search.gif" width="760" alt="Search mode">
