@@ -57,8 +57,8 @@ label. Type the label — it clicks. That part isn't new. What sets Keyway apart
 > at the top of this page._
 
 ### 1 · Hint mode — the core loop
-Caps Lock in a native app → labels bloom on every clickable thing → type two
-keys → it clicks (left, or right-click with a modifier). _(See the demo at the
+Caps Lock in a native app → labels bloom on every clickable thing → type the
+label → it clicks (left, or right-click with a modifier). _(See the demo at the
 top of this page.)_
 
 ### 2 · Sticky, on demand
@@ -85,7 +85,7 @@ _Dragging out a text selection to copy and paste a passage._
 
 <img src="docs/demos/drag-file.gif" width="760" alt="Drag a file across the desktop">
 
-_And dragging a file across the desktop into a folder._
+_Or dragging a file / picture._
 
 ### 5 · Search mode
 <img src="docs/demos/search.gif" width="760" alt="Search mode">
