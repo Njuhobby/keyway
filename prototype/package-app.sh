@@ -15,6 +15,7 @@ swift build -c "$CONFIG"
 
 BINDIR=".build/$CONFIG"
 BIN="$BINDIR/Keyway"
+BRIDGE="$BINDIR/keyway-bridge"             # native-messaging relay (browser ext)
 RESBUNDLE="$BINDIR/Keyway_Keyway.bundle"   # SwiftPM-copied resources (CoreML model)
 
 [ -f "$BIN" ]    || { echo "missing binary: $BIN"; exit 1; }
@@ -26,6 +27,11 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 cp "$BIN" "$APP/Contents/MacOS/Keyway"
 cp "$ICNS" "$APP/Contents/Resources/Keyway.icns"
+# Bundle the native-messaging relay so the browser-extension installer can
+# point Chrome/Firefox at a stable path inside the .app (pre-built users have
+# no .build/ checkout). The browser spawns this binary; it relays to the app's
+# Unix socket. See install-browser-integration.sh.
+[ -f "$BRIDGE" ] && cp "$BRIDGE" "$APP/Contents/MacOS/keyway-bridge"
 # The CoreML resource bundle goes in Contents/Resources so codesign seals it
 # cleanly. OmniParserModel.locateModelPackage() finds it there via
 # Bundle.main.resourceURL (we deliberately avoid SwiftPM's Bundle.module — its

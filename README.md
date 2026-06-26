@@ -216,39 +216,46 @@ cd prototype
 > See [`prototype/SPECS.md`](prototype/SPECS.md) for the full setup, the mode
 > reference, and the architecture deep-dives.
 
-#### Browser extension (optional, for web-page hints)
+### Browser extension (optional, for web-page hints)
 
 Web pages already work through the vision fallback. The extension adds
-**precise, DOM-based hints** on real pages (and Vimium-style modeless
-scrolling). It talks to the running Keyway app through a native-messaging
-bridge, so this is a **build-from-source** feature — the host manifest points
-at the `keyway-bridge` binary in your checkout's `.build/`.
+**precise, DOM-based hints** on real pages plus Vimium-style modeless
+scrolling. It talks to Keyway through a native-messaging bridge.
 
-Build and run Keyway first (`./run.sh`), then:
+**With the pre-built download** — no checkout needed:
 
-**Chrome**
+1. Grab `keyway-extension-vX.Y.Z.zip` from the
+   [**Releases**](https://github.com/Njuhobby/keyway/releases) page and unzip it.
+2. With **Keyway.app** already in `/Applications`, run the installer from the
+   unzipped folder:
+   ```sh
+   ./install-browser-integration.sh
+   ```
+   It registers the native-messaging host against the bridge bundled **inside
+   Keyway.app** (covers Chrome, Edge, Brave, Chromium, and Firefox).
+3. Load the unpacked extension:
+   - **Chrome / Edge / Brave:** `chrome://extensions` → **Developer mode** →
+     **Load unpacked** → pick the `chrome-extension/` folder.
+   - **Firefox:** `about:debugging#/runtime/this-firefox` → **Load Temporary
+     Add-on…** → pick `firefox-extension/manifest.json`.
 
-1. Open `chrome://extensions`, turn on **Developer mode** (top-right).
-2. Click **Load unpacked** and select `prototype/extension/`.
-3. On the new **Keyway (dev)** card, copy its **ID** (a 32-character string).
-4. Register the native-messaging host with that ID:
+**From source** — the host points at your checkout's `.build/` bridge:
+
+1. Build and run Keyway (`./run.sh`).
+2. Chrome: `chrome://extensions` → **Developer mode** → **Load unpacked** →
+   `prototype/extension/`, then register the host (the ID on the extension
+   card is fixed by the manifest's pinned key):
    ```sh
    cd prototype/extension
    ./install_dev_host.sh <extension-id>
    ```
-5. Reload the extension (the ↻ icon on its card). Done — open any page and
-   press **Caps Lock**.
-
-**Firefox**
-
-1. Build the Firefox variant:
+3. Firefox:
    ```sh
    cd prototype/extension
    ./build-firefox.sh                 # → dist-firefox/
    ./install_dev_host_firefox.sh      # no ID needed (gecko id is fixed)
    ```
-2. Open `about:debugging#/runtime/this-firefox` → **Load Temporary Add-on…**
-   → pick `dist-firefox/manifest.json`.
+   then load `dist-firefox/manifest.json` via `about:debugging`.
 
 > Unpacked (Chrome) and temporary (Firefox) extensions are dropped when the
 > browser restarts — reload them each session. A signed Web Store / AMO build

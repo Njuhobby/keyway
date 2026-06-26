@@ -44,12 +44,18 @@ rm -f "$HOME/Library/Application Support/CrashReporter/Keyway_"*.plist 2>/dev/nu
 rm -f "$HOME/Library/Logs/DiagnosticReports/Keyway-"*.ips 2>/dev/null || true
 
 echo "==> Removing browser native-messaging hosts"
-hosts=(
-  "$HOME/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.keyway.bridge.json"
-  "$HOME/Library/Application Support/Mozilla/NativeMessagingHosts/com.keyway.bridge.json"
+host_bases=(
+  "$HOME/Library/Application Support/Google/Chrome"
+  "$HOME/Library/Application Support/Google/Chrome Beta"
+  "$HOME/Library/Application Support/Google/Chrome Canary"
+  "$HOME/Library/Application Support/Chromium"
+  "$HOME/Library/Application Support/Microsoft Edge"
+  "$HOME/Library/Application Support/BraveSoftware/Brave-Browser"
+  "$HOME/Library/Application Support/Mozilla"
 )
-for h in "${hosts[@]}"; do
-  if [ -e "$h" ]; then rm -f "$h" && say "removed $(basename "$h")"; fi
+for b in "${host_bases[@]}"; do
+  h="$b/NativeMessagingHosts/com.keyway.bridge.json"
+  if [ -e "$h" ]; then rm -f "$h" && say "removed host: ${b##*/Application Support/}"; fi
 done
 
 echo "==> Resetting permission grants (TCC)"

@@ -2,6 +2,7 @@
   "manifest_version": 3,
   "name": "Keyway (dev)",
   "version": "0.0.13",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA6ke5f95iJamCAHmrJfaB87nUyrrHiGrkPElYLe9+UfkuJpxS33KgufLxjd04ZrUX4sw7FF8uWU5riYel9feWU6gfZYPa3aXMNXrnvn5JB3JmKIoTprsDjrX4ZVENx4J2dxD+PxEr0z6khA3xFHEQepbLhdPIhnQawc1I/nAysR4iVVSDaz18W2GpIIEz2LzNGwTEQxW3u0XcDc1/hTzc8e/o8GwQ3cUMSA+fbYTp/QTWN0DlVO3BHxag8qrzM98dIGGLtFij7zt1/zx2sGeS1nwhpcwj+dkq3h4RTzsCqg5bUwtnya6/yB0NgKRcRlIyxRvPxjDKcjt0G/rf573D6QIDAQAB",
   "description": "Bridge between Chrome and the Keyway desktop app. Dev build — multi-profile / multi-browser active routing.",
   "minimum_chrome_version": "120",
   "permissions": ["nativeMessaging", "scripting"],

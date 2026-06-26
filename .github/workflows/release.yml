@@ -38,5 +38,6 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" \
             prototype/build/Keyway-v"$KEYWAY_VERSION".zip \
+            prototype/build/keyway-extension-v"$KEYWAY_VERSION".zip \
             --title "Keyway $GITHUB_REF_NAME" \
             --generate-notes
