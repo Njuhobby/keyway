@@ -86,8 +86,14 @@ mode to preconfigure the way Homerow needs — you flip it live.
 
 ### 7 · Scroll mode
 <img src="docs/demos/scroll.gif" width="760" alt="Scroll mode">
-Pick a scroll area by number, then scroll it from the keyboard — plus modeless
-`d` / `u` / `gg` / `G` scrolling on real web pages.
+
+**Caps Lock + d** enters scroll mode and outlines every scrollable area with a
+number; press that number to pick one. Then `d` / `u` scroll it (hold for
+continuous, **Shift** to accelerate) and `gg` / `G` jump to top / bottom.
+
+Web pages are special: with the extension, `d` / `u` / `gg` / `G` scroll the
+page **directly, no mode to enter** — Vimium-style. (Caps Lock + d is disabled
+there, since modeless scrolling already covers it.)
 
 ### 8 · Move & resize windows
 <img src="docs/demos/window.gif" width="760" alt="Window move and resize">
