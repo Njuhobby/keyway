@@ -54,9 +54,15 @@ label. Type the label — it clicks. That part isn't new. What sets Keyway apart
 ## See it in action
 
 ### 1 · Hint mode — the core loop
-Caps Lock in a native app → labels bloom on every clickable thing → type the
-label → it clicks (left, or right-click with a modifier). _(See the demo at the
-top of this page.)_
+Caps Lock in a native app → labels bloom on every clickable thing → type a
+label and the **real cursor moves onto that target**, then:
+
+- **Type the label** → the cursor moves there and **left-clicks**.
+- **Shift** + the label → the cursor moves there and **right-clicks**.
+- **Double-click:** in [sticky mode](#2--sticky-on-demand), type the label to
+  move onto the target, then quickly press **`c` twice** to fire a double-click.
+
+_(See the demo at the top of this page.)_
 
 ### 2 · Sticky, on demand
 Tap **Caps Lock** again to keep hinting click after click; it re-hints on its own
