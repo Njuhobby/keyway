@@ -168,15 +168,23 @@ Grab the latest `Keyway-vX.Y.Z.zip` from the
 and drag **Keyway.app** into `/Applications`.
 
 The build is ad-hoc signed, **not notarized by Apple**, so Gatekeeper blocks
-it the first time. Bypass it once:
+it the first time. Clear the quarantine flag once, from Terminal:
 
-- **Right-click** `Keyway.app` → **Open** → click **Open** in the dialog.
+```sh
+xattr -dr com.apple.quarantine /Applications/Keyway.app
+```
 
-  …or from Terminal:
+Then double-click to launch.
 
-  ```sh
-  xattr -dr com.apple.quarantine /Applications/Keyway.app
-  ```
+Or do it through the UI: double-click `Keyway.app` (you'll get a "could not
+verify" dialog — click **Done**, *not* Move to Trash), then go to **System
+Settings → Privacy & Security**, scroll to the **Security** section, and click
+**Open Anyway** next to the Keyway notice. Confirm with Touch ID, then open the
+app again.
+
+> On macOS 15 (Sequoia) and later, the old **right-click → Open** shortcut no
+> longer bypasses Gatekeeper for un-notarized apps — use one of the two methods
+> above.
 
 Then launch it and grant the two permissions below. Because the build isn't
 signed with a stable Developer ID, a future version may ask you to re-grant
