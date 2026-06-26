@@ -224,6 +224,19 @@ Load `prototype/extension/` as an unpacked extension (Chrome:
 native-messaging host with the provided script. Without it, web pages still
 work through the vision fallback, just less precisely.
 
+### Uninstall
+
+```sh
+cd prototype
+./uninstall.sh
+```
+
+It quits Keyway, restores Caps Lock, and removes the app plus everything it
+leaves behind (caches, preferences, the native-messaging host, and the
+permission grants). If you only have the downloaded `.app`, drag it to the
+Trash, then run `hidutil property --set '{"UserKeyMapping":[]}'` to restore
+Caps Lock if it's still acting as the trigger.
+
 ## Requirements
 
 - macOS 13 (Ventura) or later, Apple Silicon
