@@ -153,11 +153,36 @@ enum OmniParserModel {
     /// re-compile next launch). Production builds could pre-compile at
     /// build time via `xcrun coremlcompiler`, but for SwiftPM this
     /// runtime path is the simpler shape.
+    /// Locate `icon_detect.mlpackage` without going through SwiftPM's
+    /// `Bundle.module`. The generated accessor for an `executableTarget`
+    /// resolves the resource bundle at `Bundle.main.bundleURL/<name>.bundle`,
+    /// which for a packaged `.app` is the `.app` ROOT — and putting resources
+    /// at the root breaks codesign's resource sealing. So we look in the
+    /// places where the bundle actually lives and is sealed:
+    ///   - packaged `.app`: `Contents/Resources/Keyway_Keyway.bundle`
+    ///     (= `Bundle.main.resourceURL`)
+    ///   - `swift run` dev layout: next to the executable
+    ///     (= `Bundle.main.bundleURL`)
+    /// Touching `Bundle.module` at all would fatal-error in the packaged app,
+    /// so we deliberately never reference it.
+    private static func locateModelPackage() -> URL? {
+        let bundleName = "Keyway_Keyway.bundle"
+        let resource = "icon_detect.mlpackage"
+        var roots: [URL] = []
+        if let resURL = Bundle.main.resourceURL { roots.append(resURL) }
+        roots.append(Bundle.main.bundleURL)
+        let fm = FileManager.default
+        for root in roots {
+            let url = root.appendingPathComponent(bundleName)
+                          .appendingPathComponent(resource)
+            if fm.fileExists(atPath: url.path) { return url }
+        }
+        return nil
+    }
+
     private static func loadModel() throws -> VNCoreMLModel {
         if let cached = cachedModel { return cached }
-        guard let mlpackageURL = Bundle.module.url(
-            forResource: "icon_detect", withExtension: "mlpackage"
-        ) else {
+        guard let mlpackageURL = locateModelPackage() else {
             throw ModelError.modelNotFound
         }
 

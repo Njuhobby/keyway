@@ -26,7 +26,10 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 cp "$BIN" "$APP/Contents/MacOS/Keyway"
 cp "$ICNS" "$APP/Contents/Resources/Keyway.icns"
-# Bundle.module resolves against Contents/Resources in a packaged app.
+# The CoreML resource bundle goes in Contents/Resources so codesign seals it
+# cleanly. OmniParserModel.locateModelPackage() finds it there via
+# Bundle.main.resourceURL (we deliberately avoid SwiftPM's Bundle.module — its
+# executableTarget accessor resolves to the .app root, which breaks signing).
 [ -d "$RESBUNDLE" ] && cp -R "$RESBUNDLE" "$APP/Contents/Resources/"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
