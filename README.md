@@ -186,9 +186,10 @@ app again.
 > longer bypasses Gatekeeper for un-notarized apps — use one of the two methods
 > above.
 
-Then launch it and grant the two permissions below. Because the build isn't
-signed with a stable Developer ID, a future version may ask you to re-grant
-those permissions.
+On first launch a **Keyway Setup** window walks you through the two permissions
+below: click **Open Settings** on each row to grant it, then **Restart Keyway**
+to apply them in one step. Because the build isn't signed with a stable
+Developer ID, a future version may ask you to re-grant.
 
 ### Build from source
 
@@ -200,9 +201,9 @@ cd prototype
 ```
 
 A key icon appears in the menu bar (a red `!` badge next to it means a
-required permission is missing). Press **Caps Lock** to enter hint mode. On
-first launch macOS prompts for the two permissions — enable Keyway in
-**System Settings → Privacy & Security** for both, fully quit, and rerun.
+required permission is missing). On first launch the **Keyway Setup** window
+guides you through the two permissions — grant each, click **Restart Keyway**,
+then press **Caps Lock** to enter hint mode.
 
 To produce a distributable `.app` and a release zip:
 
