@@ -23,8 +23,7 @@ can't see.
 ---
 
 Press **Caps Lock**. Every clickable thing on screen sprouts a short letter
-label. Type the label — it clicks. That part isn't new. Three things make
-Keyway different from other keyboard-clickers:
+label. Type the label — it clicks. That part isn't new. What sets Keyway apart:
 
 - **Coverage.** It finds targets not only in native Cocoa apps (via the
   Accessibility API) but also inside **Electron apps, web views, and arbitrary
@@ -33,14 +32,20 @@ Keyway different from other keyboard-clickers:
   "AX black hole" (Slack, VS Code, Discord, anything Electron) is exactly
   where keyboard-driven clicking usually falls apart. Keyway covers it.
 
+- **It's built around modes, not one trick.** Hint-clicking is just the
+  default. A Caps Lock chord drops you straight into another keyboard mode —
+  **scroll**, **window move**, **window resize**, **drag**, **text search** —
+  each a focused interaction sharing the same `hjkl` muscle memory. Modes are
+  the core design, and the system is extensible: new capability is a new mode,
+  not a new app, so the keyboard-driven surface keeps growing. That's what
+  makes Keyway open-ended rather than a single party trick.
+
 - **It drives the real cursor, not just clicks.** Labels are the fast path;
   when nothing is labeled exactly where you want, you fall back to *moving the
   pointer itself* — `hjkl` to nudge it (Shift to fly, Option for
   pixel-precision), `'`+label to warp it onto a target without clicking, then
-  `c` / `cc` / `Shift+c` for left / double / right click. Plus a **drag** mode
-  (grab, move, drop) and a **search** mode (jump to any visible text by typing
-  it). Most hint tools can only click what they can label. Keyway can also
-  just take the wheel.
+  `c` / `cc` / `Shift+c` for left / double / right click. Most hint tools can
+  only click what they can label. Keyway can also just take the wheel.
 
 - **Sticky, on demand.** Tap **Caps Lock** again to keep hinting click after
   click; tap once more to stop. No preconfigured "chain" mode to set up
@@ -48,34 +53,35 @@ Keyway different from other keyboard-clickers:
 
 ## See it in action
 
-> 🎬 _More clips are being added. The first two are already shown in the hero
-> clip above._
+> 🎬 _More clips are being added. The first two are already shown in the demo
+> at the top of this page._
 
 ### 1 · Hint mode — the core loop
 Caps Lock in a native app → labels bloom on every clickable thing → type two
-keys → it clicks (left, or right-click with a modifier). _(See the hero above.)_
+keys → it clicks (left, or right-click with a modifier). _(See the demo at the
+top of this page.)_
 
-### 2 · Sticky, on demand ⭐
+### 2 · Sticky, on demand
 Tap **Caps Lock** again to keep hinting click after click; it re-hints on its own
 as content loads or you switch apps / Spaces. Tap once more to stop. No "chain"
 mode to preconfigure the way Homerow needs — you flip it live. _(Also in the
-hero above.)_
+demo at the top.)_
 
-### 3 · Drive the real cursor ⭐
+### 3 · Drive the real cursor
 <!-- <img src="docs/demos/cursor.gif" width="760" alt="Cursor control"> -->
 No label exactly where you need it? Move the pointer yourself: `'`+label warps
 it onto a target without clicking, `hjkl` nudges it (**Shift** to fly,
 **Option** for pixel-precision), then `c` / `cc` / `Shift+c` for left / double /
 right click. The fallback hint-only tools don't have.
 
-### 4 · Drag mode ⭐
+### 4 · Drag mode
 <img src="docs/demos/drag.gif" width="760" alt="Drag mode">
 
 From TAP (or TAP sticky), press `v` to start a drag — `mouseDown` at the cursor,
 `hjkl` to move, drop to release. In the clip the drag selects a paragraph of
 text so it can be copied and pasted — a real press-drag-release, no mouse.
 
-### 5 · Search mode ⭐
+### 5 · Search mode
 <img src="docs/demos/search.gif" width="760" alt="Search mode">
 
 From TAP (or TAP sticky), press `/` and type any visible text — Keyway OCRs the
