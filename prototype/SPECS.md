@@ -286,25 +286,7 @@ Per-subsystem details, design trade-offs, and war stories live under
 
 By priority:
 
-1. **Keyboard layout** — `KeyCode.swift` is ANSI physical positions. Letter
-   hints are all wrong on non-QWERTY. Migration path: use `UCKeyTranslate` /
-   `CGEventKeyboardGetUnicodeString` to map keyCode + flags to a character,
-   then match.
-2. **Browser HINT (Chrome) — P0-P4 done**. Extension (detector.js rewriting
-   Vimium's rules, iframe coordination via a postMessage chain, shadow-DOM
-   recursion) + long-lived native messaging (background SW + bridge CLI) +
-   `BrowserProvider` on the Keyway side wired into `HintMode`. Supporting
-   patches: multi-profile / multi-browser `i_am_active` routing; the
-   `tab_changed` signal fixing the same-window tab-switch blind spot;
-   MutationObserver-based `page_changed` for async loads; the
-   `navigation_complete` signal for refresh after a full-page navigation;
-   anchor-link commit skipping the 100ms post-commit rehint; the SW
-   proactively injecting into open tabs on startup; **`/`-search using a DOM
-   TreeWalker instead of OCR in browsers** (~10× faster); **app-switch cursor
-   park using DOM `activeElement` instead of AX**. **The browser path is
-   self-contained, no fallback to OP.** **P5 Safari + Web Store / App Store
-   submission pending.** See [`specs/browser-support-design.md`](specs/browser-support-design.md).
-3. **Electron / AX-bad app coverage** — **OmniParser vision path implemented
+1. **Electron / AX-bad app coverage** — **OmniParser vision path implemented
    (P5-P6)**. Background: what the Chromium bridge exposes depends on the
    app's ARIA hygiene; bad ones (WeChat, domestic SaaS) are a sea of AXGroups
    with no actions; and framework ≠ AX quality (WeChat is native AppKit but
@@ -313,10 +295,9 @@ By priority:
    `AppRegistry.AX_FOCUSED_WHITELIST` goes through OP (ScreenCaptureKit
    capture + CoreML YOLO + baseline filtering + OCR click-refine), ~95ms, no
    slower than an AX walk. Remaining: P7 data tuning (confidence threshold /
-   whitelist edits), P8 release packaging, the per-app correction layer
-   (template matching, P8+). See
+   whitelist edits) and the per-app correction layer (template matching). See
    [`specs/omniparser-fallback-design.md`](specs/omniparser-fallback-design.md).
-4. **Scan spikes during an app's AX cleanup** — closing a dialog / sheet lands
+2. **Scan spikes during an app's AX cleanup** — closing a dialog / sheet lands
    a sticky rescan inside the target app's ~500ms cleanup window, where
    per-IPC latency rises from ~0.2ms to ~40ms. IPC count is already at its
    floor of 13 (cache + walkMenuBar in tandem), so optimization room on this
@@ -327,11 +308,11 @@ By priority:
    still return candidates (just slowly), and only whitelisted apps take the
    AX walk. See `specs/hint-discovery.md` §5 +
    [`specs/omniparser-fallback-design.md`](specs/omniparser-fallback-design.md) §4.5.
-5. **New modes / sub-states** — the `Mode` enum already has extension points:
+3. **New modes / sub-states** — the `Mode` enum already has extension points:
    select-text, a right-click command mode (WINDOW resize `specs/modes.md` §7
    / WINDOW MOVE §8 are done; TAP's internal sub-states DRAG `specs/modes.md`
    §6 / `/`-search §6.5 are done). The wiring path is in `specs/modes.md` §12.
-6. **`/`-search supporting Chinese input** — the current search-typing
+4. **`/`-search supporting Chinese input** — the current search-typing
    sub-state only accepts ASCII (`VimSession.searchTypingChar` whitelists a-z
    + 0-9 + space). Chinese pages **can be OCR'd** (`OCRRefiner.recognizeText`
    is configured for zh-Hans / zh-Hant) but **can't be typed into**. Root
@@ -349,26 +330,26 @@ By priority:
 
    English-only is fine for the MVP; when building this, first evaluate
    whether (a) visually conflicts with the existing SearchOverlay.
-7. **Label-space collision across hint sources** — when the focused app has
+5. **Label-space collision across hint sources** — when the focused app has
    many elements it eats the whole letter pool, pushing menu extras to
    `lj/lk/ll`. Candidate fixes: give menu extras a separate prefix (e.g. `;a`,
    `;s` …) or a separate letter pool.
-8. **Dock separator / Recents placeholder filtering** — the Dock currently
+6. **Dock separator / Recents placeholder filtering** — the Dock currently
    collects every `AXDockItem`, including separators. Low-value hints waste
    labels.
-9. **Settings config panel** — a menu-bar "Settings…" (Cmd+,). v1 covers
+7. **Settings config panel** — a menu-bar "Settings…" (Cmd+,). v1 covers
    value-type settings (slow/medium/fast for cursor/scroll/window speed,
    double-click threshold, jump distance) + theme color + label font size +
    trigger-key presets + launch-at-login + sticky default. Stored in
    UserDefaults (defaults = the current hardcoded constants, so unconfigured
    behavior is unchanged), live-applied. The `private let normalStep`-style
    constants in each controller switch to reading `Settings.shared`. Custom
-   keymaps deferred to v2 (the non-QWERTY layout rebinding refactor, see #1).
+   keymaps deferred to v2 (the non-QWERTY layout rebinding refactor).
    See [`specs/settings-design.md`](specs/settings-design.md).
-10. **Rename** — the name "Keyway" is already taken by another project; a
+8. **Rename** — the name "Keyway" is already taken by another project; a
     unique name should be settled before a wider release (repo / domain /
     searchability, not drowned out by a generic word).
-11. **Packaging & distribution** — code signing + notarization (Developer ID,
+9. **Packaging & distribution** — code signing + notarization (Developer ID,
     to avoid Gatekeeper blocking an unsigned app), shipped as a `.dmg` or a
     Homebrew cask; optionally a simple landing page with a **demo video**.
     Notarization / Developer ID signing requires the Apple Developer Program
