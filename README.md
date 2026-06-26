@@ -66,10 +66,13 @@ demo at the top.)_
 
 ### 3 · Drive the real cursor
 <img src="docs/demos/cursor.gif" width="760" alt="Cursor control">
+
 No label exactly where you need it? Move the pointer yourself: `'`+label warps
 it onto a target without clicking, `hjkl` nudges it (**Shift** to fly,
-**Option** for pixel-precision), then `c` / `cc` / `Shift+c` for left / double /
-right click. The fallback hint-only tools don't have.
+**Option** for pixel-precision), and **double-tapping** a direction (`hh` / `jj`
+/ `kk` / `ll`) jumps it half a screen that way — **Shift + double-tap** jumps a
+whole screen, so you cross big distances in one go. Then `c` / `cc` / `Shift+c`
+for left / double / right click. The fallback hint-only tools don't have.
 
 ### 4 · Drag mode
 From TAP (or TAP sticky), press `v` to start a drag — `mouseDown` at the cursor,
@@ -132,31 +135,29 @@ Lock again.
 | 🧲 **Sticky, on demand** | Tap **Caps Lock** again to keep hinting click after click — and it auto re-hints as content loads or you switch apps/Spaces; tap once more to stop. No "chain" mode to preconfigure (Homerow needs one). |
 | 🔒 **Local-only** | Runs entirely on-device. No telemetry, no network calls beyond the local app↔extension socket. |
 
-## How it works
+## Architecture
 
-Three hint sources, merged into one overlay:
+The short version: hints come from three sources merged into one overlay — an
+**Accessibility walk** for native apps, an **on-device vision model** for the
+AX black holes (Electron / WebViews), and a **browser extension** that reads
+the DOM directly. The mode/sub-state engine, the event pipeline, the
+settle-detection that times rehints to the actual frame, the per-app
+correction layer, the native-messaging bridge — each is its own subsystem with
+its own trade-offs.
 
-1. **Accessibility walk** — for native macOS apps, walk the AX tree of the
-   focused window and collect clickable elements. Fast and pixel-perfect.
-2. **On-device vision fallback** — for AX-black-hole apps (Electron / web
-   views), capture the focused window and run a CoreML icon-detection model
-   to find clickable regions from pixels alone.
-3. **Browser extension** — for Chrome/Firefox, a content script runs a
-   Vimium-derived detector over the DOM and streams hint rects to the app
-   over a native-messaging bridge. Handles iframes and cross-Space follow.
+Rather than summarize them badly here, the design is written up in full —
+[`prototype/SPECS.md`](prototype/SPECS.md) is the entry point, with per-subsystem
+deep-dives (and the war stories behind them) in
+[`prototype/specs/`](prototype/specs/):
 
-A couple of pieces that were interesting to build (deep-dives in
-[`prototype/specs/`](prototype/specs/)):
-
-- **Cheap "wait for the screen to settle" detection.** Many rehints (after a
-  click, an app switch, a cross-Space slide) need to wait until the new
-  content has actually rendered — but there's no event for that. Instead of
-  guessing a fixed delay, Keyway polls a tiny (64×36) grayscale fingerprint
-  of the window and rehints the moment two frames match. One scan, timed to
-  the content, not to a guess.
-- **Caps Lock as the trigger** without a kext: `hidutil` remaps Caps Lock to
-  F19 at the HID layer (macOS doesn't deliver Caps Lock as a normal keyDown),
-  applied on launch and reverted on quit.
+| | |
+|---|---|
+| [`event-pipeline.md`](prototype/specs/event-pipeline.md) | The CGEventTap pipeline and how keys are consumed per mode |
+| [`hint-discovery.md`](prototype/specs/hint-discovery.md) · [`hint-rendering.md`](prototype/specs/hint-rendering.md) | Finding targets, and drawing labels across Spaces |
+| [`omniparser-fallback-design.md`](prototype/specs/omniparser-fallback-design.md) | The vision fallback for AX-invisible apps |
+| [`browser-support-design.md`](prototype/specs/browser-support-design.md) | The DOM extension and native-messaging bridge |
+| [`modes.md`](prototype/specs/modes.md) · [`scroll-mode-design.md`](prototype/specs/scroll-mode-design.md) | The mode / sub-state model and per-mode behavior |
+| [`per-app-correction-design.md`](prototype/specs/per-app-correction-design.md) · [`settings-design.md`](prototype/specs/settings-design.md) | Per-app offset correction and settings |
 
 ## Install
 
