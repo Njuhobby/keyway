@@ -48,19 +48,18 @@ Keyway different from other keyboard-clickers:
 
 ## See it in action
 
-> 🎬 _Demos are being added as they're recorded. Sections without a clip yet
-> describe exactly what it will show._
+> 🎬 _More clips are being added. The first two are already shown in the hero
+> clip above._
 
 ### 1 · Hint mode — the core loop
-<!-- <img src="docs/demos/hint-mode.gif" width="760" alt="Hint mode"> -->
 Caps Lock in a native app → labels bloom on every clickable thing → type two
-keys → it clicks (left, or right-click with a modifier).
+keys → it clicks (left, or right-click with a modifier). _(See the hero above.)_
 
-### 2 · The Electron black hole ⭐
-<!-- <img src="docs/demos/electron.gif" width="760" alt="Electron coverage"> -->
-VS Code, Discord, Obsidian — Electron apps the Accessibility API can barely
-see, yet every clickable region still gets a label, from the on-device vision
-model. This is the wedge.
+### 2 · Sticky, on demand ⭐
+Tap **Caps Lock** again to keep hinting click after click; it re-hints on its own
+as content loads or you switch apps / Spaces. Tap once more to stop. No "chain"
+mode to preconfigure the way Homerow needs — you flip it live. _(Also in the
+hero above.)_
 
 ### 3 · Drive the real cursor ⭐
 <!-- <img src="docs/demos/cursor.gif" width="760" alt="Cursor control"> -->
@@ -82,13 +81,7 @@ text so it can be copied and pasted — a real press-drag-release, no mouse.
 From TAP (or TAP sticky), press `/` and type any visible text — Keyway OCRs the
 focused window, matches it, and labels the hits so you jump straight to one.
 
-### 6 · Sticky, on demand ⭐
-<!-- <img src="docs/demos/sticky.gif" width="760" alt="Sticky mode"> -->
-Tap **Caps Lock** again to keep hinting click after click; it re-hints on its own
-as content loads or you switch apps / Spaces. Tap once more to stop. No "chain"
-mode to preconfigure the way Homerow needs — you flip it live.
-
-### 7 · Scroll mode
+### 6 · Scroll mode
 <img src="docs/demos/scroll.gif" width="760" alt="Scroll mode">
 
 **Caps Lock + d** enters scroll mode and outlines every scrollable area with a
@@ -99,7 +92,7 @@ Web pages are special: with the extension, `d` / `u` / `gg` / `G` scroll the
 page **directly, no mode to enter** — Vimium-style. (Caps Lock + d is disabled
 there, since modeless scrolling already covers it.)
 
-### 8 · Move & resize windows
+### 7 · Move & resize windows
 <img src="docs/demos/window.gif" width="760" alt="Window move and resize">
 
 **Caps Lock + w** enters resize, **Caps Lock + m** enters move. In resize, grow
@@ -107,7 +100,7 @@ any edge with `hjkl` (double-tap an axis to pull the opposite edge inward); in
 move, pan the whole window with `hjkl`. Hold **Shift** to fly, **Option** for
 fine steps — all from the keyboard, no mouse.
 
-### 9 · Web pages, precisely (Chrome / Firefox)
+### 8 · Web pages, precisely (Chrome / Firefox)
 <img src="docs/demos/web.gif" width="760" alt="Browser extension hints">
 
 With the companion extension, hints come straight from the DOM — pixel-perfect
