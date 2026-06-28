@@ -312,6 +312,11 @@ processed in memory and not written to disk (outside an opt-in debug flag).
 is rough, unsigned, and the code lives under `prototype/`. Expect sharp
 edges. Built in the open to share the approach.
 
+Hit a bug? Keyway writes a log to `~/Library/Logs/Keyway/keyway.log` (the
+previous run is kept as `keyway.log.1`). Attach it to an
+[issue](https://github.com/Njuhobby/keyway/issues) — that's the fastest way for
+me to see what happened.
+
 ## License
 
 **[AGPL-3.0-or-later](LICENSE).** Keyway bundles an icon-detection model

@@ -35,6 +35,7 @@ paths=(
   "$HOME/Library/Application Support/Keyway"
   "$HOME/Library/Preferences/Keyway.plist"
   "$HOME/Library/Preferences/$BUNDLE_ID.plist"
+  "$HOME/Library/Logs/Keyway"
 )
 for p in "${paths[@]}"; do
   if [ -e "$p" ]; then rm -rf "$p" && say "removed $p"; fi
