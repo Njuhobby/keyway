@@ -2703,6 +2703,24 @@ final class VimSession {
         return true
     }
 
+    /// Union of all active displays' bounds, in CG coords (top-left
+    /// origin). Used to clamp the cursor jump so it can cross from one
+    /// display into an adjacent one — clamping to a single screen would
+    /// stop the jump dead at the shared border. Falls back to the main
+    /// display if the active-display list can't be read.
+    private static func cgUnionBoundsAllDisplays() -> CGRect {
+        var count: UInt32 = 0
+        CGGetActiveDisplayList(0, nil, &count)
+        guard count > 0 else { return CGDisplayBounds(CGMainDisplayID()) }
+        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        CGGetActiveDisplayList(count, &ids, &count)
+        var union = CGRect.null
+        for id in ids {
+            union = union.isNull ? CGDisplayBounds(id) : union.union(CGDisplayBounds(id))
+        }
+        return union.isNull ? CGDisplayBounds(CGMainDisplayID()) : union
+    }
+
     /// Return the CG-coord rect of the display containing `cursor`.
     /// Uses `CGDisplayBounds` (CG space, top-left origin) instead of
     /// `NSScreen.frame` (NS space, bottom-left origin), so multi-
@@ -2749,18 +2767,26 @@ final class VimSession {
         // pulled cursor across screens to the main display.
         // CGDisplayBounds returns CG-space rect directly, no
         // conversion needed.
-        let bounds = Self.cgBoundsForCursorScreen(cursor: current)
+        // Jump DISTANCE is one screen-fraction of the display the cursor
+        // is currently on (so a jump feels the same regardless of which
+        // monitor you're on).
+        let screen = Self.cgBoundsForCursorScreen(cursor: current)
         var next = current
         switch direction {
-        case .left:  next.x -= bounds.width  * fraction
-        case .right: next.x += bounds.width  * fraction
-        case .up:    next.y -= bounds.height * fraction
-        case .down:  next.y += bounds.height * fraction
+        case .left:  next.x -= screen.width  * fraction
+        case .right: next.x += screen.width  * fraction
+        case .up:    next.y -= screen.height * fraction
+        case .down:  next.y += screen.height * fraction
         }
-        // Clamp inside this screen's CG bounds with a 3pt inset so
-        // the cursor never lands on the literal edge pixel.
-        next.x = max(bounds.minX + 3, min(bounds.maxX - 3, next.x))
-        next.y = max(bounds.minY + 3, min(bounds.maxY - 3, next.y))
+        // Clamp to the union of ALL displays (not the current screen), so
+        // the jump can carry the cursor across the border into an adjacent
+        // monitor. The 3pt inset only matters at the true outer edge of the
+        // whole desktop; internal screen-to-screen borders are crossed
+        // freely. If `next` lands in a dead zone of an L-shaped desktop,
+        // macOS places the cursor at the nearest valid display position.
+        let union = Self.cgUnionBoundsAllDisplays()
+        next.x = max(union.minX + 3, min(union.maxX - 3, next.x))
+        next.y = max(union.minY + 3, min(union.maxY - 3, next.y))
 
         // Edge-case: cursor was already past the inset on this axis,
         // so the clamp pulled `next` back toward (or past) `current`.
